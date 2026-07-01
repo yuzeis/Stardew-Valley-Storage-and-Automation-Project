@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>SVSAP</AssemblyName>
+    <RootNamespace>SVSAP</RootNamespace>
+    <Version>1.1</Version>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <FileVersion>1.1.0.0</FileVersion>
+    <InformationalVersion>1.1-Gnadenempfang</InformationalVersion>
+    <EnableModDeploy>false</EnableModDeploy>
+    <IgnoreModFilePaths>assets/items.png, assets/big_craftables.png</IgnoreModFilePaths>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Pathoschild.Stardew.ModBuildConfig" Version="4.4.0" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="backups\**\*.cs" />
+    <None Remove="backups\**" />
+    <None Remove="assets\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="assets\items.png" LogicalName="SVSAP.Assets.Items.png" />
+    <EmbeddedResource Include="assets\big_craftables.png" LogicalName="SVSAP.Assets.BigCraftables.png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="manifest.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="config.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Lang\**\*.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

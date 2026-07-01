@@ -1,0 +1,10 @@
+bin/
+obj/
+*.user
+*.suo
+.vs/
+backups/
+.codex_task_backups/
+logs/
+DetailedGameplayLogs/
+*.log
