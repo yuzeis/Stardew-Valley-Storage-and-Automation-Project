@@ -19,6 +19,11 @@
   "gmcm.detailedLogs": "详细玩法日志",
   "gmcm.debugLogs": "调试交易日志",
   "gmcm.casualCosts": "简化配方成本",
+  "gmcm.recipeCostMode.name": "材料消耗",
+  "gmcm.recipeCostMode.tooltip": "正常为设计配方；简化约减半材料；调试解除技能限制并让 SVSAP 配方 0 消耗。",
+  "gmcm.recipeCostMode.Normal": "正常",
+  "gmcm.recipeCostMode.Casual": "简化",
+  "gmcm.recipeCostMode.Debug": "调试",
 
   "ui.search": "搜索...",
 

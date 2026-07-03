@@ -1,4 +1,8 @@
+using System.Globalization;
+using Koizumi.SVSAP.Api;
+using Microsoft.Xna.Framework;
 using SVSAP.Content;
+using SVSAP.Api;
 using SVSAP.Integrations;
 using SVSAP.Models;
 using SVSAP.Services;
@@ -20,13 +24,17 @@ public sealed class ModEntry : Mod
     private TransferBusService transferBusService = null!;
     private PatternProviderService patternProviderService = null!;
     private PatternExecutionService patternExecutionService = null!;
+#if DEBUG
     private RuntimeSelfTestService runtimeSelfTestService = null!;
     private RouteSVSAPE2EService routeSVSAPE2EService = null!;
+#endif
+    private SvsapApi? api;
     private readonly HashSet<long> warnedMissingSVSAPPeers = new();
 
     public override void Entry(IModHelper helper)
     {
         this.config = helper.ReadConfig<ModConfig>();
+        this.NormalizeConfig();
         this.config.Language = ModText.NormalizeLanguage(this.config.Language);
         ModText.Load(helper, this.config.Language, this.Monitor);
 
@@ -64,6 +72,11 @@ public sealed class ModEntry : Mod
             helper.Multiplayer,
             this.ModManifest,
             this.Monitor);
+        this.api = new SvsapApi(
+            this.networkRepository,
+            inventoryTransactionService,
+            () => this.config);
+#if DEBUG
         this.runtimeSelfTestService = new RuntimeSelfTestService(
             this.networkRepository,
             inventoryTransactionService,
@@ -72,6 +85,7 @@ public sealed class ModEntry : Mod
             this.transferBusService,
             this.patternExecutionService,
             this.networkInteractionService,
+            craftingRecipeService,
             () => this.config,
             this.Monitor);
         this.routeSVSAPE2EService = new RouteSVSAPE2EService(
@@ -80,6 +94,7 @@ public sealed class ModEntry : Mod
             this.networkRepository,
             this.networkInteractionService,
             this.storageCellInitializer);
+#endif
 
         helper.Events.Content.AssetRequested += contentInjector.OnAssetRequested;
         helper.Events.GameLoop.GameLaunched += this.OnGameLaunched;
@@ -100,20 +115,43 @@ public sealed class ModEntry : Mod
             "svsap_m1_ids",
             "列出 Stardew Valley Storage and Automation Project M1 物品 ID 和存储元件字节容量。",
             this.CommandListM1Ids);
+#if DEBUG
         helper.ConsoleCommands.Add(
             "svsap_selftest",
             "运行 Stardew Valley Storage and Automation Project 运行时自测：存储元件、事务恢复、远程缓存、保留来源产物和 CPU 槽位预留。",
             this.runtimeSelfTestService.RunCommand);
+#endif
+        helper.ConsoleCommands.Add(
+            "svsap_api_dump",
+            "输出 SVSAPME 对接用 SVSAP API 版本、modData key 和配置快照。",
+            this.CommandApiDump);
+        helper.ConsoleCommands.Add(
+            "svsap_endpoint_probe",
+            "探测当前面对格或指定 x y 格子的 SVSAP 网络端点绑定状态。",
+            this.CommandEndpointProbe);
+        helper.ConsoleCommands.Add(
+            "svsap_api_selftest",
+            "运行 SVSAPME 对接用 SVSAP API 合约自测；可选参数 x y 用于验证一个已绑定端点。",
+            this.CommandApiSelfTest);
 
+#if DEBUG
         this.routeSVSAPE2EService.Start();
+#endif
         this.Monitor.Log("Stardew Valley Storage and Automation Project loaded. Storage network, digital cells, transfer buses, processing pipelines, and autocrafting services are active.", LogLevel.Info);
+    }
+
+    public override object? GetApi()
+    {
+        return this.api;
     }
 
     private void OnGameLaunched(object? sender, GameLaunchedEventArgs e)
     {
         this.RegisterGmcm();
+#if DEBUG
         if (string.Equals(Environment.GetEnvironmentVariable("STARDEW_SVSAP_RUN_SELFTEST"), "1", StringComparison.Ordinal))
             this.runtimeSelfTestService.RunCommand("svsap_selftest", Array.Empty<string>());
+#endif
     }
 
     private void OnSaveLoaded(object? sender, SaveLoadedEventArgs e)
@@ -124,7 +162,7 @@ public sealed class ModEntry : Mod
         if (Game1.player is not null)
         {
             this.storageCellInitializer.InitializeInventory(Game1.player.Items);
-            SyncSVSAPCraftingRecipeUnlocks(Game1.player);
+            SyncSVSAPCraftingRecipeUnlocks(Game1.player, this.config);
         }
 
         if (!Context.IsMainPlayer)
@@ -141,7 +179,7 @@ public sealed class ModEntry : Mod
     private void OnDayStarted(object? sender, DayStartedEventArgs e)
     {
         if (Game1.player is not null)
-            SyncSVSAPCraftingRecipeUnlocks(Game1.player);
+            SyncSVSAPCraftingRecipeUnlocks(Game1.player, this.config);
     }
 
     private void OnSaving(object? sender, SavingEventArgs e)
@@ -157,8 +195,16 @@ public sealed class ModEntry : Mod
         this.storageCellInitializer.InitializeInventory(e.Player.Items);
     }
 
-    private static void SyncSVSAPCraftingRecipeUnlocks(Farmer player)
+    private static void SyncSVSAPCraftingRecipeUnlocks(Farmer player, ModConfig config)
     {
+        if (config.IsDebugRecipeCostMode())
+        {
+            foreach (var recipeName in ModItemCatalog.CraftingRecipes.Keys)
+                player.craftingRecipes.Remove(recipeName);
+
+            return;
+        }
+
         foreach (var pair in ModItemCatalog.CraftingRecipeMiningLevels)
         {
             if (player.MiningLevel >= pair.Value)
@@ -323,12 +369,15 @@ public sealed class ModEntry : Mod
             reset: () => this.config = new ModConfig(),
             save: () =>
             {
+                this.NormalizeConfig();
                 this.config.Language = ModText.NormalizeLanguage(this.config.Language);
                 ModText.Load(this.Helper, this.config.Language, this.Monitor);
                 this.Helper.WriteConfig(this.config);
                 this.Helper.GameContent.InvalidateCache("Data/Objects");
                 this.Helper.GameContent.InvalidateCache("Data/BigCraftables");
                 this.Helper.GameContent.InvalidateCache("Data/CraftingRecipes");
+                if (Context.IsWorldReady && Game1.player is not null)
+                    SyncSVSAPCraftingRecipeUnlocks(Game1.player, this.config);
                 if (Context.IsWorldReady && Context.IsMainPlayer)
                     this.networkInteractionService.RefreshEndpointConnectivity();
             });
@@ -358,7 +407,35 @@ public sealed class ModEntry : Mod
         gmcm.AddNumberOption(this.ModManifest, () => this.config.MaxOperationsPerTick, value => this.config.MaxOperationsPerTick = value, () => ModText.Get("gmcm.maxOps"), min: 1, max: 200);
         gmcm.AddBoolOption(this.ModManifest, () => this.config.DetailedGameplayLogs, value => this.config.DetailedGameplayLogs = value, () => ModText.Get("gmcm.detailedLogs"));
         gmcm.AddBoolOption(this.ModManifest, () => this.config.DebugTransactionLogs, value => this.config.DebugTransactionLogs = value, () => ModText.Get("gmcm.debugLogs"));
-        gmcm.AddBoolOption(this.ModManifest, () => this.config.CasualRecipeCosts, value => this.config.CasualRecipeCosts = value, () => ModText.Get("gmcm.casualCosts"));
+        gmcm.AddTextOption(
+            this.ModManifest,
+            () => this.config.GetRecipeCostMode(),
+            value =>
+            {
+                this.config.RecipeCostMode = RecipeCostModes.Normalize(value);
+                this.config.CasualRecipeCosts = this.config.RecipeCostMode == RecipeCostModes.Casual;
+            },
+            () => ModText.Get("gmcm.recipeCostMode.name"),
+            () => ModText.Get("gmcm.recipeCostMode.tooltip"),
+            allowedValues: RecipeCostModes.All,
+            formatAllowedValue: FormatRecipeCostMode);
+    }
+
+    private void NormalizeConfig()
+    {
+        this.config.ReserveFastSlots = Math.Clamp(this.config.ReserveFastSlots, 0, 16);
+        this.config.LongJobThresholdMinutes = Math.Clamp(this.config.LongJobThresholdMinutes, 0, 10000);
+        this.config.CaskTargetQuality = NormalizeCaskTargetQuality(this.config.CaskTargetQuality);
+        this.config.MaxEndpointsPerNetwork = Math.Clamp(this.config.MaxEndpointsPerNetwork, 1, 1000);
+        this.config.MaxStorageCellsPerNetwork = Math.Clamp(this.config.MaxStorageCellsPerNetwork, 1, 256);
+        this.config.MaxItemTypesPerStorageCell = Math.Clamp(this.config.MaxItemTypesPerStorageCell, 1, 63);
+        this.config.MaxOperationsPerTick = Math.Clamp(this.config.MaxOperationsPerTick, 1, 200);
+        this.config.NormalizeRecipeCostMode();
+    }
+
+    private static string FormatRecipeCostMode(string value)
+    {
+        return ModText.Get("gmcm.recipeCostMode." + RecipeCostModes.Normalize(value));
     }
 
     private void CommandListM1Ids(string command, string[] args)
@@ -371,6 +448,233 @@ public sealed class ModEntry : Mod
 
         foreach (var tier in StorageCellTierInfo.All)
             this.Monitor.Log($"{tier.DisplayName}: bytes={tier.Capacity:N0}, singleTypeItems={StorageCellTierInfo.GetSingleTypeItemLimit(tier.Tier):N0}, typeLimit=63", LogLevel.Info);
+    }
+
+    private void CommandApiDump(string command, string[] args)
+    {
+        var api = this.api;
+        if (api is null)
+        {
+            this.Monitor.Log("SVSAP_API_DUMP_FAIL API 尚未初始化。", LogLevel.Error);
+            return;
+        }
+
+        var snapshot = api.GetConfigSnapshot();
+        this.Monitor.Log(
+            $"SVSAP_API_DUMP ApiVersion={api.ApiVersion}; IsHostAuthority={api.IsHostAuthority}; NetworkIdKey={api.NetworkIdModDataKey}; EndpointIdKey={api.EndpointIdModDataKey}; EnableSimpleWirelessWithinFarm={snapshot.EnableSimpleWirelessWithinFarm}; RequireCables={snapshot.RequireCables}; MaxEndpointsPerNetwork={snapshot.MaxEndpointsPerNetwork}; MaxOperationsPerTick={snapshot.MaxOperationsPerTick}; LoadedNetworks={this.networkRepository.Data.Networks.Count:N0}",
+            LogLevel.Info);
+    }
+
+    private void CommandEndpointProbe(string command, string[] args)
+    {
+        var api = this.api;
+        if (api is null)
+        {
+            this.Monitor.Log("SVSAP_ENDPOINT_PROBE_FAIL API 尚未初始化。", LogLevel.Error);
+            return;
+        }
+
+        if (!TryResolveProbeTile(args, out var tile, out var tileSource, out var resolveMessage))
+        {
+            this.Monitor.Log($"SVSAP_ENDPOINT_PROBE_FAIL {resolveMessage}", LogLevel.Warn);
+            return;
+        }
+
+        var location = Game1.currentLocation;
+        if (location is null)
+        {
+            this.Monitor.Log("SVSAP_ENDPOINT_PROBE_FAIL 当前地点为空。", LogLevel.Warn);
+            return;
+        }
+
+        var target = location.Objects.TryGetValue(tile, out var placedObject)
+            ? placedObject.QualifiedItemId
+            : "(none)";
+        if (api.TryGetLinkedEndpoint(location, tile, out var endpoint, out var code, out var message) && endpoint is not null)
+        {
+            this.Monitor.Log(
+                $"SVSAP_ENDPOINT_PROBE_OK source={tileSource}; location={location.NameOrUniqueName}; tile=({tile.X:0},{tile.Y:0}); target={target}; network={endpoint.NetworkId}; endpoint={endpoint.EndpointId}; type={endpoint.EndpointType}; active={endpoint.Active}",
+                LogLevel.Info);
+            return;
+        }
+
+        this.Monitor.Log(
+            $"SVSAP_ENDPOINT_PROBE_MISS source={tileSource}; location={location.NameOrUniqueName}; tile=({tile.X:0},{tile.Y:0}); target={target}; code={code}; message={message}",
+            LogLevel.Info);
+    }
+
+    private void CommandApiSelfTest(string command, string[] args)
+    {
+        var api = this.api;
+        if (api is null)
+        {
+            this.Monitor.Log("SVSAP_API_SELFTEST_FAIL API 尚未初始化。", LogLevel.Error);
+            return;
+        }
+
+        var passed = new List<string>();
+        var skipped = new List<string>();
+
+        try
+        {
+            Require(api.ApiVersion == 1, $"ApiVersion 应为 1，实际为 {api.ApiVersion}。");
+            Require(!string.IsNullOrWhiteSpace(api.NetworkIdModDataKey), "NetworkIdModDataKey 不能为空。");
+            Require(!string.IsNullOrWhiteSpace(api.EndpointIdModDataKey), "EndpointIdModDataKey 不能为空。");
+            passed.Add("api-shape");
+
+            var snapshot = api.GetConfigSnapshot();
+            Require(snapshot.MaxEndpointsPerNetwork > 0, "MaxEndpointsPerNetwork 必须为正数。");
+            Require(snapshot.MaxOperationsPerTick > 0, "MaxOperationsPerTick 必须为正数。");
+            passed.Add("config-snapshot");
+
+            if (api.IsHostAuthority)
+            {
+                this.TestHostApiMutationGuards(api);
+                passed.Add("host-item-lock-guards");
+            }
+            else
+            {
+                TestNonHostApiGuards(api);
+                passed.Add("non-host-write-guard");
+                skipped.Add("host-item-lock-guards: requires main-player world authority");
+            }
+
+            if (TryResolveProbeTile(args, out var tile, out var tileSource, out var resolveMessage))
+            {
+                var location = Game1.currentLocation;
+                if (location is null)
+                {
+                    skipped.Add("endpoint-probe: no current location");
+                }
+                else if (api.TryGetLinkedEndpoint(location, tile, out var endpoint, out var code, out var message) && endpoint is not null)
+                {
+                    Require(endpoint.NetworkId != Guid.Empty, "端点网络 Guid 不能为空。");
+                    Require(endpoint.EndpointId != Guid.Empty, "端点 Guid 不能为空。");
+                    passed.Add($"endpoint-probe:{tileSource}:{endpoint.EndpointType}");
+                }
+                else
+                {
+                    skipped.Add($"endpoint-probe:{tileSource}:{code}:{message}");
+                }
+            }
+            else
+            {
+                skipped.Add($"endpoint-probe:{resolveMessage}");
+            }
+
+            this.Monitor.Log(
+                $"SVSAP_API_SELFTEST_OK passed={passed.Count:N0} [{string.Join(", ", passed)}]; skipped={skipped.Count:N0} [{string.Join(", ", skipped)}]",
+                LogLevel.Info);
+        }
+        catch (Exception ex)
+        {
+            this.Monitor.Log(
+                $"SVSAP_API_SELFTEST_FAIL passed={passed.Count:N0} [{string.Join(", ", passed)}]; error={ex.GetType().Name}: {ex.Message}",
+                LogLevel.Error);
+        }
+    }
+
+    private void TestHostApiMutationGuards(ISvsapApi api)
+    {
+        var networkId = Guid.NewGuid();
+        var network = this.networkRepository.GetOrCreateNetwork(networkId);
+        try
+        {
+            network.LockedQualifiedItemIds.Add("(O)388");
+
+            var source = ItemRegistry.Create("(O)388");
+            source.Stack = 1;
+            Require(api.GetAvailableCount(networkId, "(O)388", null) == 0, "锁定物品的可用数量必须对外返回 0。");
+            Require(api.GetInsertCapacity(networkId, source, 1) == 0, "锁定物品的可插入容量必须对外返回 0。");
+            Require(
+                !api.TryInsertItem(networkId, source, out var remainder, out var insertCode, out var insertMessage)
+                && insertCode == SvsapApiErrorCode.ItemLocked,
+                $"锁定物品存入必须返回 ItemLocked，实际 {insertCode}: {insertMessage}");
+            Require(remainder is not null && remainder.Stack == 1, "锁定物品存入失败时必须保留原物品余量。");
+
+            Require(
+                !api.TryExtractItem(networkId, "(O)388", null, 1, out var extracted, out var extractCode, out var extractMessage)
+                && extractCode == SvsapApiErrorCode.ItemLocked,
+                $"锁定物品提取必须返回 ItemLocked，实际 {extractCode}: {extractMessage}");
+            Require(extracted is null, "锁定物品提取失败时不得返回物品。");
+        }
+        finally
+        {
+            this.networkRepository.Data.Networks.Remove(networkId);
+        }
+    }
+
+    private static void TestNonHostApiGuards(ISvsapApi api)
+    {
+        var networkId = Guid.NewGuid();
+        var source = ItemRegistry.Create("(O)388");
+        source.Stack = 1;
+
+        Require(
+            !api.TryInsertItem(networkId, source, out _, out var insertCode, out var insertMessage)
+            && insertCode == SvsapApiErrorCode.NotHost,
+            $"非主机存入必须返回 NotHost，实际 {insertCode}: {insertMessage}");
+
+        Require(
+            !api.TryExtractItem(networkId, "(O)388", null, 1, out _, out var extractCode, out var extractMessage)
+            && extractCode == SvsapApiErrorCode.NotHost,
+            $"非主机提取必须返回 NotHost，实际 {extractCode}: {extractMessage}");
+    }
+
+    private static bool TryResolveProbeTile(string[] args, out Vector2 tile, out string source, out string message)
+    {
+        tile = Vector2.Zero;
+        source = string.Empty;
+        message = string.Empty;
+
+        if (args.Length >= 2)
+        {
+            if (!int.TryParse(args[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var x)
+                || !int.TryParse(args[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var y))
+            {
+                message = "用法: svsap_endpoint_probe [x y]，x/y 必须为整数。";
+                return false;
+            }
+
+            tile = new Vector2(x, y);
+            source = "args";
+            return true;
+        }
+
+        if (args.Length == 1)
+        {
+            message = "用法: svsap_endpoint_probe [x y]，必须同时提供 x 和 y。";
+            return false;
+        }
+
+        if (!Context.IsWorldReady || Game1.player is null)
+        {
+            message = "未载入存档且未提供 x y，无法推断玩家面对格。";
+            return false;
+        }
+
+        tile = GetFacingTile(Game1.player);
+        source = "player-facing";
+        return true;
+    }
+
+    private static Vector2 GetFacingTile(Farmer player)
+    {
+        var tile = player.Tile;
+        return player.FacingDirection switch
+        {
+            0 => tile + new Vector2(0, -1),
+            1 => tile + new Vector2(1, 0),
+            2 => tile + new Vector2(0, 1),
+            3 => tile + new Vector2(-1, 0),
+            _ => tile
+        };
+    }
+
+    private static void Require(bool condition, string message)
+    {
+        if (!condition)
+            throw new InvalidOperationException(message);
     }
 
     private static int NormalizeCaskTargetQuality(int value)

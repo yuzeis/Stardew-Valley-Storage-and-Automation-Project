@@ -1,9 +1,9 @@
-Stardew Valley Storage and Automation Project (SVSAP) 1.1 使用教程
-版本代号：Gnadenempfang
+Stardew Valley Storage and Automation Project (SVSAP) 1.2.0-alpha.2 使用教程
+源码：https://github.com/yuzeis/Stardew-Valley-Storage-and-Automation-Project
 
 一、安装与语言
 
-1. 安装 SMAPI，并使用 SMAPI 启动星露谷物语 1.6。
+1. 安装 Stardew Valley 1.6.15 与 SMAPI 4.5.2 或更新版本，并使用 SMAPI 启动游戏。
 2. 把发布包里的 SVSAP 文件夹放入 Stardew Valley/Mods/。
 3. 默认语言是中文。要切换英文，打开 SVSAP/config.json：
    "Language": "en"
@@ -89,7 +89,7 @@ Stardew Valley Storage and Automation Project (SVSAP) 1.1 使用教程
 
 五、多人联机
 
-所有玩家必须安装同一版本 SVSAP。主机保存网络数据，客机操作网络设备时会向主机发送请求。建议联机前确认每个人的 config.json 中 Language 可按个人喜好设置，但模组版本必须一致。
+所有玩家必须安装同一版本 SVSAP。使用 SVSAPME 时，主机与客机也必须安装同一版本 SVSAPME。主机保存网络数据，客机操作网络设备时会向主机发送请求。建议联机前确认每个人的 config.json 中 Language 可按个人喜好设置，但模组版本必须一致。
 
 六、常用提示
 

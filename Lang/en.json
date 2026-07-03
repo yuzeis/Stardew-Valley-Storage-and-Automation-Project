@@ -19,6 +19,11 @@
   "gmcm.detailedLogs": "Detailed gameplay logs",
   "gmcm.debugLogs": "Debug transaction logs",
   "gmcm.casualCosts": "Casual recipe costs",
+  "gmcm.recipeCostMode.name": "Material cost",
+  "gmcm.recipeCostMode.tooltip": "Normal uses designed recipes; Casual roughly halves ingredients; Debug removes skill gates and makes SVSAP recipes cost 0.",
+  "gmcm.recipeCostMode.Normal": "Normal",
+  "gmcm.recipeCostMode.Casual": "Casual",
+  "gmcm.recipeCostMode.Debug": "Debug",
 
   "ui.search": "Search...",
 

@@ -12,6 +12,7 @@ namespace SVSAP.Content;
 
 internal sealed class ContentInjector
 {
+    private const string FreeRecipeIngredientList = "(O)388 0";
     private const string ObjectSpriteAsset = "Mods/" + ModItemCatalog.UniqueId + "/Items";
     private const string BigCraftableSpriteAsset = "Mods/" + ModItemCatalog.UniqueId + "/BigCraftables";
     private const string ObjectSpriteResource = "SVSAP.Assets.Items.png";
@@ -135,14 +136,30 @@ internal sealed class ContentInjector
 
     private IEnumerable<KeyValuePair<string, string>> GetCraftingRecipes()
     {
+        var recipeCostMode = this.getConfig().GetRecipeCostMode();
         foreach (var pair in ModItemCatalog.CraftingRecipes)
         {
-            var raw = this.getConfig().CasualRecipeCosts
-                ? ReduceIngredientCosts(pair.Value)
-                : pair.Value;
+            var raw = recipeCostMode switch
+            {
+                RecipeCostModes.Debug => MakeRecipeFree(pair.Value),
+                RecipeCostModes.Casual => ReduceIngredientCosts(pair.Value),
+                _ => pair.Value
+            };
 
-            yield return new KeyValuePair<string, string>(pair.Key, ApplyMiningRequirement(pair.Key, raw));
+            yield return new KeyValuePair<string, string>(
+                pair.Key,
+                recipeCostMode == RecipeCostModes.Debug ? raw : ApplyMiningRequirement(pair.Key, raw));
         }
+    }
+
+    private static string MakeRecipeFree(string raw)
+    {
+        var parts = raw.Split('/');
+        if (parts.Length == 0)
+            return raw;
+
+        parts[0] = FreeRecipeIngredientList;
+        return string.Join("/", parts);
     }
 
     private static string ReduceIngredientCosts(string raw)

@@ -17,5 +17,6 @@
   "MaxOperationsPerTick": 20,
   "DetailedGameplayLogs": false,
   "DebugTransactionLogs": false,
-  "CasualRecipeCosts": false
+  "CasualRecipeCosts": false,
+  "RecipeCostMode": "Normal"
 }

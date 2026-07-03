@@ -424,6 +424,25 @@ internal sealed class InventoryTransactionService
         return remaining <= 0;
     }
 
+    public int GetNetworkInsertCapacity(NetworkData network, Item item, int maxCount)
+    {
+        if (maxCount <= 0 || !this.CanEnterNetwork(item))
+            return 0;
+
+        var low = 0;
+        var high = maxCount;
+        while (low < high)
+        {
+            var mid = low + ((high - low + 1) / 2);
+            if (this.CanAcceptNetworkItem(network, item, mid))
+                low = mid;
+            else
+                high = mid - 1;
+        }
+
+        return low;
+    }
+
     public int GetAvailableCount(NetworkData network, NetworkItemRequest request, MaterialQualityStrategy qualityStrategy = MaterialQualityStrategy.LowQualityFirst, bool autoConsumableOnly = false)
     {
         var count = this.scanner.Scan(network).Entries
@@ -441,6 +460,14 @@ internal sealed class InventoryTransactionService
         return ClampToIntCount(count);
     }
 
+    public int GetUnreservedCountMatching(NetworkData network, Func<NetworkInventoryEntry, bool> predicate)
+    {
+        var count = this.scanner.Scan(network).Entries
+            .Where(predicate)
+            .Sum(entry => Math.Max(0L, entry.TotalCount - this.GetReservedCountForEntry(network, entry, Guid.Empty)));
+        return ClampToIntCount(count);
+    }
+
     public void ApplyReservationOverlay(NetworkData network, NetworkInventorySnapshot snapshot)
     {
         foreach (var entry in snapshot.Entries)
@@ -450,6 +477,51 @@ internal sealed class InventoryTransactionService
     public int GetUnreservedCount(NetworkData network, NetworkItemRequest request, Guid excludedReservationJobId = default, MaterialQualityStrategy qualityStrategy = MaterialQualityStrategy.LowQualityFirst, bool autoConsumableOnly = false)
     {
         return Math.Max(0, this.GetAvailableCount(network, request, qualityStrategy, autoConsumableOnly) - this.GetReservedCount(network, request, excludedReservationJobId));
+    }
+
+    public bool TryPeekFirstMatchingItem(
+        NetworkData network,
+        Func<NetworkInventoryEntry, bool> predicate,
+        out Item? prototype,
+        out int availableCount,
+        out string message,
+        MaterialQualityStrategy qualityStrategy = MaterialQualityStrategy.LowQualityFirst)
+    {
+        prototype = null;
+        availableCount = 0;
+
+        var snapshot = this.scanner.Scan(network);
+        var ordered = snapshot.Entries
+            .Where(predicate)
+            .Where(entry => CanAutoConsume(entry.Prototype))
+            .Where(entry => AllowsQuality(entry, qualityStrategy))
+            .Select(entry => new
+            {
+                Entry = entry,
+                UnreservedCount = ClampToIntCount(entry.TotalCount - this.GetReservedCountForEntry(network, entry, Guid.Empty))
+            })
+            .Where(candidate => candidate.UnreservedCount > 0);
+
+        var candidate = qualityStrategy == MaterialQualityStrategy.HighQualityFirst
+            ? ordered
+                .OrderByDescending(candidate => candidate.Entry.Key.Quality)
+                .ThenByDescending(candidate => candidate.UnreservedCount)
+                .FirstOrDefault()
+            : ordered
+                .OrderBy(candidate => candidate.Entry.Key.Quality)
+                .ThenByDescending(candidate => candidate.UnreservedCount)
+                .FirstOrDefault();
+
+        if (candidate is null)
+        {
+            message = "没有可用的未预留匹配物品。";
+            return false;
+        }
+
+        prototype = candidate.Entry.Prototype.getOne();
+        availableCount = candidate.UnreservedCount;
+        message = $"匹配 {prototype.DisplayName} x{availableCount:N0}。";
+        return true;
     }
 
     public bool HasIngredients(NetworkData network, IReadOnlyList<NetworkItemRequest> requests, out List<string> missingLines, Guid excludedReservationJobId = default, MaterialQualityStrategy qualityStrategy = MaterialQualityStrategy.LowQualityFirst, bool autoConsumableOnly = false)

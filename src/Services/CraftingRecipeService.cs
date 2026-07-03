@@ -30,9 +30,15 @@ internal sealed class CraftingRecipeService
 
         foreach (var pair in rawRecipes)
         {
-            var isSVSAPRecipe = pair.Key.StartsWith(ModItemCatalog.Prefix, StringComparison.Ordinal)
-                || pair.Value.Contains(ModItemCatalog.Prefix, StringComparison.Ordinal);
-            if (isSVSAPRecipe && !MeetsSVSAPUnlockRequirement(player, pair.Key))
+            // Recognise the whole SVSAP family (Koizumi.SVSAP*) via the unique-id root without the
+            // trailing dot, so SVSAPME addon recipes are also surfaced in the terminal — including the
+            // few whose ingredient lists reference only vanilla items (e.g. CarbonRod, CopperCoil) and
+            // therefore would not otherwise match the dotted prefix. Non-family keys never contain this
+            // root, so there are no false positives. This does not use ModItemCatalog.Prefix, which the
+            // trailing dot is still required for elsewhere.
+            var isSVSAPRecipe = pair.Key.StartsWith(ModItemCatalog.UniqueId, StringComparison.Ordinal)
+                || pair.Value.Contains(ModItemCatalog.UniqueId, StringComparison.Ordinal);
+            if (isSVSAPRecipe && !this.MeetsSVSAPUnlockRequirement(player, pair.Key))
                 continue;
 
             var isKnown = player.craftingRecipes.ContainsKey(pair.Key) || isSVSAPRecipe;
@@ -100,8 +106,11 @@ internal sealed class CraftingRecipeService
         return true;
     }
 
-    private static bool MeetsSVSAPUnlockRequirement(Farmer player, string recipeName)
+    private bool MeetsSVSAPUnlockRequirement(Farmer player, string recipeName)
     {
+        if (this.getConfig().IsDebugRecipeCostMode())
+            return true;
+
         var requiredMiningLevel = ModItemCatalog.GetRequiredMiningLevel(recipeName);
         return requiredMiningLevel <= 0 || player.MiningLevel >= requiredMiningLevel;
     }
@@ -117,7 +126,7 @@ internal sealed class CraftingRecipeService
             isBigCraftable = false;
 
         var ingredients = ParseIngredients(parts[0]);
-        if (ingredients.Count == 0)
+        if (ingredients.Count == 0 && !this.getConfig().IsDebugRecipeCostMode())
             return false;
 
         if (!TryParseOutput(parts[2], isBigCraftable, out var outputId, out var outputCount))

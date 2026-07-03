@@ -17,6 +17,7 @@ internal sealed class RuntimeSelfTestService
     private readonly TransferBusService transferBusService;
     private readonly PatternExecutionService patternExecutionService;
     private readonly NetworkInteractionService networkInteractionService;
+    private readonly CraftingRecipeService craftingRecipeService;
     private readonly Func<ModConfig> getConfig;
     private readonly IMonitor monitor;
 
@@ -28,6 +29,7 @@ internal sealed class RuntimeSelfTestService
         TransferBusService transferBusService,
         PatternExecutionService patternExecutionService,
         NetworkInteractionService networkInteractionService,
+        CraftingRecipeService craftingRecipeService,
         Func<ModConfig> getConfig,
         IMonitor monitor)
     {
@@ -38,6 +40,7 @@ internal sealed class RuntimeSelfTestService
         this.transferBusService = transferBusService;
         this.patternExecutionService = patternExecutionService;
         this.networkInteractionService = networkInteractionService;
+        this.craftingRecipeService = craftingRecipeService;
         this.getConfig = getConfig;
         this.monitor = monitor;
     }
@@ -62,6 +65,7 @@ internal sealed class RuntimeSelfTestService
             ("structural-host-failure-response", this.TestStructuralHostFailureResponse),
             ("structural-consume-targets-captured-item", this.TestStructuralConsumeTargetsCapturedItem),
             ("transfer-bus-kernel-parity", this.TestTransferBusKernelParity),
+            ("debug-addon-vanilla-material-recipes-visible", this.TestDebugAddonVanillaMaterialRecipesVisible),
             ("cpu-reserve-fast-slot", this.TestCpuReserveFastSlot)
         };
 
@@ -716,6 +720,63 @@ internal sealed class RuntimeSelfTestService
             this.CleanupTemporaryNetwork(networkIdA);
             this.CleanupTemporaryNetwork(networkIdB);
         }
+    }
+
+    private void TestDebugAddonVanillaMaterialRecipesVisible()
+    {
+        const string carbonRod = "Koizumi.SVSAPME.CarbonRod";
+        const string copperCoil = "Koizumi.SVSAPME.CopperCoil";
+
+        var rawRecipes = Game1.content.Load<Dictionary<string, string>>("Data/CraftingRecipes");
+        if (!rawRecipes.ContainsKey(carbonRod) && !rawRecipes.ContainsKey(copperCoil))
+            return;
+
+        Assert(rawRecipes.ContainsKey(carbonRod), "SVSAPME debug recipe visibility selftest expected CarbonRod when addon recipes are loaded");
+        Assert(rawRecipes.ContainsKey(copperCoil), "SVSAPME debug recipe visibility selftest expected CopperCoil when addon recipes are loaded");
+
+        var config = this.getConfig();
+        var previousMode = config.RecipeCostMode;
+        var previousCasual = config.CasualRecipeCosts;
+        try
+        {
+            config.RecipeCostMode = RecipeCostModes.Debug;
+            config.CasualRecipeCosts = false;
+            var known = this.craftingRecipeService.GetKnownRecipesForPlayer(Game1.player)
+                .ToDictionary(recipe => recipe.Name, StringComparer.Ordinal);
+
+            Assert(known.ContainsKey(carbonRod), "Debug terminal recipes must include SVSAPME CarbonRod even though its ingredients are vanilla-only");
+            Assert(known.ContainsKey(copperCoil), "Debug terminal recipes must include SVSAPME CopperCoil even though its ingredients are vanilla-only");
+
+            var network = this.CreateTemporaryNetwork(out var networkId);
+            try
+            {
+                network.StorageDrives.Values.Single().Slots.Add(this.CreateStorageCellSlot(StorageCellTier.OneK, 0));
+                this.DepositSelfTestStack(network, "(O)382", 5);
+                this.DepositSelfTestStack(network, "(O)334", 2);
+                this.DepositSelfTestStack(network, "(O)338", 1);
+
+                var carbonAvailability = this.craftingRecipeService.GetAvailability(network, known[carbonRod], 1);
+                var coilAvailability = this.craftingRecipeService.GetAvailability(network, known[copperCoil], 1);
+                Assert(carbonAvailability.CanCraft, "Debug terminal CarbonRod recipe must be craftable");
+                Assert(coilAvailability.CanCraft, "Debug terminal CopperCoil recipe must be craftable");
+            }
+            finally
+            {
+                this.CleanupTemporaryNetwork(networkId);
+            }
+        }
+        finally
+        {
+            config.RecipeCostMode = previousMode;
+            config.CasualRecipeCosts = previousCasual;
+        }
+    }
+
+    private void DepositSelfTestStack(NetworkData network, string qualifiedItemId, int count)
+    {
+        var item = ItemRegistry.Create(qualifiedItemId);
+        item.Stack = count;
+        Assert(this.transactionService.TryDepositItem(network, item, out var moved) && moved == count && item.Stack == 0, $"selftest deposit must move {qualifiedItemId} x{count}");
     }
 
     private NetworkData CreateTemporaryNetwork(out Guid networkId)
