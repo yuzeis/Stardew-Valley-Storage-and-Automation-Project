@@ -60,10 +60,10 @@ internal sealed class NetworkItemRequest
     {
         get
         {
-            var key = this.QualifiedItemId ?? $"分类 {this.Category}";
+            var key = this.QualifiedItemId ?? ModText.Format("inventory.request.category", this.Category?.ToString() ?? "?");
             return string.IsNullOrWhiteSpace(this.PreservedParentQualifiedItemId)
                 ? key
-                : $"{key} 来自 {this.PreservedParentQualifiedItemId}";
+                : ModText.Format("inventory.request.fromParent", key, this.PreservedParentQualifiedItemId);
         }
     }
 }

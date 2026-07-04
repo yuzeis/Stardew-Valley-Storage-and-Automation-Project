@@ -78,7 +78,7 @@ internal sealed class CraftingRecipeService
 
         if (!this.transactionService.CanAcceptNetworkItem(network, output, output.Stack))
         {
-            message = "网络没有空间接收合成产物。";
+            message = ModText.Get("craftingTerminal.noOutputSpace");
             this.LogGameplay($"action=crafting_terminal_action result=fail player={DescribePlayer(player)} network={ShortId(network.NetworkId)} recipe={Quote(recipe.Name)} output={Quote(recipe.DisplayName)} batches={batches:N0} quality={qualityStrategy} reason={Quote(message)}");
             return false;
         }
@@ -93,7 +93,7 @@ internal sealed class CraftingRecipeService
         if (this.transactionService.TryDepositItem(network, output, out var moved) && output.Stack <= 0)
         {
             this.transactionService.SaveNetworkState();
-            message = $"已合成 {recipe.DisplayName} x{moved:N0}，并存入网络。";
+            message = ModText.Format("craftingTerminal.craftedToNetwork", recipe.DisplayName, moved);
             this.LogGameplay($"action=crafting_terminal_action result=success player={DescribePlayer(player)} network={ShortId(network.NetworkId)} recipe={Quote(recipe.Name)} output={Quote(recipe.DisplayName)} batches={batches:N0} crafted={moved:N0} destination=network");
             return true;
         }
@@ -101,7 +101,7 @@ internal sealed class CraftingRecipeService
         var dropped = output.Stack;
         Game1.createItemDebris(output, player.Position, player.FacingDirection, player.currentLocation);
         this.transactionService.SaveNetworkState();
-        message = $"已合成 {recipe.DisplayName}，但存储状态变化，掉落 {dropped:N0} 个物品。";
+        message = ModText.Format("craftingTerminal.craftedDropped", recipe.DisplayName, dropped);
         this.LogGameplay($"action=crafting_terminal_action result=success player={DescribePlayer(player)} network={ShortId(network.NetworkId)} recipe={Quote(recipe.Name)} output={Quote(recipe.DisplayName)} batches={batches:N0} crafted={dropped:N0} destination=debris reason=\"storage_changed\"");
         return true;
     }

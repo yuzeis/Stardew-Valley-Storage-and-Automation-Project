@@ -43,7 +43,7 @@ internal sealed class InventoryScanner
                 if (!location.objects.TryGetValue(tile, out SObject? placedObject))
                     continue;
 
-                if (placedObject is not Chest chest || IsChestLocked(chest))
+                if (placedObject is not Chest chest || !IsSupportedNetworkChest(chest) || IsChestLocked(chest))
                     continue;
 
                 if (!scannedChests.Add(GetChestKey(location, tile)))
@@ -207,6 +207,11 @@ internal sealed class InventoryScanner
         return ChestMutexHelper.IsLockedByAnotherActor(chest);
     }
 
+    private static bool IsSupportedNetworkChest(Chest chest)
+    {
+        return chest.SpecialChestType == Chest.SpecialChestTypes.None;
+    }
+
     private static IEnumerable<(Vector2 Tile, Chest Chest)> GetAdjacentUnlockedChests(GameLocation location, Vector2 origin)
     {
         foreach (var offset in AdjacentOffsets)
@@ -215,7 +220,7 @@ internal sealed class InventoryScanner
             if (!location.objects.TryGetValue(tile, out SObject? placedObject) || placedObject is not Chest chest)
                 continue;
 
-            if (IsChestLocked(chest))
+            if (!IsSupportedNetworkChest(chest) || IsChestLocked(chest))
                 continue;
 
             yield return (tile, chest);

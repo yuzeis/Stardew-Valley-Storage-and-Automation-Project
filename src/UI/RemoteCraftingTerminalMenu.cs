@@ -61,16 +61,16 @@ internal sealed class RemoteCraftingTerminalMenu : IClickableMenu
         buttonX += 16;
         foreach (var option in new[]
         {
-            (Strategy: MaterialQualityStrategy.LowQualityFirst, Label: "低质"),
-            (Strategy: MaterialQualityStrategy.HighQualityFirst, Label: "高质"),
-            (Strategy: MaterialQualityStrategy.PreserveGoldIridium, Label: "保金铱")
+            (Strategy: MaterialQualityStrategy.LowQualityFirst, Label: ModText.Get("craftingTerminal.quality.low")),
+            (Strategy: MaterialQualityStrategy.HighQualityFirst, Label: ModText.Get("craftingTerminal.quality.high")),
+            (Strategy: MaterialQualityStrategy.PreserveGoldIridium, Label: ModText.Get("craftingTerminal.quality.preserve"))
         })
         {
             this.qualityButtons.Add(new ClickableComponent(new Rectangle(buttonX, buttonY, 76, 42), option.Strategy.ToString(), option.Label));
             buttonX += 86;
         }
 
-        this.craftableOnlyButton = new ClickableComponent(new Rectangle(buttonX, buttonY, 86, 42), "ready", "可做");
+        this.craftableOnlyButton = new ClickableComponent(new Rectangle(buttonX, buttonY, 86, 42), "ready", ModText.Get("craftingTerminal.ready"));
 
         var gridTop = top + 108;
         var gridBottom = buttonY - 18;
@@ -99,12 +99,12 @@ internal sealed class RemoteCraftingTerminalMenu : IClickableMenu
         this.recipeGrid.ClampScroll(visible.Count);
         var innerX = this.xPositionOnScreen + SVSAPMenuWidgets.Pad;
         var top = this.yPositionOnScreen + 24;
-        var title = $"{this.snapshot.NetworkName} 远程合成  -  {visible.Count:N0} 个配方，网络 {this.snapshot.NetworkItemTypes:N0} 类物品";
+        var title = ModText.Format("remoteCraftingTerminal.title", this.snapshot.NetworkName, visible.Count, this.snapshot.NetworkItemTypes);
         b.DrawString(Game1.dialogueFont, title, new Vector2(innerX, top), Game1.textColor);
         SVSAPMenuWidgets.DrawSearchBox(b, this.searchBox, this.search);
         b.DrawString(
             Game1.smallFont,
-            $"远程批量 x{this.batches:N0}  ·  材料策略：{this.GetQualityStrategyLabel()}",
+            ModText.Format("remoteCraftingTerminal.summary", this.batches, this.GetQualityStrategyLabel()),
             new Vector2(this.searchBox.Right + 24, this.searchBox.Y + 10),
             Game1.textColor);
 
@@ -117,7 +117,7 @@ internal sealed class RemoteCraftingTerminalMenu : IClickableMenu
             recipe => recipe.CanCraft ? null : "!");
 
         if (visible.Count == 0)
-            b.DrawString(Game1.smallFont, "没有匹配的已知合成配方。", new Vector2(this.gridArea.X + 8, this.gridArea.Y + 8), Color.DarkSlateGray);
+            b.DrawString(Game1.smallFont, ModText.Get("craftingTerminal.empty"), new Vector2(this.gridArea.X + 8, this.gridArea.Y + 8), Color.DarkSlateGray);
 
         foreach (var button in this.amountButtons)
         {
@@ -250,9 +250,9 @@ internal sealed class RemoteCraftingTerminalMenu : IClickableMenu
     {
         return this.qualityStrategy switch
         {
-            MaterialQualityStrategy.HighQualityFirst => "高品质优先",
-            MaterialQualityStrategy.PreserveGoldIridium => "保留金/铱",
-            _ => "低品质优先"
+            MaterialQualityStrategy.HighQualityFirst => ModText.Get("craftingTerminal.strategy.high"),
+            MaterialQualityStrategy.PreserveGoldIridium => ModText.Get("craftingTerminal.strategy.preserve"),
+            _ => ModText.Get("craftingTerminal.strategy.low")
         };
     }
 
@@ -271,8 +271,8 @@ internal sealed class RemoteCraftingTerminalMenu : IClickableMenu
 
         var lines = new List<string>
         {
-            $"产出 x{recipe.OutputCount * this.batches:N0}",
-            recipe.CanCraft ? "材料齐全" : "缺少材料"
+            ModText.Format("craftingTerminal.tooltip.output", recipe.OutputCount * this.batches),
+            recipe.CanCraft ? ModText.Get("craftingTerminal.tooltip.ready") : ModText.Get("craftingTerminal.tooltip.missing")
         };
         lines.AddRange(recipe.MissingLines.Take(6));
 

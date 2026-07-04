@@ -52,10 +52,10 @@ public sealed class SvsapApi : ISvsapApi
         endpoint = null;
 
         if (location is null)
-            return Fail(SvsapApiErrorCode.InvalidRequest, "地点为空。", out code, out message);
+            return Fail(SvsapApiErrorCode.InvalidRequest, "Location is null.", out code, out message);
 
         if (!location.Objects.TryGetValue(tile, out var placedObject))
-            return Fail(SvsapApiErrorCode.NotFound, "指定位置没有可查询的放置物。", out code, out message);
+            return Fail(SvsapApiErrorCode.NotFound, "No placed object exists at the requested tile.", out code, out message);
 
         return this.TryGetLinkedEndpoint(placedObject, out endpoint, out code, out message);
     }
@@ -69,20 +69,20 @@ public sealed class SvsapApi : ISvsapApi
         endpoint = null;
 
         if (placedObject is null)
-            return Fail(SvsapApiErrorCode.InvalidRequest, "放置物为空。", out code, out message);
+            return Fail(SvsapApiErrorCode.InvalidRequest, "Placed object is null.", out code, out message);
 
         if (!TryReadGuid(placedObject, EndpointIdentityService.NetworkIdKey, out var networkId)
             || !TryReadGuid(placedObject, EndpointIdentityService.EndpointIdKey, out var endpointId))
         {
-            return Fail(SvsapApiErrorCode.EndpointNotLinked, "该放置物没有绑定 SVSAP 网络端点。", out code, out message);
+            return Fail(SvsapApiErrorCode.EndpointNotLinked, "The placed object is not linked to an SVSAP network endpoint.", out code, out message);
         }
 
         if (!this.repository.TryGetNetwork(networkId, out var network))
-            return Fail(SvsapApiErrorCode.NotFound, "网络不存在或尚未载入。", out code, out message);
+            return Fail(SvsapApiErrorCode.NotFound, "Network does not exist or is not loaded.", out code, out message);
 
         var linkedEndpoint = network.Endpoints.FirstOrDefault(candidate => candidate.EndpointId == endpointId);
         if (linkedEndpoint is null)
-            return Fail(SvsapApiErrorCode.EndpointNotLinked, "网络中找不到该端点。", out code, out message);
+            return Fail(SvsapApiErrorCode.EndpointNotLinked, "Endpoint was not found in the network.", out code, out message);
 
         endpoint = new SvsapEndpointInfo(network.NetworkId, linkedEndpoint);
         code = SvsapApiErrorCode.None;
@@ -93,14 +93,14 @@ public sealed class SvsapApi : ISvsapApi
     public bool IsEndpointActive(Guid networkId, Guid endpointId, out SvsapApiErrorCode code, out string message)
     {
         if (!this.repository.TryGetNetwork(networkId, out var network))
-            return Fail(SvsapApiErrorCode.NotFound, "网络不存在或尚未载入。", out code, out message);
+            return Fail(SvsapApiErrorCode.NotFound, "Network does not exist or is not loaded.", out code, out message);
 
         var endpoint = network.Endpoints.FirstOrDefault(candidate => candidate.EndpointId == endpointId);
         if (endpoint is null)
-            return Fail(SvsapApiErrorCode.EndpointNotLinked, "网络中找不到该端点。", out code, out message);
+            return Fail(SvsapApiErrorCode.EndpointNotLinked, "Endpoint was not found in the network.", out code, out message);
 
         if (!endpoint.Active)
-            return Fail(SvsapApiErrorCode.EndpointInactive, "端点当前未连通。", out code, out message);
+            return Fail(SvsapApiErrorCode.EndpointInactive, "Endpoint is currently inactive.", out code, out message);
 
         code = SvsapApiErrorCode.None;
         message = string.Empty;
@@ -158,10 +158,10 @@ public sealed class SvsapApi : ISvsapApi
         availableCount = 0;
 
         if (predicate is null)
-            return Fail(SvsapApiErrorCode.InvalidRequest, "匹配谓词为空。", out code, out message);
+            return Fail(SvsapApiErrorCode.InvalidRequest, "Match predicate is null.", out code, out message);
 
         if (!this.repository.TryGetNetwork(networkId, out var network))
-            return Fail(SvsapApiErrorCode.NotFound, "网络不存在或尚未载入。", out code, out message);
+            return Fail(SvsapApiErrorCode.NotFound, "Network does not exist or is not loaded.", out code, out message);
 
         if (!this.transactionService.TryPeekFirstMatchingItem(
                 network,
@@ -204,26 +204,26 @@ public sealed class SvsapApi : ISvsapApi
         remainder = item;
 
         if (!this.IsHostAuthority)
-            return Fail(SvsapApiErrorCode.NotHost, "SVSAP 网络写入只能在主机执行。", out code, out message);
+            return Fail(SvsapApiErrorCode.NotHost, "SVSAP network writes can only run on the host.", out code, out message);
 
         if (item is null || item.Stack <= 0)
-            return Fail(SvsapApiErrorCode.InvalidRequest, "待存入物品为空或数量无效。", out code, out message);
+            return Fail(SvsapApiErrorCode.InvalidRequest, "Item to insert is null or has an invalid count.", out code, out message);
 
         if (!this.repository.TryGetNetwork(networkId, out var network))
-            return Fail(SvsapApiErrorCode.NotFound, "网络不存在或尚未载入。", out code, out message);
+            return Fail(SvsapApiErrorCode.NotFound, "Network does not exist or is not loaded.", out code, out message);
 
         if (IsLocked(network, item.QualifiedItemId))
-            return Fail(SvsapApiErrorCode.ItemLocked, "该物品已被网络锁定，不能自动存入。", out code, out message);
+            return Fail(SvsapApiErrorCode.ItemLocked, "This item is locked by the network and cannot be inserted automatically.", out code, out message);
 
         var before = item.Stack;
         if (!this.transactionService.TryDepositItem(network, item, out var moved) || moved <= 0)
-            return Fail(SvsapApiErrorCode.StorageFull, "网络无法接收该物品或空间已满。", out code, out message);
+            return Fail(SvsapApiErrorCode.StorageFull, "Network cannot accept this item or storage is full.", out code, out message);
 
         remainder = item.Stack > 0 ? item : null;
         code = SvsapApiErrorCode.None;
         message = remainder is null
-            ? $"已存入 {moved:N0} 个物品。"
-            : $"已存入 {moved:N0}/{before:N0} 个物品，剩余 {item.Stack:N0}。";
+            ? $"Inserted {moved:N0} item(s)."
+            : $"Inserted {moved:N0}/{before:N0} item(s), remainder {item.Stack:N0}.";
         return true;
     }
 
@@ -239,16 +239,16 @@ public sealed class SvsapApi : ISvsapApi
         extracted = null;
 
         if (!this.IsHostAuthority)
-            return Fail(SvsapApiErrorCode.NotHost, "SVSAP 网络提取只能在主机执行。", out code, out message);
+            return Fail(SvsapApiErrorCode.NotHost, "SVSAP network extraction can only run on the host.", out code, out message);
 
         if (string.IsNullOrWhiteSpace(qualifiedItemId) || count <= 0)
-            return Fail(SvsapApiErrorCode.InvalidRequest, "物品 ID 为空或数量无效。", out code, out message);
+            return Fail(SvsapApiErrorCode.InvalidRequest, "Item ID is empty or count is invalid.", out code, out message);
 
         if (!this.repository.TryGetNetwork(networkId, out var network))
-            return Fail(SvsapApiErrorCode.NotFound, "网络不存在或尚未载入。", out code, out message);
+            return Fail(SvsapApiErrorCode.NotFound, "Network does not exist or is not loaded.", out code, out message);
 
         if (IsLocked(network, qualifiedItemId))
-            return Fail(SvsapApiErrorCode.ItemLocked, "该物品已被网络锁定，不能自动提取。", out code, out message);
+            return Fail(SvsapApiErrorCode.ItemLocked, "This item is locked by the network and cannot be extracted automatically.", out code, out message);
 
         var success = quality.HasValue
             ? this.transactionService.TryExtractFirstMatchingItem(
@@ -289,13 +289,13 @@ public sealed class SvsapApi : ISvsapApi
         extracted = null;
 
         if (!this.IsHostAuthority)
-            return Fail(SvsapApiErrorCode.NotHost, "SVSAP 网络提取只能在主机执行。", out code, out message);
+            return Fail(SvsapApiErrorCode.NotHost, "SVSAP network extraction can only run on the host.", out code, out message);
 
         if (predicate is null || requestedCountSelector is null)
-            return Fail(SvsapApiErrorCode.InvalidRequest, "匹配谓词或数量选择器为空。", out code, out message);
+            return Fail(SvsapApiErrorCode.InvalidRequest, "Match predicate or count selector is null.", out code, out message);
 
         if (!this.repository.TryGetNetwork(networkId, out var network))
-            return Fail(SvsapApiErrorCode.NotFound, "网络不存在或尚未载入。", out code, out message);
+            return Fail(SvsapApiErrorCode.NotFound, "Network does not exist or is not loaded.", out code, out message);
 
         var success = this.transactionService.TryExtractFirstMatchingItem(
             network,

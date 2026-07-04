@@ -103,6 +103,7 @@ internal sealed class TerminalActionRequestMessage
     public int Amount { get; set; }
     public string HeldQualifiedItemId { get; set; } = string.Empty;
     public string HeldDisplayName { get; set; } = string.Empty;
+    public List<TerminalItemPayloadMessage> DepositItems { get; set; } = new();
 }
 
 internal sealed class TerminalActionResponseMessage
@@ -111,7 +112,16 @@ internal sealed class TerminalActionResponseMessage
     public Guid NetworkId { get; set; }
     public bool Success { get; set; }
     public string Message { get; set; } = string.Empty;
+    public string ReturnedSerializedItem { get; set; } = string.Empty;
+    public int ReturnedCount { get; set; }
+    public List<TerminalItemPayloadMessage> ReturnedDepositItems { get; set; } = new();
     public TerminalSnapshotResponseMessage? Snapshot { get; set; }
+}
+
+internal sealed class TerminalItemPayloadMessage
+{
+    public string SerializedItem { get; set; } = string.Empty;
+    public int Count { get; set; }
 }
 
 internal sealed class CraftingSnapshotRequestMessage

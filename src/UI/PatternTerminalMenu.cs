@@ -39,8 +39,8 @@ internal sealed class PatternTerminalMenu : IClickableMenu
         this.searchBox = new Rectangle(innerX, top + 48, 360, 40);
 
         var buttonY = this.yPositionOnScreen + this.height - 54;
-        this.modeButtons.Add(new ClickableComponent(new Rectangle(innerX, buttonY, 120, 42), PatternKind.Crafting.ToString(), "合成"));
-        this.modeButtons.Add(new ClickableComponent(new Rectangle(innerX + 132, buttonY, 132, 42), PatternKind.Processing.ToString(), "加工"));
+        this.modeButtons.Add(new ClickableComponent(new Rectangle(innerX, buttonY, 120, 42), PatternKind.Crafting.ToString(), ModText.Get("patternTerminal.mode.crafting")));
+        this.modeButtons.Add(new ClickableComponent(new Rectangle(innerX + 132, buttonY, 132, 42), PatternKind.Processing.ToString(), ModText.Get("patternTerminal.mode.processing")));
 
         var gridTop = top + 108;
         var gridBottom = buttonY - 18;
@@ -56,22 +56,22 @@ internal sealed class PatternTerminalMenu : IClickableMenu
         this.patternGrid.ClampScroll(patterns.Count);
         var innerX = this.xPositionOnScreen + SVSAPMenuWidgets.Pad;
         var top = this.yPositionOnScreen + 24;
-        b.DrawString(Game1.dialogueFont, $"样板终端  -  {FormatPatternKind(this.mode)}  -  {patterns.Count:N0} 个选项", new Vector2(innerX, top), Game1.textColor);
+        b.DrawString(Game1.dialogueFont, ModText.Format("patternTerminal.title", FormatPatternKind(this.mode), patterns.Count), new Vector2(innerX, top), Game1.textColor);
         SVSAPMenuWidgets.DrawSearchBox(b, this.searchBox, this.search);
-        b.DrawString(Game1.smallFont, "点击图标，把配方写入空白样板。", new Vector2(this.searchBox.Right + 24, this.searchBox.Y + 10), Game1.textColor);
+        b.DrawString(Game1.smallFont, ModText.Get("patternTerminal.help"), new Vector2(this.searchBox.Right + 24, this.searchBox.Y + 10), Game1.textColor);
 
         this.patternGrid.Draw(
             b,
             patterns,
             pattern => SVSAPMenuWidgets.CreateIconItem(pattern.Outputs.FirstOrDefault(), pattern.Outputs.FirstOrDefault()?.Count ?? 1),
             pattern => pattern.Outputs.FirstOrDefault()?.Count ?? 1,
-            getBadge: pattern => pattern.Kind == PatternKind.Processing ? "加" : null);
+            getBadge: pattern => pattern.Kind == PatternKind.Processing ? ModText.Get("patternTerminal.badge.processing") : null);
 
         if (patterns.Count == 0)
         {
             b.DrawString(
                 Game1.smallFont,
-                "没有匹配的样板选项。",
+                ModText.Get("patternTerminal.empty"),
                 new Vector2(this.gridArea.X + 8, this.gridArea.Y + 8),
                 Color.DarkSlateGray);
         }
@@ -163,7 +163,7 @@ internal sealed class PatternTerminalMenu : IClickableMenu
             return patterns;
 
         return patterns
-            .Where(pattern => pattern.DisplayName.Contains(this.search, StringComparison.CurrentCultureIgnoreCase)
+            .Where(pattern => PatternDisplayNames.Get(pattern).Contains(this.search, StringComparison.CurrentCultureIgnoreCase)
                 || pattern.Inputs.Any(input => input.DisplayKey.Contains(this.search, StringComparison.OrdinalIgnoreCase))
                 || pattern.Outputs.Any(output => output.DisplayKey.Contains(this.search, StringComparison.OrdinalIgnoreCase)))
             .ToList();
@@ -185,21 +185,21 @@ internal sealed class PatternTerminalMenu : IClickableMenu
         var lines = new List<string>
         {
             pattern.Kind == PatternKind.Processing
-                ? $"加工 · {FormatSpeedClass(pattern.SpeedClass)} · {pattern.ProcessingMinutes:N0} 分钟"
-                : "合成",
-            "输入：" + FormatRequests(pattern.Inputs),
-            "输出：" + FormatRequests(pattern.Outputs)
+                ? ModText.Format("patternTerminal.tooltip.processing", FormatSpeedClass(pattern.SpeedClass), pattern.ProcessingMinutes)
+                : ModText.Get("patternTerminal.tooltip.crafting"),
+            ModText.Format("patternTerminal.tooltip.inputs", FormatRequests(pattern.Inputs)),
+            ModText.Format("patternTerminal.tooltip.outputs", FormatRequests(pattern.Outputs))
         };
         if (!string.IsNullOrWhiteSpace(pattern.MachineQualifiedItemId))
-            lines.Add("机器：" + pattern.MachineQualifiedItemId);
+            lines.Add(ModText.Format("patternTerminal.tooltip.machine", pattern.MachineQualifiedItemId));
 
-        SVSAPMenuWidgets.DrawTooltipBox(b, mx + 28, my + 28, pattern.DisplayName, lines);
+        SVSAPMenuWidgets.DrawTooltipBox(b, mx + 28, my + 28, PatternDisplayNames.Get(pattern), lines);
     }
 
     private static string FormatRequests(IReadOnlyList<NetworkItemRequest> requests)
     {
         if (requests.Count == 0)
-            return "无";
+            return ModText.Get("common.none");
 
         return string.Join(", ", requests.Take(4).Select(request => $"{request.DisplayKey} x{request.Count:N0}"))
             + (requests.Count > 4 ? $" +{requests.Count - 4:N0}" : string.Empty);
@@ -207,16 +207,16 @@ internal sealed class PatternTerminalMenu : IClickableMenu
 
     private static string FormatPatternKind(PatternKind kind)
     {
-        return kind == PatternKind.Processing ? "加工" : "合成";
+        return kind == PatternKind.Processing ? ModText.Get("patternTerminal.mode.processing") : ModText.Get("patternTerminal.mode.crafting");
     }
 
     private static string FormatSpeedClass(ProcessingSpeedClass speedClass)
     {
         return speedClass switch
         {
-            ProcessingSpeedClass.Slow => "慢速",
-            ProcessingSpeedClass.Medium => "中速",
-            _ => "快速"
+            ProcessingSpeedClass.Slow => ModText.Get("patternTerminal.speed.slow"),
+            ProcessingSpeedClass.Medium => ModText.Get("patternTerminal.speed.medium"),
+            _ => ModText.Get("patternTerminal.speed.fast")
         };
     }
 }

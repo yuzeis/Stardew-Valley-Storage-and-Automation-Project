@@ -6,6 +6,7 @@ using StardewModdingAPI;
 using StardewModdingAPI.Events;
 using StardewValley;
 using StardewValley.Objects;
+using StardewValley.Tools;
 using SObject = StardewValley.Object;
 
 namespace SVSAP.Services;
@@ -14,6 +15,7 @@ internal sealed class NetworkInteractionService
 {
     internal const string SelectedNetworkIdKey = ModItemCatalog.UniqueId + "/SelectedNetworkId";
     private const int ActionResponseCacheLimit = 256;
+    private const int ClientReconcileCacheLimit = 256;
 
     private static readonly Vector2[] AdjacentOffsets =
     {
@@ -46,8 +48,13 @@ internal sealed class NetworkInteractionService
     private readonly Queue<(long PlayerId, Guid TransactionId)> craftingMonitorActionResponseOrder = new();
     private readonly Dictionary<(long PlayerId, Guid TransactionId), StructuralActionResponseMessage> structuralResponseCache = new();
     private readonly Queue<(long PlayerId, Guid TransactionId)> structuralResponseOrder = new();
+    private readonly HashSet<Guid> reconciledTerminalTx = new();
+    private readonly Queue<Guid> reconciledTerminalTxOrder = new();
     private readonly HashSet<Guid> reconciledStructuralTx = new();
+    private readonly Queue<Guid> reconciledStructuralTxOrder = new();
+    private readonly Dictionary<Guid, List<Item>> pendingTerminalDeposits = new();
     private readonly Dictionary<Guid, PendingStructuralHeldItem> pendingStructuralHeldItems = new();
+    private readonly Dictionary<long, string> blockedPeerActionMessages = new();
 
     internal event Action<StructuralActionResponseMessage>? StructuralActionResponseReceived;
 
@@ -98,6 +105,13 @@ internal sealed class NetworkInteractionService
         if (!location.objects.TryGetValue(tile, out SObject? target))
             return;
 
+        if (this.IsHoldingLinkTool())
+        {
+            this.HandleLinkToolUse(target, location, tile);
+            this.Suppress(e);
+            return;
+        }
+
         if (!Context.IsMainPlayer && this.IsRemoteTerminalInteraction(target, out var remoteCrafting))
         {
             this.RequestRemoteTerminalSnapshot(target, remoteCrafting);
@@ -112,16 +126,11 @@ internal sealed class NetworkInteractionService
             return;
         }
 
-        if (this.IsHoldingLinkTool())
-        {
-            this.HandleLinkToolUse(target, location, tile);
-            this.Suppress(e);
-            return;
-        }
-
         if (target.QualifiedItemId == "(BC)" + ModItemCatalog.StorageDrive)
         {
-            if (Context.IsMainPlayer)
+            if (Game1.player.CurrentItem is null)
+                this.OpenStorageDriveMenu(target, location, tile);
+            else if (Context.IsMainPlayer)
                 this.RunStructuralLocally(StructuralActionKind.StorageDriveInteract, target, location, tile);
             else
                 this.SendItemBearingStructuralRequest(StructuralActionKind.StorageDriveInteract, target, location, tile);
@@ -134,7 +143,7 @@ internal sealed class NetworkInteractionService
         {
             if (Game1.player.CurrentItem is null)
             {
-                Game1.addHUDMessage(new HUDMessage(this.transferBusService.DescribeConfiguration(target), HUDMessage.newQuest_type));
+                this.OpenTransferBusMenu(target);
             }
             else if (Context.IsMainPlayer)
             {
@@ -151,7 +160,9 @@ internal sealed class NetworkInteractionService
 
         if (target.QualifiedItemId == "(BC)" + ModItemCatalog.PatternProvider)
         {
-            if (Context.IsMainPlayer)
+            if (Game1.player.CurrentItem is null)
+                this.OpenPatternProviderMenu(target);
+            else if (Context.IsMainPlayer)
                 this.RunStructuralLocally(StructuralActionKind.PatternProviderInteract, target, location, tile);
             else
                 this.SendItemBearingStructuralRequest(StructuralActionKind.PatternProviderInteract, target, location, tile);
@@ -254,6 +265,16 @@ internal sealed class NetworkInteractionService
 
     public void ClearActionResponseCaches()
     {
+        this.ClearActionResponseCaches(restorePendingItems: true);
+    }
+
+    public void ClearActionResponseCachesWithoutRestore()
+    {
+        this.ClearActionResponseCaches(restorePendingItems: false);
+    }
+
+    private void ClearActionResponseCaches(bool restorePendingItems)
+    {
         this.terminalActionResponseCache.Clear();
         this.terminalActionResponseOrder.Clear();
         this.craftingActionResponseCache.Clear();
@@ -262,8 +283,20 @@ internal sealed class NetworkInteractionService
         this.craftingMonitorActionResponseOrder.Clear();
         this.structuralResponseCache.Clear();
         this.structuralResponseOrder.Clear();
+        this.reconciledTerminalTx.Clear();
+        this.reconciledTerminalTxOrder.Clear();
         this.reconciledStructuralTx.Clear();
-        this.RestorePendingStructuralHeldItems();
+        this.reconciledStructuralTxOrder.Clear();
+        if (restorePendingItems)
+        {
+            this.RestorePendingTerminalDeposits(Game1.currentLocation);
+            this.RestorePendingStructuralHeldItems();
+        }
+        else
+        {
+            this.pendingTerminalDeposits.Clear();
+            this.pendingStructuralHeldItems.Clear();
+        }
     }
 
     public void ClearActionResponseCaches(long playerId)
@@ -272,6 +305,19 @@ internal sealed class NetworkInteractionService
         ClearCachedResponsesForPlayer(this.craftingActionResponseCache, this.craftingActionResponseOrder, playerId);
         ClearCachedResponsesForPlayer(this.craftingMonitorActionResponseCache, this.craftingMonitorActionResponseOrder, playerId);
         ClearCachedResponsesForPlayer(this.structuralResponseCache, this.structuralResponseOrder, playerId);
+    }
+
+    public void SetPeerActionBlock(long playerId, string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+            this.blockedPeerActionMessages.Remove(playerId);
+        else
+            this.blockedPeerActionMessages[playerId] = message;
+    }
+
+    public void ClearPeerActionBlock(long playerId)
+    {
+        this.blockedPeerActionMessages.Remove(playerId);
     }
 
     private static void ClearCachedResponsesForPlayer<TResponse>(
@@ -358,7 +404,7 @@ internal sealed class NetworkInteractionService
 
         if (!Guid.TryParse(held.modData.GetValueOrDefault(SelectedNetworkIdKey), out var selectedNetworkId))
         {
-            Game1.addHUDMessage(new HUDMessage("请先选择一个网络核心。", HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("network.link.selectCoreFirst"), HUDMessage.error_type));
             this.LogGameplay($"action=link_endpoint result=fail player={DescribePlayer(Game1.player)} target={Quote(target.QualifiedItemId)} location={Quote(location.NameOrUniqueName)} tile={FormatTile(tile)} reason=\"no_selected_network\"");
             return;
         }
@@ -381,7 +427,7 @@ internal sealed class NetworkInteractionService
 
         if (!Guid.TryParse(held.modData.GetValueOrDefault(SelectedNetworkIdKey), out var selectedNetworkId))
         {
-            Game1.addHUDMessage(new HUDMessage("请先选择一个网络核心。", HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("network.link.selectCoreFirst"), HUDMessage.error_type));
             this.LogGameplay($"action=link_endpoint result=fail player={DescribePlayer(Game1.player)} target={Quote(target.QualifiedItemId)} location={Quote(location.NameOrUniqueName)} tile={FormatTile(tile)} reason=\"no_selected_network\"");
             return;
         }
@@ -452,7 +498,7 @@ internal sealed class NetworkInteractionService
         var host = this.multiplayerHelper.GetConnectedPlayers().FirstOrDefault(peer => peer.IsHost);
         if (host is null || !host.HasSmapi || host.GetMod(this.modManifest.UniqueID) is null)
         {
-            Game1.addHUDMessage(new HUDMessage("主机必须安装 Stardew Valley Storage and Automation Project。", HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("multiplayer.hostNeedsSVSAP"), HUDMessage.error_type));
             return;
         }
 
@@ -507,7 +553,7 @@ internal sealed class NetworkInteractionService
         {
             if (Game1.player.Items.IndexOf(held) < 0 || held.Stack <= 0)
             {
-                message = "手持物品已变化，请重试。";
+                message = ModText.Get("network.structural.heldChanged");
                 return false;
             }
 
@@ -559,6 +605,14 @@ internal sealed class NetworkInteractionService
         try
         {
             request = e.ReadAs<StructuralActionRequestMessage>();
+            if (this.TryGetPeerActionBlock(e.FromPlayerID, out var blockMessage))
+            {
+                var blocked = CreateStructuralFailureResponse(request, blockMessage);
+                this.RememberStructuralActionResponse(e.FromPlayerID, request.TransactionId, blocked);
+                this.SendStructuralResponse(blocked, e.FromPlayerID);
+                return;
+            }
+
             if (this.TryGetCachedStructuralActionResponse(e.FromPlayerID, request.TransactionId, out var cached))
             {
                 this.SendStructuralResponse(cached, e.FromPlayerID);
@@ -589,13 +643,13 @@ internal sealed class NetworkInteractionService
         }
     }
 
-    private static StructuralActionResponseMessage CreateStructuralFailureResponse(StructuralActionRequestMessage request)
+    private static StructuralActionResponseMessage CreateStructuralFailureResponse(StructuralActionRequestMessage request, string? message = null)
     {
         return new StructuralActionResponseMessage
         {
             TransactionId = request.TransactionId,
             Kind = request.Kind,
-            Message = "结构操作失败，已返还手持物品，请重试。"
+            Message = message ?? ModText.Get("network.structural.failedRestored")
         };
     }
 
@@ -638,7 +692,7 @@ internal sealed class NetworkInteractionService
         var response = e.ReadAs<StructuralActionResponseMessage>();
         this.StructuralActionResponseReceived?.Invoke(response);
 
-        if (response.TransactionId != Guid.Empty && !this.reconciledStructuralTx.Add(response.TransactionId))
+        if (response.TransactionId != Guid.Empty && !this.MarkClientTransactionReconciled(response.TransactionId, this.reconciledStructuralTx, this.reconciledStructuralTxOrder))
             return;
 
         Game1.addHUDMessage(new HUDMessage(response.Message, response.Success ? HUDMessage.newQuest_type : HUDMessage.error_type));
@@ -686,7 +740,7 @@ internal sealed class NetworkInteractionService
         var tile = new Vector2(request.TileX, request.TileY);
         if (location is null || !location.objects.TryGetValue(tile, out SObject? target))
         {
-            response.Message = "目标物体不存在。";
+            response.Message = ModText.Get("network.structural.targetMissing");
             return response;
         }
 
@@ -727,14 +781,14 @@ internal sealed class NetworkInteractionService
             StructuralActionKind.StorageDriveInteract => this.storageDriveService.ApplyInteract(target, location, tile, heldQualifiedItemId, heldSerializedItem),
             StructuralActionKind.PatternProviderInteract => this.patternProviderService.ApplyInteract(target, heldQualifiedItemId, heldSerializedItem),
             StructuralActionKind.TransferBusConfigure => this.transferBusService.ApplyConfigure(target, heldQualifiedItemId, heldDisplayName, heldStack),
-            _ => StructuralActionResult.Fail("未知操作。")
+            _ => StructuralActionResult.Fail(ModText.Get("network.structural.unknownAction"))
         };
     }
 
     private StructuralActionResult ApplyLinkSelectCore(SObject target, GameLocation location, Vector2 tile)
     {
         if (target.QualifiedItemId != "(BC)" + ModItemCatalog.NetworkCore)
-            return StructuralActionResult.Fail("请先选择一个网络核心。");
+            return StructuralActionResult.Fail(ModText.Get("network.link.selectCoreFirst"));
 
         var networkId = this.endpointIdentityService.EnsureNetworkId(target);
         var endpointId = this.endpointIdentityService.EnsureEndpointId(target);
@@ -744,7 +798,7 @@ internal sealed class NetworkInteractionService
         return new StructuralActionResult
         {
             Success = true,
-            Message = "已选择 SVSAP 网络。",
+            Message = ModText.Get("network.link.selected"),
             ResultNetworkId = networkId
         };
     }
@@ -752,11 +806,11 @@ internal sealed class NetworkInteractionService
     private StructuralActionResult ApplyLinkBindEndpoint(SObject target, GameLocation location, Vector2 tile, Guid selectedNetworkId)
     {
         if (selectedNetworkId == Guid.Empty)
-            return StructuralActionResult.Fail("请先选择一个网络核心。");
+            return StructuralActionResult.Fail(ModText.Get("network.link.selectCoreFirst"));
 
         var endpointType = this.GetEndpointType(target);
         if (endpointType is null)
-            return StructuralActionResult.Fail("这个物体暂时不能加入 SVSAP 网络。");
+            return StructuralActionResult.Fail(ModText.Get("network.link.unsupportedObject"));
 
         var boundEndpointId = this.endpointIdentityService.EnsureEndpointId(target);
         var hadPreviousNetworkId = target.modData.TryGetValue(EndpointIdentityService.NetworkIdKey, out var previousNetworkIdRaw);
@@ -767,7 +821,7 @@ internal sealed class NetworkInteractionService
         if (selectedNetwork.Endpoints.All(endpoint => endpoint.EndpointId != boundEndpointId)
             && selectedNetwork.Endpoints.Count >= Math.Max(1, this.getConfig().MaxEndpointsPerNetwork))
         {
-            return StructuralActionResult.Fail("SVSAP 网络端点数量已达上限。");
+            return StructuralActionResult.Fail(ModText.Get("network.link.endpointLimit"));
         }
 
         target.modData[EndpointIdentityService.NetworkIdKey] = selectedNetworkId.ToString("N");
@@ -787,7 +841,7 @@ internal sealed class NetworkInteractionService
         return new StructuralActionResult
         {
             Success = true,
-            Message = "物体已连接到 SVSAP 网络。"
+            Message = ModText.Get("network.link.bound")
         };
     }
 
@@ -879,11 +933,122 @@ internal sealed class NetworkInteractionService
         if (item is null)
             return;
 
-        if (Game1.player is not null && Game1.player.addItemToInventoryBool(item))
+        this.RestoreItemsToPlayer(new[] { item }, location);
+    }
+
+    private void RestorePendingTerminalDeposits(GameLocation? location)
+    {
+        foreach (var pending in this.pendingTerminalDeposits.Values.ToList())
+            this.RestoreItemsToPlayer(pending, location);
+
+        this.pendingTerminalDeposits.Clear();
+    }
+
+    private void DeliverRemoteTerminalWithdrawal(TerminalActionResponseMessage response)
+    {
+        if (string.IsNullOrWhiteSpace(response.ReturnedSerializedItem) || response.ReturnedCount <= 0)
             return;
 
-        if (Context.IsWorldReady && Game1.player is not null)
-            Game1.createItemDebris(item, Game1.player.getStandingPosition(), -1, location ?? Game1.currentLocation);
+        try
+        {
+            var item = SerializedItemCodec.CreateItem(response.ReturnedSerializedItem, response.ReturnedCount);
+            this.RestoreItemsToPlayer(new[] { item }, Game1.currentLocation);
+        }
+        catch (Exception ex)
+        {
+            this.monitor.Log($"Could not deliver remote terminal withdrawal item: {ex.Message}", LogLevel.Warn);
+        }
+    }
+
+    private void RestoreTerminalPayloads(IEnumerable<TerminalItemPayloadMessage> payloads, GameLocation? location)
+    {
+        foreach (var payload in payloads)
+        {
+            if (!TryCreateTerminalPayloadItem(payload, out var item))
+                continue;
+
+            this.RestoreItemsToPlayer(new[] { item }, location);
+        }
+    }
+
+    private void RestoreItemsToPlayer(IEnumerable<Item> items, GameLocation? location)
+    {
+        foreach (var item in items)
+        {
+            if (item.Stack <= 0)
+                continue;
+
+            if (Game1.player is not null && Game1.player.addItemToInventoryBool(item))
+                continue;
+
+            if (Context.IsWorldReady && Game1.player is not null)
+                Game1.createItemDebris(item, Game1.player.getStandingPosition(), -1, location ?? Game1.currentLocation);
+        }
+    }
+
+    private static TerminalItemPayloadMessage CreateTerminalPayload(Item item)
+    {
+        return new TerminalItemPayloadMessage
+        {
+            SerializedItem = SerializedItemCodec.SerializePrototype(item.getOne()),
+            Count = item.Stack
+        };
+    }
+
+    private static bool TryCreateTerminalPayloadItem(TerminalItemPayloadMessage payload, out Item item)
+    {
+        item = null!;
+        if (string.IsNullOrWhiteSpace(payload.SerializedItem) || payload.Count <= 0)
+            return false;
+
+        try
+        {
+            item = SerializedItemCodec.CreateItem(payload.SerializedItem, payload.Count);
+            return item.Stack > 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool CanRemoteTerminalDepositItem(Item item)
+    {
+        if (ModItemCatalog.TryGetStorageCellTier(item.QualifiedItemId, out _))
+            return true;
+
+        if (item is Tool or MeleeWeapon)
+            return false;
+
+        if (item is SObject obj && obj.questItem.Value)
+            return false;
+
+        return PassesRemoteTerminalSerializationCheck(item);
+    }
+
+    private static bool PassesRemoteTerminalSerializationCheck(Item item)
+    {
+        return SerializedItemCodec.CanRoundTripPrototype(item);
+    }
+
+    private bool TryGetPeerActionBlock(long playerId, out string message)
+    {
+        return this.blockedPeerActionMessages.TryGetValue(playerId, out message!);
+    }
+
+    private bool MarkClientTransactionReconciled(Guid transactionId, HashSet<Guid> seen, Queue<Guid> order)
+    {
+        if (transactionId == Guid.Empty)
+            return true;
+
+        if (!seen.Add(transactionId))
+            return false;
+
+        order.Enqueue(transactionId);
+        while (order.Count > ClientReconcileCacheLimit)
+            seen.Remove(order.Dequeue());
+
+        return true;
     }
 
     private void MoveEndpointStateToNetwork(Guid? previousNetworkId, Guid selectedNetworkId, Guid endpointId)
@@ -938,7 +1103,7 @@ internal sealed class NetworkInteractionService
 
     private void OpenTerminal(SObject terminal, bool crafting)
     {
-        if (!this.TryGetActiveLinkedNetwork(terminal, "终端", out var network, out var endpointId, out var message))
+        if (!this.TryGetActiveLinkedNetwork(terminal, ModText.Get("network.label.terminal"), out var network, out var endpointId, out var message))
         {
             Game1.addHUDMessage(new HUDMessage(message, HUDMessage.error_type));
             return;
@@ -951,9 +1116,70 @@ internal sealed class NetworkInteractionService
         this.LogGameplay($"action=open_terminal result=success player={DescribePlayer(Game1.player)} network={ShortId(network.NetworkId)} endpoint={ShortId(endpointId)} terminal={(crafting ? "crafting" : "storage")}");
     }
 
+    private void OpenStorageDriveMenu(SObject drive, GameLocation location, Vector2 tile)
+    {
+        var actions = this.storageDriveService.GetOccupiedSlotIndexes(drive)
+            .Select(slotIndex => new SVSAPMenuAction(
+                ModText.Format("ui.status.action.ejectSlot", slotIndex + 1),
+                () =>
+                {
+                    return this.storageDriveService.TryEjectCellSlot(drive, location, tile, slotIndex, out var message)
+                        ? message
+                        : message;
+                },
+                () => this.storageDriveService.HasCellSlot(drive, slotIndex)))
+            .ToList();
+
+        Game1.activeClickableMenu = new SVSAPStatusMenu(
+            drive.DisplayName,
+            () => this.storageDriveService.DescribeDrive(drive),
+            actions);
+    }
+
+    private void OpenPatternProviderMenu(SObject provider)
+    {
+        var actions = this.patternProviderService.GetOccupiedSlotIndexes(provider)
+            .Select(slotIndex => new SVSAPMenuAction(
+                ModText.Format("ui.status.action.ejectSlot", slotIndex + 1),
+                () =>
+                {
+                    return this.patternProviderService.TryEjectPatternSlot(provider, slotIndex, out var message)
+                        ? message
+                        : message;
+                },
+                () => this.patternProviderService.HasPatternSlot(provider, slotIndex)))
+            .ToList();
+
+        Game1.activeClickableMenu = new SVSAPStatusMenu(
+            provider.DisplayName,
+            () => this.patternProviderService.DescribeProvider(provider),
+            actions);
+    }
+
+    private void OpenTransferBusMenu(SObject bus)
+    {
+        var actions = new[]
+        {
+            new SVSAPMenuAction(
+                ModText.Get("ui.transferBus.action.clearFilter"),
+                () => this.transferBusService.TryClearFilter(bus, out var message) ? message : message),
+            new SVSAPMenuAction(
+                ModText.Get("ui.transferBus.action.toggleFilterMode"),
+                () => this.transferBusService.TryToggleFilterMode(bus, out var message) ? message : message),
+            new SVSAPMenuAction(
+                ModText.Get("ui.transferBus.action.toggleQuality"),
+                () => this.transferBusService.TryToggleQualityStrategy(bus, out var message) ? message : message)
+        };
+
+        Game1.activeClickableMenu = new SVSAPStatusMenu(
+            bus.DisplayName,
+            () => this.transferBusService.DescribeConfigurationLines(bus),
+            actions);
+    }
+
     private void OpenCraftingMonitor(SObject monitorObject)
     {
-        if (!this.TryGetActiveLinkedNetwork(monitorObject, "合成监视器", out var network, out var endpointId, out var message))
+        if (!this.TryGetActiveLinkedNetwork(monitorObject, ModText.Get("network.label.craftingMonitor"), out var network, out var endpointId, out var message))
         {
             Game1.addHUDMessage(new HUDMessage(message, HUDMessage.error_type));
             return;
@@ -973,7 +1199,7 @@ internal sealed class NetworkInteractionService
             return;
         }
 
-        if (!this.TryReadLinkedEndpointIds(terminal, "终端", out var networkId, out var endpointId, out var message))
+        if (!this.TryReadLinkedEndpointIds(terminal, ModText.Get("network.label.terminal"), out var networkId, out var endpointId, out var message))
         {
             Game1.addHUDMessage(new HUDMessage(message, HUDMessage.error_type));
             return;
@@ -982,7 +1208,7 @@ internal sealed class NetworkInteractionService
         var host = this.multiplayerHelper.GetConnectedPlayers().FirstOrDefault(peer => peer.IsHost);
         if (host is null || !host.HasSmapi || host.GetMod(this.modManifest.UniqueID) is null)
         {
-            Game1.addHUDMessage(new HUDMessage("主机必须安装 Stardew Valley Storage and Automation Project 才能使用网络终端。", HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("multiplayer.hostNeedsSVSAPTerminal"), HUDMessage.error_type));
             return;
         }
 
@@ -999,12 +1225,12 @@ internal sealed class NetworkInteractionService
             modIDs: new[] { this.modManifest.UniqueID },
             playerIDs: new[] { host.PlayerID });
 
-        Game1.addHUDMessage(new HUDMessage("已请求 SVSAP 终端快照。", HUDMessage.newQuest_type));
+        Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteTerminal.snapshotRequested"), HUDMessage.newQuest_type));
     }
 
     private void RequestRemoteCraftingSnapshot(SObject terminal)
     {
-        if (!this.TryReadLinkedEndpointIds(terminal, "终端", out var networkId, out var endpointId, out var message))
+        if (!this.TryReadLinkedEndpointIds(terminal, ModText.Get("network.label.terminal"), out var networkId, out var endpointId, out var message))
         {
             Game1.addHUDMessage(new HUDMessage(message, HUDMessage.error_type));
             return;
@@ -1015,7 +1241,7 @@ internal sealed class NetworkInteractionService
 
     private void RequestRemoteCraftingMonitorSnapshot(SObject monitorObject)
     {
-        if (!this.TryReadLinkedEndpointIds(monitorObject, "合成监视器", out var networkId, out var endpointId, out var message))
+        if (!this.TryReadLinkedEndpointIds(monitorObject, ModText.Get("network.label.craftingMonitor"), out var networkId, out var endpointId, out var message))
         {
             Game1.addHUDMessage(new HUDMessage(message, HUDMessage.error_type));
             return;
@@ -1037,7 +1263,7 @@ internal sealed class NetworkInteractionService
         var host = this.multiplayerHelper.GetConnectedPlayers().FirstOrDefault(peer => peer.IsHost);
         if (host is null || !host.HasSmapi || host.GetMod(this.modManifest.UniqueID) is null)
         {
-            Game1.addHUDMessage(new HUDMessage("主机必须安装 Stardew Valley Storage and Automation Project 才能使用合成终端。", HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("multiplayer.hostNeedsSVSAPCrafting"), HUDMessage.error_type));
             return;
         }
 
@@ -1053,7 +1279,7 @@ internal sealed class NetworkInteractionService
             modIDs: new[] { this.modManifest.UniqueID },
             playerIDs: new[] { host.PlayerID });
 
-        Game1.addHUDMessage(new HUDMessage("已请求 SVSAP 合成快照。", HUDMessage.newQuest_type));
+        Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteCrafting.snapshotRequested"), HUDMessage.newQuest_type));
     }
 
     private void SendRemoteCraftingMonitorSnapshotRequest(Guid networkId)
@@ -1069,7 +1295,7 @@ internal sealed class NetworkInteractionService
         var host = this.multiplayerHelper.GetConnectedPlayers().FirstOrDefault(peer => peer.IsHost);
         if (host is null || !host.HasSmapi || host.GetMod(this.modManifest.UniqueID) is null)
         {
-            Game1.addHUDMessage(new HUDMessage("主机必须安装 Stardew Valley Storage and Automation Project 才能使用合成监视器。", HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("multiplayer.hostNeedsSVSAPMonitor"), HUDMessage.error_type));
             return;
         }
 
@@ -1085,7 +1311,7 @@ internal sealed class NetworkInteractionService
             modIDs: new[] { this.modManifest.UniqueID },
             playerIDs: new[] { host.PlayerID });
 
-        Game1.addHUDMessage(new HUDMessage("已请求 SVSAP 监视器快照。", HUDMessage.newQuest_type));
+        Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteMonitor.snapshotRequested"), HUDMessage.newQuest_type));
     }
 
     private void HandleTerminalSnapshotRequest(ModMessageReceivedEventArgs e)
@@ -1133,26 +1359,129 @@ internal sealed class NetworkInteractionService
         Game1.playSound("bigSelect");
     }
 
-    private void SendRemoteTerminalActionRequest(TerminalActionRequestMessage request)
+    private bool SendRemoteTerminalActionRequest(TerminalActionRequestMessage request, TerminalSnapshotResponseMessage snapshot)
     {
         if (Context.IsMainPlayer)
-            return;
+            return false;
 
         var host = this.multiplayerHelper.GetConnectedPlayers().FirstOrDefault(peer => peer.IsHost);
         if (host is null || !host.HasSmapi || host.GetMod(this.modManifest.UniqueID) is null)
         {
-            Game1.addHUDMessage(new HUDMessage("主机必须安装 Stardew Valley Storage and Automation Project 才能使用网络终端。", HUDMessage.error_type));
-            return;
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("multiplayer.hostNeedsSVSAPTerminal"), HUDMessage.error_type));
+            return false;
         }
 
-        this.multiplayerHelper.SendMessage(
-            request,
-            MultiplayerMessageTypes.TerminalActionRequest,
-            modIDs: new[] { this.modManifest.UniqueID },
-            playerIDs: new[] { host.PlayerID });
+        List<Item>? capturedDepositItems = null;
+        if (IsTerminalDepositAction(request.Action)
+            && !this.TryCaptureRemoteTerminalDeposit(request, snapshot, out capturedDepositItems, out var captureMessage))
+        {
+            Game1.addHUDMessage(new HUDMessage(captureMessage, HUDMessage.error_type));
+            return false;
+        }
+
+        if (capturedDepositItems is not null)
+            this.pendingTerminalDeposits[request.TransactionId] = capturedDepositItems;
+
+        try
+        {
+            this.multiplayerHelper.SendMessage(
+                request,
+                MultiplayerMessageTypes.TerminalActionRequest,
+                modIDs: new[] { this.modManifest.UniqueID },
+                playerIDs: new[] { host.PlayerID });
+        }
+        catch (Exception ex)
+        {
+            if (capturedDepositItems is not null)
+            {
+                this.pendingTerminalDeposits.Remove(request.TransactionId);
+                this.RestoreItemsToPlayer(capturedDepositItems, Game1.currentLocation);
+            }
+
+            this.monitor.Log($"Failed to send SVSAP terminal request {request.TransactionId:N}: {ex.Message}", LogLevel.Warn);
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteTerminal.sendFailedRestored"), HUDMessage.error_type));
+            return false;
+        }
 
         this.LogGameplay($"action=remote_terminal_request result=sent player={DescribePlayer(Game1.player)} host={host.PlayerID} network={ShortId(request.NetworkId)} endpoint={ShortId(request.EndpointId)} requestAction={request.Action} amount={request.Amount:N0} tx={ShortId(request.TransactionId)}");
-        Game1.addHUDMessage(new HUDMessage("SVSAP 终端请求已发送。", HUDMessage.newQuest_type));
+        Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteTerminal.requestSent"), HUDMessage.newQuest_type));
+        return true;
+    }
+
+    private bool TryCaptureRemoteTerminalDeposit(
+        TerminalActionRequestMessage request,
+        TerminalSnapshotResponseMessage snapshot,
+        out List<Item> capturedItems,
+        out string message)
+    {
+        capturedItems = new List<Item>();
+        message = string.Empty;
+        request.DepositItems.Clear();
+
+        var sameOnly = request.Action == TerminalActionKind.DepositSame;
+        for (var slot = 0; slot < Game1.player.Items.Count; slot++)
+        {
+            var item = Game1.player.Items[slot];
+            if (item is null || item.Stack <= 0)
+                continue;
+
+            if (snapshot.LockedQualifiedItemIds.Contains(item.QualifiedItemId, StringComparer.Ordinal))
+                continue;
+
+            if (!CanRemoteTerminalDepositItem(item))
+                continue;
+
+            if (sameOnly && !RemoteSnapshotHasSameStack(snapshot, item))
+                continue;
+
+            var captured = item.getOne();
+            captured.Stack = item.Stack;
+            TerminalItemPayloadMessage payload;
+            try
+            {
+                payload = CreateTerminalPayload(captured);
+            }
+            catch (Exception ex)
+            {
+                this.monitor.Log($"Skipped remote terminal deposit item that could not be serialized: {ex.Message}", LogLevel.Warn);
+                continue;
+            }
+
+            capturedItems.Add(captured);
+            request.DepositItems.Add(payload);
+            Game1.player.Items[slot] = null;
+        }
+
+        if (capturedItems.Count > 0)
+            return true;
+
+        message = sameOnly ? ModText.Get("inventory.noSameToDeposit") : ModText.Get("inventory.noItemsToDeposit");
+        return false;
+    }
+
+    private static bool RemoteSnapshotHasSameStack(TerminalSnapshotResponseMessage snapshot, Item item)
+    {
+        var itemKey = ItemKeyFactory.FromItem(item);
+        foreach (var entry in snapshot.Entries)
+        {
+            try
+            {
+                var prototype = SerializedItemCodec.CreateItem(entry.SerializedItemPrototype, 1);
+                if (ItemKeyFactory.SameStackBucket(entry.Key, prototype, itemKey, item))
+                    return true;
+            }
+            catch
+            {
+                // Ignore unreadable remote prototypes; they cannot safely define a same-item match.
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsTerminalDepositAction(TerminalActionKind action)
+    {
+        return action is TerminalActionKind.DepositSame or TerminalActionKind.DepositAll;
     }
 
     private void HandleTerminalActionRequest(ModMessageReceivedEventArgs e)
@@ -1161,6 +1490,19 @@ internal sealed class NetworkInteractionService
             return;
 
         var request = e.ReadAs<TerminalActionRequestMessage>();
+        if (this.TryGetPeerActionBlock(e.FromPlayerID, out var blockMessage))
+        {
+            var blocked = new TerminalActionResponseMessage
+            {
+                TransactionId = request.TransactionId,
+                NetworkId = request.NetworkId,
+                Message = blockMessage
+            };
+            this.RememberTerminalActionResponse(e.FromPlayerID, request.TransactionId, blocked);
+            this.SendTerminalActionResponse(blocked, e.FromPlayerID);
+            return;
+        }
+
         if (this.TryGetCachedTerminalActionResponse(e.FromPlayerID, request.TransactionId, out var cached))
         {
             this.SendTerminalActionResponse(cached, e.FromPlayerID);
@@ -1210,6 +1552,23 @@ internal sealed class NetworkInteractionService
             return;
 
         var response = e.ReadAs<TerminalActionResponseMessage>();
+        if (response.TransactionId != Guid.Empty && !this.MarkClientTransactionReconciled(response.TransactionId, this.reconciledTerminalTx, this.reconciledTerminalTxOrder))
+            return;
+
+        this.pendingTerminalDeposits.TryGetValue(response.TransactionId, out var pendingDeposit);
+        this.pendingTerminalDeposits.Remove(response.TransactionId);
+
+        if (response.Success)
+        {
+            this.DeliverRemoteTerminalWithdrawal(response);
+            if (pendingDeposit is not null)
+                this.RestoreTerminalPayloads(response.ReturnedDepositItems, Game1.currentLocation);
+        }
+        else if (pendingDeposit is not null)
+        {
+            this.RestoreItemsToPlayer(pendingDeposit, Game1.currentLocation);
+        }
+
         Game1.addHUDMessage(new HUDMessage(response.Message, response.Success ? HUDMessage.newQuest_type : HUDMessage.error_type));
 
         if (response.Snapshot is null || !response.Snapshot.Success)
@@ -1264,7 +1623,7 @@ internal sealed class NetworkInteractionService
         var host = this.multiplayerHelper.GetConnectedPlayers().FirstOrDefault(peer => peer.IsHost);
         if (host is null || !host.HasSmapi || host.GetMod(this.modManifest.UniqueID) is null)
         {
-            Game1.addHUDMessage(new HUDMessage("主机必须安装 Stardew Valley Storage and Automation Project 才能使用合成终端。", HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("multiplayer.hostNeedsSVSAPCrafting"), HUDMessage.error_type));
             return;
         }
 
@@ -1275,7 +1634,7 @@ internal sealed class NetworkInteractionService
             playerIDs: new[] { host.PlayerID });
 
         this.LogGameplay($"action=remote_crafting_request result=sent player={DescribePlayer(Game1.player)} host={host.PlayerID} network={ShortId(request.NetworkId)} endpoint={ShortId(request.EndpointId)} recipe={Quote(request.RecipeName)} batches={request.Batches:N0} quality={request.QualityStrategy} tx={ShortId(request.TransactionId)}");
-        Game1.addHUDMessage(new HUDMessage("SVSAP 合成请求已发送。", HUDMessage.newQuest_type));
+        Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteCrafting.requestSent"), HUDMessage.newQuest_type));
     }
 
     private void HandleCraftingActionRequest(ModMessageReceivedEventArgs e)
@@ -1284,6 +1643,19 @@ internal sealed class NetworkInteractionService
             return;
 
         var request = e.ReadAs<CraftingActionRequestMessage>();
+        if (this.TryGetPeerActionBlock(e.FromPlayerID, out var blockMessage))
+        {
+            var blocked = new CraftingActionResponseMessage
+            {
+                TransactionId = request.TransactionId,
+                NetworkId = request.NetworkId,
+                Message = blockMessage
+            };
+            this.RememberCraftingActionResponse(e.FromPlayerID, request.TransactionId, blocked);
+            this.SendCraftingActionResponse(blocked, e.FromPlayerID);
+            return;
+        }
+
         if (this.TryGetCachedCraftingActionResponse(e.FromPlayerID, request.TransactionId, out var cached))
         {
             this.SendCraftingActionResponse(cached, e.FromPlayerID);
@@ -1395,7 +1767,7 @@ internal sealed class NetworkInteractionService
         var host = this.multiplayerHelper.GetConnectedPlayers().FirstOrDefault(peer => peer.IsHost);
         if (host is null || !host.HasSmapi || host.GetMod(this.modManifest.UniqueID) is null)
         {
-            Game1.addHUDMessage(new HUDMessage("主机必须安装 Stardew Valley Storage and Automation Project 才能使用合成监视器。", HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("multiplayer.hostNeedsSVSAPMonitor"), HUDMessage.error_type));
             return;
         }
 
@@ -1406,7 +1778,7 @@ internal sealed class NetworkInteractionService
             playerIDs: new[] { host.PlayerID });
 
         this.LogGameplay($"action=remote_monitor_request result=sent player={DescribePlayer(Game1.player)} host={host.PlayerID} network={ShortId(request.NetworkId)} endpoint={ShortId(request.EndpointId)} requestAction={request.Action} job={(request.JobId.HasValue ? ShortId(request.JobId.Value) : "none")} batches={request.Batches:N0} tx={ShortId(request.TransactionId)}");
-        Game1.addHUDMessage(new HUDMessage("SVSAP 监视器请求已发送。", HUDMessage.newQuest_type));
+        Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteMonitor.requestSent"), HUDMessage.newQuest_type));
     }
 
     private void HandleCraftingMonitorActionRequest(ModMessageReceivedEventArgs e)
@@ -1415,6 +1787,19 @@ internal sealed class NetworkInteractionService
             return;
 
         var request = e.ReadAs<CraftingMonitorActionRequestMessage>();
+        if (this.TryGetPeerActionBlock(e.FromPlayerID, out var blockMessage))
+        {
+            var blocked = new CraftingMonitorActionResponseMessage
+            {
+                TransactionId = request.TransactionId,
+                NetworkId = request.NetworkId,
+                Message = blockMessage
+            };
+            this.RememberCraftingMonitorActionResponse(e.FromPlayerID, request.TransactionId, blocked);
+            this.SendCraftingMonitorActionResponse(blocked, e.FromPlayerID);
+            return;
+        }
+
         if (this.TryGetCachedCraftingMonitorActionResponse(e.FromPlayerID, request.TransactionId, out var cached))
         {
             this.SendCraftingMonitorActionResponse(cached, e.FromPlayerID);
@@ -1501,7 +1886,7 @@ internal sealed class NetworkInteractionService
         if (!this.repository.TryGetNetwork(request.NetworkId, out var network))
         {
             response.Success = false;
-            response.Message = "终端没有连接到网络。";
+            response.Message = ModText.Get("network.error.terminalNotLinked");
             return response;
         }
 
@@ -1509,7 +1894,7 @@ internal sealed class NetworkInteractionService
         if (player is null)
         {
             response.Success = false;
-            response.Message = "发起请求的玩家已不在线。";
+            response.Message = ModText.Get("multiplayer.requestPlayerOffline");
             response.Snapshot = this.CreateTerminalSnapshotResponse(new TerminalSnapshotRequestMessage { NetworkId = request.NetworkId, EndpointId = request.EndpointId });
             return response;
         }
@@ -1523,18 +1908,29 @@ internal sealed class NetworkInteractionService
         }
 
         var actionMessage = string.Empty;
-        var success = request.Action switch
+        var success = false;
+        switch (request.Action)
         {
-            TerminalActionKind.Withdraw when request.ItemKey is not null
-                => this.transactionService.TryWithdrawForPlayer(network, player, request.ItemKey, request.Amount, out actionMessage),
-            TerminalActionKind.DepositSame
-                => this.transactionService.TryDepositFromPlayer(network, player, sameOnly: true, out actionMessage),
-            TerminalActionKind.DepositAll
-                => this.transactionService.TryDepositFromPlayer(network, player, sameOnly: false, out actionMessage),
-            TerminalActionKind.ToggleHeldItemLock
-                => this.TryToggleHeldItemLock(network, player, request, out actionMessage),
-            _ => Fail("不支持的终端请求。", out actionMessage)
-        };
+            case TerminalActionKind.Withdraw when request.ItemKey is not null:
+                success = this.TryExecuteRemoteTerminalWithdraw(network, request, response, out actionMessage);
+                break;
+
+            case TerminalActionKind.DepositSame:
+                success = this.TryExecuteRemoteTerminalDeposit(network, request, sameOnly: true, response, out actionMessage);
+                break;
+
+            case TerminalActionKind.DepositAll:
+                success = this.TryExecuteRemoteTerminalDeposit(network, request, sameOnly: false, response, out actionMessage);
+                break;
+
+            case TerminalActionKind.ToggleHeldItemLock:
+                success = this.TryToggleHeldItemLock(network, player, request, out actionMessage);
+                break;
+
+            default:
+                success = Fail(ModText.Get("remoteTerminal.unsupportedRequest"), out actionMessage);
+                break;
+        }
 
         if (success)
             this.transactionService.SaveNetworkState();
@@ -1546,12 +1942,81 @@ internal sealed class NetworkInteractionService
         return response;
     }
 
+    private bool TryExecuteRemoteTerminalWithdraw(
+        NetworkData network,
+        TerminalActionRequestMessage request,
+        TerminalActionResponseMessage response,
+        out string message)
+    {
+        if (request.ItemKey is null)
+            return Fail(ModText.Get("remoteTerminal.unsupportedRequest"), out message);
+
+        if (!this.transactionService.TryExtractForTerminal(network, request.ItemKey, request.Amount, out var extracted, out message)
+            || extracted is null)
+        {
+            return false;
+        }
+
+        response.ReturnedSerializedItem = SerializedItemCodec.SerializePrototype(extracted.getOne());
+        response.ReturnedCount = extracted.Stack;
+        return true;
+    }
+
+    private bool TryExecuteRemoteTerminalDeposit(
+        NetworkData network,
+        TerminalActionRequestMessage request,
+        bool sameOnly,
+        TerminalActionResponseMessage response,
+        out string message)
+    {
+        response.ReturnedDepositItems.Clear();
+        if (request.DepositItems.Count == 0)
+        {
+            message = sameOnly ? ModText.Get("inventory.noSameToDeposit") : ModText.Get("inventory.noItemsToDeposit");
+            return false;
+        }
+
+        var existing = sameOnly ? this.inventoryScanner.Scan(network).Entries : new List<NetworkInventoryEntry>();
+        var moved = 0;
+        foreach (var payload in request.DepositItems)
+        {
+            if (!TryCreateTerminalPayloadItem(payload, out var item))
+                continue;
+
+            if (item.Stack <= 0)
+                continue;
+
+            if (network.LockedQualifiedItemIds.Contains(item.QualifiedItemId, StringComparer.Ordinal)
+                || !CanRemoteTerminalDepositItem(item)
+                || (sameOnly && !existing.Any(entry => ItemKeyFactory.SameStackBucket(entry.Key, entry.Prototype, ItemKeyFactory.FromItem(item), item))))
+            {
+                response.ReturnedDepositItems.Add(CreateTerminalPayload(item));
+                continue;
+            }
+
+            if (this.transactionService.TryDepositItem(network, item, out var movedFromStack) && movedFromStack > 0)
+                moved += movedFromStack;
+
+            if (item.Stack > 0)
+                response.ReturnedDepositItems.Add(CreateTerminalPayload(item));
+        }
+
+        if (moved <= 0)
+        {
+            message = sameOnly ? ModText.Get("inventory.noSameToDeposit") : ModText.Get("inventory.noItemsToDeposit");
+            return false;
+        }
+
+        message = sameOnly ? ModText.Format("inventory.depositSameSuccess", moved) : ModText.Format("inventory.depositAllSuccess", moved);
+        return true;
+    }
+
     private bool TryToggleHeldItemLock(NetworkData network, Farmer player, TerminalActionRequestMessage request, out string message)
     {
         var id = request.HeldQualifiedItemId;
         if (string.IsNullOrWhiteSpace(id))
         {
-            message = "请先手持要锁定或解锁的物品。";
+            message = ModText.Get("terminal.lockHoldItem");
             return false;
         }
 
@@ -1562,7 +2027,7 @@ internal sealed class NetworkInteractionService
         if (removed > 0)
         {
             this.repository.Save();
-            message = $"SVSAP 已解除锁定：{displayName}。";
+            message = ModText.Format("terminal.unlocked", displayName);
             this.LogGameplay($"action=toggle_item_lock result=success player={DescribePlayer(player)} network={ShortId(network.NetworkId)} mode=unlock item={Quote(displayName)} itemId={Quote(id)}");
             return true;
         }
@@ -1570,7 +2035,7 @@ internal sealed class NetworkInteractionService
         network.LockedQualifiedItemIds.Add(id);
         network.LockedQualifiedItemIds.Sort(StringComparer.Ordinal);
         this.repository.Save();
-        message = $"SVSAP 已锁定：{displayName}。";
+        message = ModText.Format("terminal.locked", displayName);
         this.LogGameplay($"action=toggle_item_lock result=success player={DescribePlayer(player)} network={ShortId(network.NetworkId)} mode=lock item={Quote(displayName)} itemId={Quote(id)}");
         return true;
     }
@@ -1586,7 +2051,7 @@ internal sealed class NetworkInteractionService
         if (!this.repository.TryGetNetwork(request.NetworkId, out var network))
         {
             response.Success = false;
-            response.Message = "终端没有连接到网络。";
+            response.Message = ModText.Get("network.error.terminalNotLinked");
             return response;
         }
 
@@ -1594,7 +2059,7 @@ internal sealed class NetworkInteractionService
         if (player is null)
         {
             response.Success = false;
-            response.Message = "发起请求的玩家已不在线。";
+            response.Message = ModText.Get("multiplayer.requestPlayerOffline");
             response.Snapshot = this.CreateCraftingSnapshotResponse(
                 new CraftingSnapshotRequestMessage { NetworkId = request.NetworkId, EndpointId = request.EndpointId, Batches = request.Batches, QualityStrategy = request.QualityStrategy },
                 fromPlayerId);
@@ -1618,7 +2083,7 @@ internal sealed class NetworkInteractionService
         if (recipe is null)
         {
             response.Success = false;
-            response.Message = "该玩家尚未掌握这个合成配方。";
+            response.Message = ModText.Get("remoteCrafting.recipeUnknown");
             response.Snapshot = this.CreateCraftingSnapshotResponse(
                 new CraftingSnapshotRequestMessage { NetworkId = request.NetworkId, EndpointId = request.EndpointId, Batches = request.Batches, QualityStrategy = request.QualityStrategy },
                 fromPlayerId);
@@ -1651,7 +2116,7 @@ internal sealed class NetworkInteractionService
         if (!this.repository.TryGetNetwork(request.NetworkId, out var network))
         {
             response.Success = false;
-            response.Message = "合成监视器没有连接到网络。";
+            response.Message = ModText.Get("network.error.monitorNotLinked");
             return response;
         }
 
@@ -1682,7 +2147,7 @@ internal sealed class NetworkInteractionService
                 {
                     response.Success = false;
                     response.RequiresConfirmation = true;
-                    response.Message = "长耗时 CPU 作业会占用一个 CPU 槽位。再点一次排队确认。";
+                    response.Message = ModText.Get("craftingMonitor.longJob.confirmHud");
                     response.Snapshot = this.CreateCraftingMonitorSnapshotResponse(new CraftingMonitorSnapshotRequestMessage
                     {
                         NetworkId = request.NetworkId,
@@ -1705,7 +2170,7 @@ internal sealed class NetworkInteractionService
                 break;
 
             default:
-                success = Fail("不支持的合成监视器请求。", out actionMessage);
+                success = Fail(ModText.Get("remoteMonitor.unsupportedRequest"), out actionMessage);
                 break;
         }
 
@@ -1732,7 +2197,7 @@ internal sealed class NetworkInteractionService
                 NetworkId = request.NetworkId,
                 EndpointId = request.EndpointId,
                 Success = false,
-                Message = "终端没有连接到网络。"
+                Message = ModText.Get("network.error.terminalNotLinked")
             };
         }
 
@@ -1803,7 +2268,7 @@ internal sealed class NetworkInteractionService
         if (!this.repository.TryGetNetwork(request.NetworkId, out var network))
         {
             response.Success = false;
-            response.Message = "终端没有连接到网络。";
+            response.Message = ModText.Get("network.error.terminalNotLinked");
             return response;
         }
 
@@ -1818,7 +2283,7 @@ internal sealed class NetworkInteractionService
         if (player is null)
         {
             response.Success = false;
-            response.Message = "发起请求的玩家已不在线。";
+            response.Message = ModText.Get("multiplayer.requestPlayerOffline");
             return response;
         }
 
@@ -1854,7 +2319,7 @@ internal sealed class NetworkInteractionService
                 NetworkId = request.NetworkId,
                 EndpointId = request.EndpointId,
                 Success = false,
-                Message = "合成监视器没有连接到网络。"
+                Message = ModText.Get("network.error.monitorNotLinked")
             };
         }
 
@@ -1891,7 +2356,7 @@ internal sealed class NetworkInteractionService
                     return new RemoteCraftingJobMessage
                     {
                         JobId = job.JobId,
-                        DisplayName = job.Pattern.DisplayName,
+                        DisplayName = PatternDisplayNames.Get(job.Pattern),
                         State = job.State,
                         RequestedCount = job.RequestedCount,
                         CompletedCount = job.CompletedCount,
@@ -1913,7 +2378,7 @@ internal sealed class NetworkInteractionService
                     Enabled = pipeline.Enabled,
                     Priority = pipeline.Priority,
                     Mode = pipeline.Mode,
-                    DisplayName = pipeline.Pattern.DisplayName,
+                    DisplayName = PatternDisplayNames.Get(pipeline.Pattern),
                     TargetKeep = pipeline.TargetKeep,
                     ItemsPerCycle = pipeline.ItemsPerCycle,
                     StatusMessage = pipeline.StatusMessage
@@ -1927,7 +2392,7 @@ internal sealed class NetworkInteractionService
         var item = this.TryCreateCaskPipelineItem(serializedItem);
         if (item is null)
         {
-            message = "请先手持可陈酿的物品：酒、啤酒、淡啤酒、蜂蜜酒、奶酪或山羊奶酪。";
+            message = ModText.Get("caskPipeline.needAgeable");
             return false;
         }
 
@@ -2009,7 +2474,7 @@ internal sealed class NetworkInteractionService
     {
         if (!this.IsEndpointPhysicallyPresent(network, endpoint))
         {
-            message = "SVSAP 端点物体已不在保存的位置。";
+            message = ModText.Get("network.error.endpointMissing");
             return false;
         }
 
@@ -2021,13 +2486,13 @@ internal sealed class NetworkInteractionService
 
         if (!this.TryGetCoreEndpoint(network, out var core))
         {
-            message = "请先选择或放置 SVSAP 网络核心。";
+            message = ModText.Get("network.error.noCore");
             return false;
         }
 
         if (!this.IsEndpointPhysicallyPresent(network, core))
         {
-            message = "SVSAP 网络核心已不在保存的位置。";
+            message = ModText.Get("network.error.coreMissing");
             return false;
         }
 
@@ -2036,13 +2501,13 @@ internal sealed class NetworkInteractionService
 
         if (!this.getConfig().EnableSimpleWirelessWithinFarm)
         {
-            message = "SVSAP 简易无线已禁用；请启用它，或改用线缆连接。";
+            message = ModText.Get("network.error.simpleWirelessDisabled");
             return false;
         }
 
         if (!string.Equals(core.LocationName, endpoint.LocationName, StringComparison.Ordinal))
         {
-            message = "SVSAP 简易无线只能连接与核心同地图的物体。";
+            message = ModText.Get("network.error.simpleWirelessSameLocation");
             return false;
         }
 
@@ -2059,7 +2524,7 @@ internal sealed class NetworkInteractionService
 
         if (!this.repository.TryGetNetwork(networkId, out network!))
         {
-            message = $"{label}没有连接到网络。";
+            message = ModText.Format("network.error.labelNotLinked", label);
             return false;
         }
 
@@ -2080,13 +2545,13 @@ internal sealed class NetworkInteractionService
 
         if (!Guid.TryParse(endpointObject.modData.GetValueOrDefault(EndpointIdentityService.NetworkIdKey), out networkId))
         {
-            message = $"{label}没有连接到网络。";
+            message = ModText.Format("network.error.labelNotLinked", label);
             return false;
         }
 
         if (!Guid.TryParse(endpointObject.modData.GetValueOrDefault(EndpointIdentityService.EndpointIdKey), out endpointId))
         {
-            message = $"{label}缺少端点身份信息。";
+            message = ModText.Format("network.error.labelMissingEndpointId", label);
             return false;
         }
 
@@ -2105,13 +2570,13 @@ internal sealed class NetworkInteractionService
         var endpoint = network.Endpoints.FirstOrDefault(candidate => candidate.EndpointId == endpointId);
         if (endpoint is null)
         {
-            message = "SVSAP 端点未注册到这个网络。";
+            message = ModText.Get("network.error.endpointNotRegistered");
             return false;
         }
 
         if (expectedType.HasValue && endpoint.Type != expectedType.Value)
         {
-            message = "SVSAP 端点类型与本次请求不匹配。";
+            message = ModText.Get("network.error.endpointTypeMismatch");
             return false;
         }
 
@@ -2152,14 +2617,14 @@ internal sealed class NetworkInteractionService
     {
         if (!string.Equals(core.LocationName, endpoint.LocationName, StringComparison.Ordinal))
         {
-            message = "线缆模式要求端点和核心在同一张地图。";
+            message = ModText.Get("network.error.cableSameLocation");
             return false;
         }
 
         var location = Game1.getLocationFromName(endpoint.LocationName);
         if (location is null)
         {
-            message = "SVSAP 找不到这个端点所在的地图。";
+            message = ModText.Get("network.error.endpointLocationMissing");
             return false;
         }
 
@@ -2204,7 +2669,7 @@ internal sealed class NetworkInteractionService
             }
         }
 
-        message = "线缆模式需要一条连接到核心的 SVSAP 线缆路径。";
+        message = ModText.Get("network.error.cablePathMissing");
         return false;
     }
 

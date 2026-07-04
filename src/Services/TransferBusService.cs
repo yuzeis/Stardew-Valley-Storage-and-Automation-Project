@@ -62,14 +62,14 @@ internal sealed class TransferBusService
         {
             var rawFilter = bus.modData.GetValueOrDefault(FilterKey);
             var filter = string.IsNullOrWhiteSpace(rawFilter)
-                ? "无"
-                : $"{rawFilter} ({(this.GetBoolModData(bus, FilterBlacklistKey, false) ? "黑名单" : "白名单")})";
+                ? ModText.Get("ui.transferBus.none")
+                : ModText.Format("ui.transferBus.filterValue", rawFilter, FormatFilterMode(this.GetBoolModData(bus, FilterBlacklistKey, false)));
             var quality = Enum.TryParse(bus.modData.GetValueOrDefault(QualityStrategyKey), out MaterialQualityStrategy parsedQuality)
                 ? FormatQualityStrategy(parsedQuality)
                 : FormatQualityStrategy(MaterialQualityStrategy.LowQualityFirst);
             var minSourceKeep = this.GetIntModData(bus, MinSourceKeepKey, 0);
             var targetKeep = this.GetIntModData(bus, TargetKeepKey, 0);
-            Game1.addHUDMessage(new HUDMessage($"搬运过滤：{filter}；质量：{quality}；保留 {minSourceKeep:N0}/{targetKeep:N0}", HUDMessage.newQuest_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Format("ui.transferBus.summary", filter, quality, minSourceKeep, targetKeep), HUDMessage.newQuest_type));
             return true;
         }
 
@@ -83,7 +83,7 @@ internal sealed class TransferBusService
             {
                 bus.modData.Remove(FilterBlacklistKey);
                 this.SyncBusData(bus);
-                Game1.addHUDMessage(new HUDMessage("搬运过滤已经为空。", HUDMessage.newQuest_type));
+                Game1.addHUDMessage(new HUDMessage(ModText.Get("ui.transferBus.filterAlreadyEmpty"), HUDMessage.newQuest_type));
                 return true;
             }
 
@@ -92,7 +92,7 @@ internal sealed class TransferBusService
                 bus.modData[FilterBlacklistKey] = true.ToString();
                 this.SyncBusData(bus);
                 this.ConsumeHeldOne(held);
-                Game1.addHUDMessage(new HUDMessage("搬运过滤模式：黑名单。", HUDMessage.newQuest_type));
+                Game1.addHUDMessage(new HUDMessage(ModText.Get("ui.transferBus.filterModeBlacklist"), HUDMessage.newQuest_type));
                 return true;
             }
 
@@ -102,7 +102,7 @@ internal sealed class TransferBusService
             bus.modData.Remove(TargetKeepKey);
             this.SyncBusData(bus);
             this.ConsumeHeldOne(held);
-            Game1.addHUDMessage(new HUDMessage("搬运过滤已清空。", HUDMessage.newQuest_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("ui.transferBus.filterCleared"), HUDMessage.newQuest_type));
             return true;
         }
 
@@ -112,7 +112,7 @@ internal sealed class TransferBusService
             bus.modData[TickIntervalKey] = Math.Max(MinTickInterval, interval / 2).ToString();
             this.SyncBusData(bus);
             this.ConsumeHeldOne(held);
-            Game1.addHUDMessage(new HUDMessage("搬运速度已升级。", HUDMessage.newQuest_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("ui.transferBus.speedUpgraded"), HUDMessage.newQuest_type));
             return true;
         }
 
@@ -122,7 +122,7 @@ internal sealed class TransferBusService
             bus.modData[ItemsPerOperationKey] = Math.Min(MaxItemsPerOperation, Math.Max(1, amount) * 2).ToString();
             this.SyncBusData(bus);
             this.ConsumeHeldOne(held);
-            Game1.addHUDMessage(new HUDMessage("搬运容量已升级。", HUDMessage.newQuest_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("ui.transferBus.capacityUpgraded"), HUDMessage.newQuest_type));
             return true;
         }
 
@@ -134,7 +134,7 @@ internal sealed class TransferBusService
             bus.modData[QualityStrategyKey] = strategy.ToString();
             this.SyncBusData(bus);
             this.ConsumeHeldOne(held);
-            Game1.addHUDMessage(new HUDMessage($"搬运质量策略：{FormatQualityStrategy(strategy)}。", HUDMessage.newQuest_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Format("ui.transferBus.qualityChanged", FormatQualityStrategy(strategy)), HUDMessage.newQuest_type));
             return true;
         }
 
@@ -145,20 +145,20 @@ internal sealed class TransferBusService
             {
                 bus.modData[MinSourceKeepKey] = keep.ToString();
                 this.SyncBusData(bus);
-                Game1.addHUDMessage(new HUDMessage($"导入总线会在来源保留 {keep:N0} 个。", HUDMessage.newQuest_type));
+                Game1.addHUDMessage(new HUDMessage(ModText.Format("ui.transferBus.importerKeep", keep), HUDMessage.newQuest_type));
                 return true;
             }
 
             bus.modData[TargetKeepKey] = keep.ToString();
             this.SyncBusData(bus);
-            Game1.addHUDMessage(new HUDMessage($"导出总线会把目标维持在 {keep:N0} 个。", HUDMessage.newQuest_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Format("ui.transferBus.exporterKeep", keep), HUDMessage.newQuest_type));
             return true;
         }
 
         bus.modData[FilterKey] = held.QualifiedItemId;
         bus.modData.Remove(FilterBlacklistKey);
         this.SyncBusData(bus);
-        Game1.addHUDMessage(new HUDMessage($"搬运过滤已设为 {held.DisplayName}（白名单）。", HUDMessage.newQuest_type));
+        Game1.addHUDMessage(new HUDMessage(ModText.Format("ui.transferBus.filterSetWhitelist", held.DisplayName), HUDMessage.newQuest_type));
         return true;
     }
 
@@ -166,14 +166,97 @@ internal sealed class TransferBusService
     {
         var rawFilter = bus.modData.GetValueOrDefault(FilterKey);
         var filter = string.IsNullOrWhiteSpace(rawFilter)
-            ? "无"
-            : $"{rawFilter} ({(this.GetBoolModData(bus, FilterBlacklistKey, false) ? "黑名单" : "白名单")})";
+            ? ModText.Get("ui.transferBus.none")
+            : ModText.Format("ui.transferBus.filterValue", rawFilter, FormatFilterMode(this.GetBoolModData(bus, FilterBlacklistKey, false)));
         var quality = Enum.TryParse(bus.modData.GetValueOrDefault(QualityStrategyKey), out MaterialQualityStrategy parsedQuality)
             ? FormatQualityStrategy(parsedQuality)
             : FormatQualityStrategy(MaterialQualityStrategy.LowQualityFirst);
         var minSourceKeep = this.GetIntModData(bus, MinSourceKeepKey, 0);
         var targetKeep = this.GetIntModData(bus, TargetKeepKey, 0);
-        return $"搬运过滤：{filter}；质量：{quality}；保留 {minSourceKeep:N0}/{targetKeep:N0}";
+        return ModText.Format("ui.transferBus.summary", filter, quality, minSourceKeep, targetKeep);
+    }
+
+    public IReadOnlyList<string> DescribeConfigurationLines(SObject bus)
+    {
+        if (bus.QualifiedItemId is not ("(BC)" + ModItemCatalog.Importer) and not ("(BC)" + ModItemCatalog.Exporter))
+            return new[] { ModText.Get("ui.transferBus.notBus") };
+
+        var rawFilter = bus.modData.GetValueOrDefault(FilterKey);
+        var hasFilter = !string.IsNullOrWhiteSpace(rawFilter);
+        var filter = hasFilter
+            ? ModText.Format("ui.transferBus.filterValue", rawFilter, FormatFilterMode(this.GetBoolModData(bus, FilterBlacklistKey, false)))
+            : ModText.Get("ui.transferBus.none");
+        var quality = FormatQualityStrategy(this.GetQualityStrategy(bus, MaterialQualityStrategy.LowQualityFirst));
+        var minSourceKeep = this.GetIntModData(bus, MinSourceKeepKey, 0);
+        var targetKeep = this.GetIntModData(bus, TargetKeepKey, 0);
+        var interval = this.GetIntModData(bus, TickIntervalKey, DefaultTickInterval);
+        var amount = this.GetIntModData(bus, ItemsPerOperationKey, DefaultItemsPerOperation);
+        return new[]
+        {
+            ModText.Format("ui.transferBus.type", bus.QualifiedItemId == "(BC)" + ModItemCatalog.Importer ? ModText.Get("ui.transferBus.importer") : ModText.Get("ui.transferBus.exporter")),
+            ModText.Format("ui.transferBus.filter", filter),
+            ModText.Format("ui.transferBus.quality", quality),
+            ModText.Format("ui.transferBus.sourceKeep", minSourceKeep),
+            ModText.Format("ui.transferBus.targetKeep", targetKeep),
+            ModText.Format("ui.transferBus.amount", amount),
+            ModText.Format("ui.transferBus.tickInterval", interval),
+            ModText.Get("ui.transferBus.help")
+        };
+    }
+
+    public bool TryClearFilter(SObject bus, out string message)
+    {
+        if (bus.QualifiedItemId is not ("(BC)" + ModItemCatalog.Importer) and not ("(BC)" + ModItemCatalog.Exporter))
+        {
+            message = ModText.Get("ui.transferBus.notBus");
+            return false;
+        }
+
+        bus.modData.Remove(FilterKey);
+        bus.modData.Remove(FilterBlacklistKey);
+        bus.modData.Remove(MinSourceKeepKey);
+        bus.modData.Remove(TargetKeepKey);
+        this.SyncBusData(bus);
+        message = ModText.Get("ui.transferBus.filterCleared");
+        return true;
+    }
+
+    public bool TryToggleFilterMode(SObject bus, out string message)
+    {
+        if (bus.QualifiedItemId is not ("(BC)" + ModItemCatalog.Importer) and not ("(BC)" + ModItemCatalog.Exporter))
+        {
+            message = ModText.Get("ui.transferBus.notBus");
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(bus.modData.GetValueOrDefault(FilterKey)))
+        {
+            message = ModText.Get("ui.transferBus.noFilterToToggle");
+            return false;
+        }
+
+        var next = !this.GetBoolModData(bus, FilterBlacklistKey, false);
+        bus.modData[FilterBlacklistKey] = next.ToString();
+        this.SyncBusData(bus);
+        message = next ? ModText.Get("ui.transferBus.filterModeBlacklist") : ModText.Get("ui.transferBus.filterModeWhitelist");
+        return true;
+    }
+
+    public bool TryToggleQualityStrategy(SObject bus, out string message)
+    {
+        if (bus.QualifiedItemId is not ("(BC)" + ModItemCatalog.Importer) and not ("(BC)" + ModItemCatalog.Exporter))
+        {
+            message = ModText.Get("ui.transferBus.notBus");
+            return false;
+        }
+
+        var strategy = this.GetQualityStrategy(bus, MaterialQualityStrategy.LowQualityFirst) == MaterialQualityStrategy.LowQualityFirst
+            ? MaterialQualityStrategy.HighQualityFirst
+            : MaterialQualityStrategy.LowQualityFirst;
+        bus.modData[QualityStrategyKey] = strategy.ToString();
+        this.SyncBusData(bus);
+        message = ModText.Format("ui.transferBus.qualityChanged", FormatQualityStrategy(strategy));
+        return true;
     }
 
     public StructuralActionResult ApplyConfigure(
@@ -183,7 +266,7 @@ internal sealed class TransferBusService
         int heldStack)
     {
         if (bus.QualifiedItemId is not ("(BC)" + ModItemCatalog.Importer) and not ("(BC)" + ModItemCatalog.Exporter))
-            return StructuralActionResult.Fail("目标不是搬运总线。");
+            return StructuralActionResult.Fail(ModText.Get("ui.transferBus.notBus"));
 
         if (string.IsNullOrWhiteSpace(heldQualifiedItemId))
         {
@@ -195,7 +278,7 @@ internal sealed class TransferBusService
         }
 
         if (heldQualifiedItemId == "(O)" + ModItemCatalog.LinkTool)
-            return StructuralActionResult.Fail("链接工具不用于配置搬运总线。");
+            return StructuralActionResult.Fail(ModText.Get("ui.transferBus.linkToolNotUsed"));
 
         if (heldQualifiedItemId == "(O)" + ModItemCatalog.FilterCard)
         {
@@ -204,14 +287,14 @@ internal sealed class TransferBusService
             {
                 bus.modData.Remove(FilterBlacklistKey);
                 this.SyncBusData(bus);
-                return Success("搬运过滤已经为空。");
+                return Success(ModText.Get("ui.transferBus.filterAlreadyEmpty"));
             }
 
             if (!this.GetBoolModData(bus, FilterBlacklistKey, false))
             {
                 bus.modData[FilterBlacklistKey] = true.ToString();
                 this.SyncBusData(bus);
-                return Success("搬运过滤模式：黑名单。", consumeHeldOne: true);
+                return Success(ModText.Get("ui.transferBus.filterModeBlacklist"), consumeHeldOne: true);
             }
 
             bus.modData.Remove(FilterKey);
@@ -219,7 +302,7 @@ internal sealed class TransferBusService
             bus.modData.Remove(MinSourceKeepKey);
             bus.modData.Remove(TargetKeepKey);
             this.SyncBusData(bus);
-            return Success("搬运过滤已清空。", consumeHeldOne: true);
+            return Success(ModText.Get("ui.transferBus.filterCleared"), consumeHeldOne: true);
         }
 
         if (heldQualifiedItemId == "(O)" + ModItemCatalog.SpeedCard)
@@ -227,7 +310,7 @@ internal sealed class TransferBusService
             var interval = this.GetIntModData(bus, TickIntervalKey, DefaultTickInterval);
             bus.modData[TickIntervalKey] = Math.Max(MinTickInterval, interval / 2).ToString();
             this.SyncBusData(bus);
-            return Success("搬运速度已升级。", consumeHeldOne: true);
+            return Success(ModText.Get("ui.transferBus.speedUpgraded"), consumeHeldOne: true);
         }
 
         if (heldQualifiedItemId == "(O)" + ModItemCatalog.CapacityCard)
@@ -235,7 +318,7 @@ internal sealed class TransferBusService
             var amount = this.GetIntModData(bus, ItemsPerOperationKey, DefaultItemsPerOperation);
             bus.modData[ItemsPerOperationKey] = Math.Min(MaxItemsPerOperation, Math.Max(1, amount) * 2).ToString();
             this.SyncBusData(bus);
-            return Success("搬运容量已升级。", consumeHeldOne: true);
+            return Success(ModText.Get("ui.transferBus.capacityUpgraded"), consumeHeldOne: true);
         }
 
         if (heldQualifiedItemId == "(O)" + ModItemCatalog.QualityCard)
@@ -245,7 +328,7 @@ internal sealed class TransferBusService
                 : MaterialQualityStrategy.LowQualityFirst;
             bus.modData[QualityStrategyKey] = strategy.ToString();
             this.SyncBusData(bus);
-            return Success($"搬运质量策略：{FormatQualityStrategy(strategy)}。", consumeHeldOne: true);
+            return Success(ModText.Format("ui.transferBus.qualityChanged", FormatQualityStrategy(strategy)), consumeHeldOne: true);
         }
 
         if (bus.modData.GetValueOrDefault(FilterKey) == heldQualifiedItemId)
@@ -255,19 +338,19 @@ internal sealed class TransferBusService
             {
                 bus.modData[MinSourceKeepKey] = keep.ToString();
                 this.SyncBusData(bus);
-                return Success($"导入总线会在来源保留 {keep:N0} 个。");
+                return Success(ModText.Format("ui.transferBus.importerKeep", keep));
             }
 
             bus.modData[TargetKeepKey] = keep.ToString();
             this.SyncBusData(bus);
-            return Success($"导出总线会把目标维持在 {keep:N0} 个。");
+            return Success(ModText.Format("ui.transferBus.exporterKeep", keep));
         }
 
         bus.modData[FilterKey] = heldQualifiedItemId;
         bus.modData.Remove(FilterBlacklistKey);
         this.SyncBusData(bus);
         var displayName = string.IsNullOrWhiteSpace(heldDisplayName) ? heldQualifiedItemId : heldDisplayName;
-        return Success($"搬运过滤已设为 {displayName}（白名单）。");
+        return Success(ModText.Format("ui.transferBus.filterSetWhitelist", displayName));
     }
 
     public void OnUpdateTicked(object? sender, UpdateTickedEventArgs e)
@@ -448,13 +531,13 @@ internal sealed class TransferBusService
                 && extracted.Stack >= count)
             {
                 rolledBack = extracted.Stack;
-                message = "已回滚部分机器产物存入。";
+                message = ModText.Get("machineOutput.rollbackSuccess");
                 return true;
             }
 
             rolledBack = Math.Max(0, extracted?.Stack ?? 0);
             message = rolledBack > 0
-                ? $"只回滚了 {rolledBack:N0}/{count:N0}；{extractMessage}"
+                ? ModText.Format("machineOutput.rollbackPartial", rolledBack, count, extractMessage)
                 : extractMessage;
         }
         catch (Exception ex)
@@ -777,10 +860,17 @@ internal sealed class TransferBusService
     {
         return strategy switch
         {
-            MaterialQualityStrategy.HighQualityFirst => "高品质优先",
-            MaterialQualityStrategy.PreserveGoldIridium => "保留金/铱",
-            _ => "低品质优先"
+            MaterialQualityStrategy.HighQualityFirst => ModText.Get("ui.transferBus.quality.highFirst"),
+            MaterialQualityStrategy.PreserveGoldIridium => ModText.Get("ui.transferBus.quality.preserveGoldIridium"),
+            _ => ModText.Get("ui.transferBus.quality.lowFirst")
         };
+    }
+
+    private static string FormatFilterMode(bool blacklist)
+    {
+        return blacklist
+            ? ModText.Get("ui.transferBus.mode.blacklist")
+            : ModText.Get("ui.transferBus.mode.whitelist");
     }
 
     private static bool CanMachineAccept(SObject machine, string qualifiedItemId, int count)

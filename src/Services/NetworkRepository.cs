@@ -27,10 +27,8 @@ internal sealed class NetworkRepository
 
     public void Save()
     {
-        // 网络数据是主机权威(数据存在服务端)。客机永不落盘:
-        // 在客机上 WriteSaveData 会抛异常或只写本地缓存,导致客机内存与主机不一致。
-        // 客机的一切结构性写操作必须通过 NetworkInteractionService 的 host action 请求由主机执行。
-        // 自测/启动阶段还没有载入存档,也不能调用 WriteSaveData。
+        // Network data is host-authoritative. Farmhands never persist local copies,
+        // and startup/self-test paths can run before a save is loaded.
         if (!Context.IsMainPlayer || !Context.IsWorldReady)
             return;
 
@@ -44,7 +42,7 @@ internal sealed class NetworkRepository
             network = new NetworkData
             {
                 NetworkId = networkId,
-                Name = $"网络 {this.data.Networks.Count + 1}"
+                Name = ModText.Format("network.defaultName", this.data.Networks.Count + 1)
             };
 
             this.data.Networks[networkId] = network;

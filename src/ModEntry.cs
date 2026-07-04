@@ -33,9 +33,16 @@ public sealed class ModEntry : Mod
 
     public override void Entry(IModHelper helper)
     {
+        var configPath = Path.Combine(helper.DirectoryPath, "config.json");
+        var configExists = File.Exists(configPath);
         this.config = helper.ReadConfig<ModConfig>();
         this.NormalizeConfig();
-        this.config.Language = ModText.NormalizeLanguage(this.config.Language);
+        this.config.Language = configExists
+            ? ModText.NormalizeLanguage(this.config.Language)
+            : GetDefaultLanguageForLocale(helper);
+        if (!configExists)
+            helper.WriteConfig(this.config);
+
         ModText.Load(helper, this.config.Language, this.Monitor);
 
         var contentInjector = new ContentInjector(() => this.config, this.Monitor);
@@ -113,25 +120,25 @@ public sealed class ModEntry : Mod
 
         helper.ConsoleCommands.Add(
             "svsap_m1_ids",
-            "列出 Stardew Valley Storage and Automation Project M1 物品 ID 和存储元件字节容量。",
+            "List Stardew Valley Storage and Automation Project M1 item IDs and storage cell byte capacities.",
             this.CommandListM1Ids);
 #if DEBUG
         helper.ConsoleCommands.Add(
             "svsap_selftest",
-            "运行 Stardew Valley Storage and Automation Project 运行时自测：存储元件、事务恢复、远程缓存、保留来源产物和 CPU 槽位预留。",
+            "Run Stardew Valley Storage and Automation Project runtime self-tests.",
             this.runtimeSelfTestService.RunCommand);
 #endif
         helper.ConsoleCommands.Add(
             "svsap_api_dump",
-            "输出 SVSAPME 对接用 SVSAP API 版本、modData key 和配置快照。",
+            "Print the SVSAP API version, modData keys, and config snapshot used by SVSAPME.",
             this.CommandApiDump);
         helper.ConsoleCommands.Add(
             "svsap_endpoint_probe",
-            "探测当前面对格或指定 x y 格子的 SVSAP 网络端点绑定状态。",
+            "Probe the SVSAP network endpoint binding at the facing tile or at x y.",
             this.CommandEndpointProbe);
         helper.ConsoleCommands.Add(
             "svsap_api_selftest",
-            "运行 SVSAPME 对接用 SVSAP API 合约自测；可选参数 x y 用于验证一个已绑定端点。",
+            "Run the SVSAP API contract self-test used by SVSAPME; optional x y validates a linked endpoint.",
             this.CommandApiSelfTest);
 
 #if DEBUG
@@ -157,7 +164,7 @@ public sealed class ModEntry : Mod
     private void OnSaveLoaded(object? sender, SaveLoadedEventArgs e)
     {
         this.warnedMissingSVSAPPeers.Clear();
-        this.networkInteractionService.ClearActionResponseCaches();
+        this.networkInteractionService.ClearActionResponseCachesWithoutRestore();
 
         if (Game1.player is not null)
         {
@@ -200,7 +207,10 @@ public sealed class ModEntry : Mod
         if (config.IsDebugRecipeCostMode())
         {
             foreach (var recipeName in ModItemCatalog.CraftingRecipes.Keys)
-                player.craftingRecipes.Remove(recipeName);
+            {
+                if (!player.craftingRecipes.ContainsKey(recipeName))
+                    player.craftingRecipes.Add(recipeName, 0);
+            }
 
             return;
         }
@@ -297,11 +307,13 @@ public sealed class ModEntry : Mod
     private void OnPeerContextReceived(object? sender, PeerContextReceivedEventArgs e)
     {
         this.WarnIfPeerMissingRequiredMod(e.Peer);
+        this.UpdatePeerActionCompatibility(e.Peer);
     }
 
     private void OnPeerDisconnected(object? sender, PeerDisconnectedEventArgs e)
     {
         this.warnedMissingSVSAPPeers.Remove(e.Peer.PlayerID);
+        this.networkInteractionService.ClearPeerActionBlock(e.Peer.PlayerID);
         if (!Context.IsMainPlayer && e.Peer.IsHost)
             this.networkInteractionService.ClearActionResponseCaches();
         else
@@ -320,6 +332,27 @@ public sealed class ModEntry : Mod
 
         if (peer.IsHost && !this.PeerHasThisMod(peer))
             this.WarnMissingRequiredMod(peer, "Stardew Valley Storage and Automation Project is installed locally, but the host is missing it. SVSAP network features are unavailable in this multiplayer save.");
+    }
+
+    private void UpdatePeerActionCompatibility(IMultiplayerPeer peer)
+    {
+        this.networkInteractionService.ClearPeerActionBlock(peer.PlayerID);
+
+        if (!Context.IsMainPlayer || peer.IsHost)
+            return;
+
+        var peerMod = peer.HasSmapi ? peer.GetMod(this.ModManifest.UniqueID) : null;
+        if (peerMod is null)
+            return;
+
+        var localVersion = this.ModManifest.Version.ToString();
+        var peerVersion = peerMod.Version.ToString();
+        if (string.Equals(localVersion, peerVersion, StringComparison.OrdinalIgnoreCase))
+            return;
+
+        var message = ModText.Format("multiplayer.versionMismatch", localVersion, peerVersion);
+        this.networkInteractionService.SetPeerActionBlock(peer.PlayerID, message);
+        this.WarnPeerVersionMismatch(peer, message, localVersion, peerVersion);
     }
 
     private bool PeerHasThisMod(IMultiplayerPeer peer)
@@ -355,7 +388,23 @@ public sealed class ModEntry : Mod
         this.Monitor.Log($"{message} ({detail})", LogLevel.Warn);
 
         if (Context.IsWorldReady)
-            Game1.addHUDMessage(new HUDMessage("Stardew Valley Storage and Automation Project：所有玩家都必须安装此模组。", HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("multiplayer.allPlayersNeedSVSAP"), HUDMessage.error_type));
+    }
+
+    private void WarnPeerVersionMismatch(IMultiplayerPeer peer, string message, string localVersion, string peerVersion)
+    {
+        if (!this.warnedMissingSVSAPPeers.Add(peer.PlayerID))
+            return;
+
+        this.Monitor.Log($"{message} (peer {peer.PlayerID} has {peerVersion}; host has {localVersion})", LogLevel.Warn);
+
+        if (Context.IsWorldReady)
+            Game1.addHUDMessage(new HUDMessage(message, HUDMessage.error_type));
+    }
+
+    private static string GetDefaultLanguageForLocale(IModHelper helper)
+    {
+        return ModText.NormalizeLanguage(helper.Translation.Locale.ToString());
     }
 
     private void RegisterGmcm()
@@ -455,7 +504,7 @@ public sealed class ModEntry : Mod
         var api = this.api;
         if (api is null)
         {
-            this.Monitor.Log("SVSAP_API_DUMP_FAIL API 尚未初始化。", LogLevel.Error);
+            this.Monitor.Log("SVSAP_API_DUMP_FAIL API is not initialized.", LogLevel.Error);
             return;
         }
 
@@ -470,7 +519,7 @@ public sealed class ModEntry : Mod
         var api = this.api;
         if (api is null)
         {
-            this.Monitor.Log("SVSAP_ENDPOINT_PROBE_FAIL API 尚未初始化。", LogLevel.Error);
+            this.Monitor.Log("SVSAP_ENDPOINT_PROBE_FAIL API is not initialized.", LogLevel.Error);
             return;
         }
 
@@ -483,7 +532,7 @@ public sealed class ModEntry : Mod
         var location = Game1.currentLocation;
         if (location is null)
         {
-            this.Monitor.Log("SVSAP_ENDPOINT_PROBE_FAIL 当前地点为空。", LogLevel.Warn);
+            this.Monitor.Log("SVSAP_ENDPOINT_PROBE_FAIL current location is null.", LogLevel.Warn);
             return;
         }
 
@@ -508,7 +557,7 @@ public sealed class ModEntry : Mod
         var api = this.api;
         if (api is null)
         {
-            this.Monitor.Log("SVSAP_API_SELFTEST_FAIL API 尚未初始化。", LogLevel.Error);
+            this.Monitor.Log("SVSAP_API_SELFTEST_FAIL API is not initialized.", LogLevel.Error);
             return;
         }
 
@@ -517,14 +566,14 @@ public sealed class ModEntry : Mod
 
         try
         {
-            Require(api.ApiVersion == 1, $"ApiVersion 应为 1，实际为 {api.ApiVersion}。");
-            Require(!string.IsNullOrWhiteSpace(api.NetworkIdModDataKey), "NetworkIdModDataKey 不能为空。");
-            Require(!string.IsNullOrWhiteSpace(api.EndpointIdModDataKey), "EndpointIdModDataKey 不能为空。");
+            Require(api.ApiVersion == 1, $"ApiVersion should be 1, actual {api.ApiVersion}.");
+            Require(!string.IsNullOrWhiteSpace(api.NetworkIdModDataKey), "NetworkIdModDataKey must not be empty.");
+            Require(!string.IsNullOrWhiteSpace(api.EndpointIdModDataKey), "EndpointIdModDataKey must not be empty.");
             passed.Add("api-shape");
 
             var snapshot = api.GetConfigSnapshot();
-            Require(snapshot.MaxEndpointsPerNetwork > 0, "MaxEndpointsPerNetwork 必须为正数。");
-            Require(snapshot.MaxOperationsPerTick > 0, "MaxOperationsPerTick 必须为正数。");
+            Require(snapshot.MaxEndpointsPerNetwork > 0, "MaxEndpointsPerNetwork must be positive.");
+            Require(snapshot.MaxOperationsPerTick > 0, "MaxOperationsPerTick must be positive.");
             passed.Add("config-snapshot");
 
             if (api.IsHostAuthority)
@@ -548,8 +597,8 @@ public sealed class ModEntry : Mod
                 }
                 else if (api.TryGetLinkedEndpoint(location, tile, out var endpoint, out var code, out var message) && endpoint is not null)
                 {
-                    Require(endpoint.NetworkId != Guid.Empty, "端点网络 Guid 不能为空。");
-                    Require(endpoint.EndpointId != Guid.Empty, "端点 Guid 不能为空。");
+                    Require(endpoint.NetworkId != Guid.Empty, "Endpoint network Guid must not be empty.");
+                    Require(endpoint.EndpointId != Guid.Empty, "Endpoint Guid must not be empty.");
                     passed.Add($"endpoint-probe:{tileSource}:{endpoint.EndpointType}");
                 }
                 else
@@ -584,19 +633,19 @@ public sealed class ModEntry : Mod
 
             var source = ItemRegistry.Create("(O)388");
             source.Stack = 1;
-            Require(api.GetAvailableCount(networkId, "(O)388", null) == 0, "锁定物品的可用数量必须对外返回 0。");
-            Require(api.GetInsertCapacity(networkId, source, 1) == 0, "锁定物品的可插入容量必须对外返回 0。");
+            Require(api.GetAvailableCount(networkId, "(O)388", null) == 0, "Locked item available count must return 0.");
+            Require(api.GetInsertCapacity(networkId, source, 1) == 0, "Locked item insert capacity must return 0.");
             Require(
                 !api.TryInsertItem(networkId, source, out var remainder, out var insertCode, out var insertMessage)
                 && insertCode == SvsapApiErrorCode.ItemLocked,
-                $"锁定物品存入必须返回 ItemLocked，实际 {insertCode}: {insertMessage}");
-            Require(remainder is not null && remainder.Stack == 1, "锁定物品存入失败时必须保留原物品余量。");
+                $"Locked item insert must return ItemLocked, actual {insertCode}: {insertMessage}");
+            Require(remainder is not null && remainder.Stack == 1, "Locked item insert failure must preserve the original item remainder.");
 
             Require(
                 !api.TryExtractItem(networkId, "(O)388", null, 1, out var extracted, out var extractCode, out var extractMessage)
                 && extractCode == SvsapApiErrorCode.ItemLocked,
-                $"锁定物品提取必须返回 ItemLocked，实际 {extractCode}: {extractMessage}");
-            Require(extracted is null, "锁定物品提取失败时不得返回物品。");
+                $"Locked item extract must return ItemLocked, actual {extractCode}: {extractMessage}");
+            Require(extracted is null, "Locked item extract failure must not return an item.");
         }
         finally
         {
@@ -613,12 +662,12 @@ public sealed class ModEntry : Mod
         Require(
             !api.TryInsertItem(networkId, source, out _, out var insertCode, out var insertMessage)
             && insertCode == SvsapApiErrorCode.NotHost,
-            $"非主机存入必须返回 NotHost，实际 {insertCode}: {insertMessage}");
+            $"Non-host insert must return NotHost, actual {insertCode}: {insertMessage}");
 
         Require(
             !api.TryExtractItem(networkId, "(O)388", null, 1, out _, out var extractCode, out var extractMessage)
             && extractCode == SvsapApiErrorCode.NotHost,
-            $"非主机提取必须返回 NotHost，实际 {extractCode}: {extractMessage}");
+            $"Non-host extract must return NotHost, actual {extractCode}: {extractMessage}");
     }
 
     private static bool TryResolveProbeTile(string[] args, out Vector2 tile, out string source, out string message)
@@ -632,7 +681,7 @@ public sealed class ModEntry : Mod
             if (!int.TryParse(args[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var x)
                 || !int.TryParse(args[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var y))
             {
-                message = "用法: svsap_endpoint_probe [x y]，x/y 必须为整数。";
+                message = "Usage: svsap_endpoint_probe [x y]; x/y must be integers.";
                 return false;
             }
 
@@ -643,13 +692,13 @@ public sealed class ModEntry : Mod
 
         if (args.Length == 1)
         {
-            message = "用法: svsap_endpoint_probe [x y]，必须同时提供 x 和 y。";
+            message = "Usage: svsap_endpoint_probe [x y]; x and y must be provided together.";
             return false;
         }
 
         if (!Context.IsWorldReady || Game1.player is null)
         {
-            message = "未载入存档且未提供 x y，无法推断玩家面对格。";
+            message = "No save is loaded and x y was not provided, so the facing tile cannot be inferred.";
             return false;
         }
 

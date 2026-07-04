@@ -44,6 +44,21 @@ internal static class SerializedItemCodec
         return item;
     }
 
+    public static bool CanRoundTripPrototype(Item item)
+    {
+        try
+        {
+            var prototype = item.getOne();
+            prototype.Stack = 1;
+            var restored = CreateItem(SerializePrototype(prototype), 1);
+            return prototype.canStackWith(restored) && restored.canStackWith(prototype);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private sealed class SerializedItemData
     {
         public string QualifiedItemId { get; set; } = string.Empty;
@@ -53,4 +68,3 @@ internal static class SerializedItemCodec
         public Dictionary<string, string> ModData { get; set; } = new();
     }
 }
-

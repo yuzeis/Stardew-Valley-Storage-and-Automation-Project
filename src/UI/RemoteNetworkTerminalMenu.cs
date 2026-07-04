@@ -9,7 +9,7 @@ namespace SVSAP.UI;
 
 internal sealed class RemoteNetworkTerminalMenu : IClickableMenu
 {
-    private readonly Action<TerminalActionRequestMessage> sendRequest;
+    private readonly Func<TerminalActionRequestMessage, TerminalSnapshotResponseMessage, bool> sendRequest;
     private TerminalSnapshotResponseMessage snapshot;
     private readonly List<ClickableComponent> categoryButtons = new();
     private readonly List<ClickableComponent> qualityButtons = new();
@@ -26,7 +26,7 @@ internal sealed class RemoteNetworkTerminalMenu : IClickableMenu
     private int? selectedQuality;
     private TerminalInventorySortMode sortMode = TerminalInventorySortMode.Count;
 
-    public RemoteNetworkTerminalMenu(TerminalSnapshotResponseMessage snapshot, Action<TerminalActionRequestMessage> sendRequest)
+    public RemoteNetworkTerminalMenu(TerminalSnapshotResponseMessage snapshot, Func<TerminalActionRequestMessage, TerminalSnapshotResponseMessage, bool> sendRequest)
         : base(
             x: Math.Max(0, (Game1.uiViewport.Width - GetMenuWidth()) / 2),
             y: Math.Max(0, (Game1.uiViewport.Height - GetMenuHeight()) / 2),
@@ -84,9 +84,9 @@ internal sealed class RemoteNetworkTerminalMenu : IClickableMenu
         }
 
         var bottomY = this.yPositionOnScreen + this.height - 54;
-        this.depositButtons.Add(new ClickableComponent(new Rectangle(this.xPositionOnScreen + this.width - SVSAPMenuWidgets.Pad - 130, bottomY, 130, 42), "all", "全部存入"));
-        this.depositButtons.Add(new ClickableComponent(new Rectangle(this.xPositionOnScreen + this.width - SVSAPMenuWidgets.Pad - 288, bottomY, 150, 42), "same", "同类存入"));
-        this.toggleLockButton = new ClickableComponent(new Rectangle(this.xPositionOnScreen + this.width - SVSAPMenuWidgets.Pad - 396, bottomY, 100, 42), "lock", "锁定");
+        this.depositButtons.Add(new ClickableComponent(new Rectangle(this.xPositionOnScreen + this.width - SVSAPMenuWidgets.Pad - 130, bottomY, 130, 42), "all", ModText.Get("terminal.depositAll")));
+        this.depositButtons.Add(new ClickableComponent(new Rectangle(this.xPositionOnScreen + this.width - SVSAPMenuWidgets.Pad - 288, bottomY, 150, 42), "same", ModText.Get("terminal.depositSame")));
+        this.toggleLockButton = new ClickableComponent(new Rectangle(this.xPositionOnScreen + this.width - SVSAPMenuWidgets.Pad - 396, bottomY, 100, 42), "lock", ModText.Get("terminal.lock"));
 
         var invH = SVSAPBackpackGrid.GetHeight();
         var invTop = bottomY - 18 - invH;
@@ -119,7 +119,7 @@ internal sealed class RemoteNetworkTerminalMenu : IClickableMenu
         this.itemGrid.ClampScroll(visibleEntries.Count);
         var innerX = this.xPositionOnScreen + SVSAPMenuWidgets.Pad;
         var top = this.yPositionOnScreen + 24;
-        var title = $"{this.snapshot.NetworkName}  -  远程显示 {visibleEntries.Count:N0}/{this.snapshot.Entries.Count:N0} 类，来源 {this.snapshot.SourceCount:N0} 个";
+        var title = ModText.Format("remoteTerminal.title", this.snapshot.NetworkName, visibleEntries.Count, this.snapshot.Entries.Count, this.snapshot.SourceCount);
         b.DrawString(Game1.dialogueFont, title, new Vector2(innerX, top), Game1.textColor);
         SVSAPMenuWidgets.DrawSearchBox(b, this.searchBox, this.search);
         b.DrawString(
@@ -154,7 +154,7 @@ internal sealed class RemoteNetworkTerminalMenu : IClickableMenu
             entry => entry.AvailableCount <= 0);
 
         if (visibleEntries.Count == 0)
-            b.DrawString(Game1.smallFont, "没有找到已连接的网络库存。", new Vector2(this.gridArea.X + 8, this.gridArea.Y + 8), Color.DarkSlateGray);
+            b.DrawString(Game1.smallFont, ModText.Get("remoteTerminal.empty"), new Vector2(this.gridArea.X + 8, this.gridArea.Y + 8), Color.DarkSlateGray);
 
         SVSAPMenuWidgets.DrawSeparator(b, new Rectangle(innerX, this.invArea.Y - 10, this.width - SVSAPMenuWidgets.Pad * 2, 2));
         this.backpackGrid.Draw(b);
@@ -166,7 +166,7 @@ internal sealed class RemoteNetworkTerminalMenu : IClickableMenu
             Game1.textColor);
         b.DrawString(
             Game1.smallFont,
-            "远程：左键请求一组  ·  右键请求 1 个  ·  存入按钮会操作你在主机端的背包",
+            ModText.Get("remoteTerminal.help"),
             new Vector2(innerX, this.depositButtons[0].bounds.Y + 12),
             Color.DimGray);
 
@@ -223,7 +223,7 @@ internal sealed class RemoteNetworkTerminalMenu : IClickableMenu
         if (this.toggleLockButton.containsPoint(x, y))
         {
             var held = Game1.player.CurrentItem;
-            this.sendRequest(new TerminalActionRequestMessage
+            var sent = this.sendRequest(new TerminalActionRequestMessage
             {
                 TransactionId = Guid.NewGuid(),
                 NetworkId = this.snapshot.NetworkId,
@@ -231,8 +231,8 @@ internal sealed class RemoteNetworkTerminalMenu : IClickableMenu
                 Action = TerminalActionKind.ToggleHeldItemLock,
                 HeldQualifiedItemId = held?.QualifiedItemId ?? string.Empty,
                 HeldDisplayName = held?.DisplayName ?? string.Empty
-            });
-            Game1.playSound("smallSelect");
+            }, this.snapshot);
+            Game1.playSound(sent ? "smallSelect" : "cancel");
             return;
         }
 
@@ -241,14 +241,14 @@ internal sealed class RemoteNetworkTerminalMenu : IClickableMenu
             if (!button.containsPoint(x, y))
                 continue;
 
-            this.sendRequest(new TerminalActionRequestMessage
+            var sent = this.sendRequest(new TerminalActionRequestMessage
             {
                 TransactionId = Guid.NewGuid(),
                 NetworkId = this.snapshot.NetworkId,
                 EndpointId = this.snapshot.EndpointId,
                 Action = button.name == "same" ? TerminalActionKind.DepositSame : TerminalActionKind.DepositAll
-            });
-            Game1.playSound("smallSelect");
+            }, this.snapshot);
+            Game1.playSound(sent ? "smallSelect" : "cancel");
             return;
         }
 
@@ -260,7 +260,7 @@ internal sealed class RemoteNetworkTerminalMenu : IClickableMenu
 
         if (entry.AvailableCount <= 0)
         {
-            Game1.addHUDMessage(new HUDMessage("这个物品已被 CPU 作业预留，暂时不能取出。", HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("terminal.reserved"), HUDMessage.error_type));
             Game1.playSound("cancel");
             return;
         }
@@ -278,7 +278,7 @@ internal sealed class RemoteNetworkTerminalMenu : IClickableMenu
 
         if (entry.AvailableCount <= 0)
         {
-            Game1.addHUDMessage(new HUDMessage("这个物品已被 CPU 作业预留，暂时不能取出。", HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("terminal.reserved"), HUDMessage.error_type));
             Game1.playSound("cancel");
             return;
         }
@@ -324,7 +324,7 @@ internal sealed class RemoteNetworkTerminalMenu : IClickableMenu
 
     private void SendWithdraw(RemoteInventoryEntryMessage entry, int amount)
     {
-        this.sendRequest(new TerminalActionRequestMessage
+        var sent = this.sendRequest(new TerminalActionRequestMessage
         {
             TransactionId = Guid.NewGuid(),
             NetworkId = this.snapshot.NetworkId,
@@ -332,8 +332,8 @@ internal sealed class RemoteNetworkTerminalMenu : IClickableMenu
             Action = TerminalActionKind.Withdraw,
             ItemKey = entry.Key,
             Amount = Math.Max(1, amount)
-        });
-        Game1.playSound("smallSelect");
+        }, this.snapshot);
+        Game1.playSound(sent ? "smallSelect" : "cancel");
     }
 
     private static int GetStackWithdrawAmount(RemoteInventoryEntryMessage entry)
@@ -390,23 +390,23 @@ internal sealed class RemoteNetworkTerminalMenu : IClickableMenu
 
         var lines = new List<string>
         {
-            $"数量 x{entry.AvailableCount:N0}" + (entry.ReservedCount > 0 ? $"  （已预留 {entry.ReservedCount:N0}）" : string.Empty),
-            $"品质 {entry.Quality}   ·   售价 {entry.SalePrice:N0}g"
+            ModText.Format("terminal.tooltip.count", entry.AvailableCount, entry.ReservedCount > 0 ? ModText.Format("terminal.tooltip.reserved", entry.ReservedCount) : string.Empty),
+            ModText.Format("terminal.tooltip.qualityPrice", entry.Quality, entry.SalePrice)
         };
         lines.AddRange(entry.Locations
             .OrderByDescending(location => location.Count)
             .Take(5)
             .Select(FormatLocationLine));
         if (entry.Locations.Count > 5)
-            lines.Add($"另有 {entry.Locations.Count - 5:N0} 个堆叠");
+            lines.Add(ModText.Format("terminal.tooltip.moreStacks", entry.Locations.Count - 5));
 
         SVSAPMenuWidgets.DrawTooltipBox(b, mouseX + 28, mouseY + 28, entry.DisplayName, lines);
     }
 
     private static string FormatLocationLine(RemoteItemStackLocationMessage location)
     {
-        var source = location.SourceKind == InventorySourceKind.StorageCell ? "存储元件" : "箱子";
-        return $"{source} {location.LocationName} ({location.TileX:N0},{location.TileY:N0}) 槽位 {location.SlotIndex}: x{location.Count:N0}";
+        var source = location.SourceKind == InventorySourceKind.StorageCell ? ModText.Get("terminal.source.cell") : ModText.Get("terminal.source.chest");
+        return ModText.Format("remoteTerminal.location", source, location.LocationName, location.TileX, location.TileY, location.SlotIndex, location.Count);
     }
 
     private void ResetScroll()
@@ -418,10 +418,10 @@ internal sealed class RemoteNetworkTerminalMenu : IClickableMenu
     {
         var held = Game1.player.CurrentItem;
         if (held is null)
-            return "锁定";
+            return ModText.Get("terminal.lock");
 
         return this.snapshot.LockedQualifiedItemIds.Contains(held.QualifiedItemId, StringComparer.Ordinal)
-            ? "解锁"
-            : "锁定";
+            ? ModText.Get("terminal.unlock")
+            : ModText.Get("terminal.lock");
     }
 }

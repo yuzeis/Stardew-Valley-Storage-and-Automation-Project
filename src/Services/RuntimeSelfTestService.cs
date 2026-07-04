@@ -59,6 +59,7 @@ internal sealed class RuntimeSelfTestService
             ("v1-processing-catalog-scope", this.TestV1ProcessingCatalogScope),
             ("farmhand-hard-block", this.TestFarmhandHardBlock),
             ("remote-action-response-cache", this.TestRemoteActionResponseCache),
+            ("crafting-terminal-contention-no-dupe", this.TestCraftingTerminalContentionNoDupe),
             ("remote-lock-targets-request-item", this.TestRemoteLockTargetsRequestItem),
             ("structural-kernel-no-inventory-side-effects", this.TestStructuralKernelNoInventorySideEffects),
             ("structural-request-idempotent", this.TestStructuralRequestIdempotent),
@@ -287,7 +288,7 @@ internal sealed class RuntimeSelfTestService
 
             this.InvokeAssignPlanningJobs(network);
             Assert(waitingLong.State == CraftingJobState.Planning
-                && waitingLong.StatusMessage.Contains("快速作业", StringComparison.OrdinalIgnoreCase), "second long job must wait behind the reserved fast slot");
+                && waitingLong.StatusMessage == ModText.Get("cpu.status.waitingUnreservedCpuSlot"), "second long job must wait behind the reserved fast slot");
             Assert(waitingFast.State == CraftingJobState.Running
                 && waitingFast.AssignedCpuEndpointId == cpuB, "fast job must receive the reserved free CPU slot");
         }
@@ -772,6 +773,41 @@ internal sealed class RuntimeSelfTestService
         }
     }
 
+    private void TestCraftingTerminalContentionNoDupe()
+    {
+        var network = this.CreateTemporaryNetwork(out var networkId);
+        try
+        {
+            network.StorageDrives.Values.Single().Slots.Add(this.CreateStorageCellSlot(StorageCellTier.OneK, 0, ("(O)390", 5)));
+
+            var output = ItemRegistry.Create("(O)338");
+            output.Stack = 1;
+            var recipe = new NetworkCraftingRecipe
+            {
+                Name = "SVSAP selftest contention",
+                DisplayName = output.DisplayName,
+                OutputPrototype = output,
+                OutputCount = 1,
+                Ingredients = new List<NetworkItemRequest>
+                {
+                    new() { QualifiedItemId = "(O)390", Count = 5 }
+                }
+            };
+
+            Assert(this.craftingRecipeService.TryCraftForPlayer(network, Game1.player, recipe, 1, MaterialQualityStrategy.LowQualityFirst, out var firstMessage), $"first crafting terminal action must succeed: {firstMessage}");
+            Assert(!this.craftingRecipeService.TryCraftForPlayer(network, Game1.player, recipe, 1, MaterialQualityStrategy.LowQualityFirst, out _), "second identical crafting action must fail after the first one consumes the exact ingredients");
+
+            var woodCount = this.CountNetworkItem(network, "(O)390");
+            var outputCount = this.CountNetworkItem(network, "(O)338");
+            Assert(woodCount == 0, "contention test must not leave consumed ingredients in the network");
+            Assert(outputCount == 1, "contention test must create exactly one output stack");
+        }
+        finally
+        {
+            this.CleanupTemporaryNetwork(networkId);
+        }
+    }
+
     private void DepositSelfTestStack(NetworkData network, string qualifiedItemId, int count)
     {
         var item = ItemRegistry.Create(qualifiedItemId);
@@ -851,6 +887,16 @@ internal sealed class RuntimeSelfTestService
         return data;
     }
 
+    private int CountNetworkItem(NetworkData network, string qualifiedItemId)
+    {
+        return network.StorageDrives.Values
+            .SelectMany(drive => drive.Slots)
+            .Select(this.ReadCell)
+            .SelectMany(cell => cell.Items)
+            .Where(stack => stack.Key.QualifiedItemId == qualifiedItemId)
+            .Sum(stack => stack.Count);
+    }
+
     private string InvokeRecoverPreparedTransaction(NetworkData network, TxLogRecord tx)
     {
         var method = typeof(InventoryTransactionService).GetMethod("RecoverPreparedTransaction", BindingFlags.Instance | BindingFlags.NonPublic);
@@ -908,7 +954,7 @@ internal sealed class RuntimeSelfTestService
     {
         var method = typeof(NetworkInteractionService).GetMethod("CreateStructuralFailureResponse", BindingFlags.Static | BindingFlags.NonPublic);
         Assert(method is not null, "CreateStructuralFailureResponse reflection hook must exist");
-        var response = method!.Invoke(null, new object[] { request }) as StructuralActionResponseMessage;
+        var response = method!.Invoke(null, new object?[] { request, null }) as StructuralActionResponseMessage;
         Assert(response is not null, "CreateStructuralFailureResponse must return a structural response");
         return response!;
     }

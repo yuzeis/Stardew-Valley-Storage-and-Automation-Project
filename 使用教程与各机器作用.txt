@@ -1,4 +1,4 @@
-Stardew Valley Storage and Automation Project (SVSAP) 1.2.0-alpha.2 使用教程
+Stardew Valley Storage and Automation Project (SVSAP) 1.3.0-alpha.1（ver1.3Alpha1）使用教程
 源码：https://github.com/yuzeis/Stardew-Valley-Storage-and-Automation-Project
 
 一、安装与语言

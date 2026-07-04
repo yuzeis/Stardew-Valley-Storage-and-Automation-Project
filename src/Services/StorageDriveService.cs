@@ -38,7 +38,7 @@ internal sealed class StorageDriveService
 
         if (!Guid.TryParse(drive.modData.GetValueOrDefault(EndpointIdentityService.NetworkIdKey), out var networkId))
         {
-            Game1.addHUDMessage(new HUDMessage("请先把这个存储驱动器连接到网络。", HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("ui.storageDrive.notLinked"), HUDMessage.error_type));
             this.LogGameplay($"action=storage_drive result=fail player={DescribePlayer(Game1.player)} location={Quote(location.NameOrUniqueName)} tile={FormatTile(tile)} reason=\"not_linked\"");
             return true;
         }
@@ -52,7 +52,7 @@ internal sealed class StorageDriveService
         {
             if (this.GetInsertedCellCount(network) >= Math.Max(1, this.getConfig().MaxStorageCellsPerNetwork))
             {
-                Game1.addHUDMessage(new HUDMessage("SVSAP 存储元件数量已达上限。", HUDMessage.error_type));
+                Game1.addHUDMessage(new HUDMessage(ModText.Get("ui.storageDrive.networkCellLimit"), HUDMessage.error_type));
                 this.LogGameplay($"action=storage_cell_insert result=fail player={DescribePlayer(Game1.player)} network={ShortId(networkId)} location={Quote(location.NameOrUniqueName)} tile={FormatTile(tile)} cell={Quote(held.DisplayName)} reason=\"network_cell_limit\"");
                 return true;
             }
@@ -75,10 +75,10 @@ internal sealed class StorageDriveService
         string heldSerializedItem)
     {
         if (drive.QualifiedItemId != "(BC)" + ModItemCatalog.StorageDrive)
-            return StructuralActionResult.Fail("目标不是存储驱动器。");
+            return StructuralActionResult.Fail(ModText.Get("ui.storageDrive.notDrive"));
 
         if (!Guid.TryParse(drive.modData.GetValueOrDefault(EndpointIdentityService.NetworkIdKey), out var networkId))
-            return StructuralActionResult.Fail("请先把这个存储驱动器连接到网络。");
+            return StructuralActionResult.Fail(ModText.Get("ui.storageDrive.notLinked"));
 
         var endpointId = this.endpointIdentityService.EnsureEndpointId(drive);
         var network = this.repository.GetOrCreateNetwork(networkId);
@@ -88,7 +88,7 @@ internal sealed class StorageDriveService
             && ModItemCatalog.TryGetStorageCellTier(heldQualifiedItemId, out _))
         {
             if (this.GetInsertedCellCount(network) >= Math.Max(1, this.getConfig().MaxStorageCellsPerNetwork))
-                return StructuralActionResult.Fail("SVSAP 存储元件数量已达上限。");
+                return StructuralActionResult.Fail(ModText.Get("ui.storageDrive.networkCellLimit"));
 
             Item heldCell;
             try
@@ -98,11 +98,11 @@ internal sealed class StorageDriveService
             catch (Exception ex)
             {
                 this.monitor.Log($"Could not read storage cell payload: {ex.Message}", LogLevel.Trace);
-                return StructuralActionResult.Fail("无法读取这个存储元件。");
+                return StructuralActionResult.Fail(ModText.Get("ui.storageDrive.readFailed"));
             }
 
             if (!ModItemCatalog.TryGetStorageCellTier(heldCell.QualifiedItemId, out _))
-                return StructuralActionResult.Fail("无法读取这个存储元件。");
+                return StructuralActionResult.Fail(ModText.Get("ui.storageDrive.readFailed"));
 
             var inserted = this.InsertCellIntoNetwork(network, driveData, heldCell);
             if (inserted.Success)
@@ -121,6 +121,67 @@ internal sealed class StorageDriveService
     public void ResetRemainingHeldStorageCell(Item held)
     {
         this.storageCellInitializer.ResetEmptyCellData(held);
+    }
+
+    public IReadOnlyList<string> DescribeDrive(SObject drive)
+    {
+        if (!this.TryResolveDrive(drive, create: false, out _, out var driveData, out _, out var message))
+            return new[] { message };
+
+        if (driveData is null || driveData.Slots.Count == 0)
+            return new[] { ModText.Get("ui.storageDrive.empty"), ModText.Get("ui.storageDrive.help") };
+
+        var lines = new List<string>
+        {
+            ModText.Format("ui.storageDrive.inserted", driveData.Slots.Count, SlotCount)
+        };
+        foreach (var slot in driveData.Slots.OrderBy(slot => slot.SlotIndex))
+        {
+            var capacity = ReadCellCapacity(slot);
+            lines.Add(ModText.Format("ui.storageDrive.slot", slot.SlotIndex + 1, FormatItem(slot.QualifiedItemId), capacity.Used, capacity.Max));
+        }
+
+        return lines;
+    }
+
+    public IReadOnlyList<int> GetOccupiedSlotIndexes(SObject drive)
+    {
+        return this.TryResolveDrive(drive, create: false, out _, out var driveData, out _, out _)
+            && driveData is not null
+            ? driveData.Slots.OrderBy(slot => slot.SlotIndex).Select(slot => slot.SlotIndex).ToList()
+            : Array.Empty<int>();
+    }
+
+    public bool HasCellSlot(SObject drive, int slotIndex)
+    {
+        return this.TryResolveDrive(drive, create: false, out _, out var driveData, out _, out _)
+            && driveData is not null
+            && driveData.Slots.Any(slot => slot.SlotIndex == slotIndex);
+    }
+
+    public bool TryEjectCellSlot(SObject drive, GameLocation location, Vector2 tile, int slotIndex, out string message)
+    {
+        if (!this.TryResolveDrive(drive, create: false, out _, out var driveData, out _, out message)
+            || driveData is null)
+        {
+            return false;
+        }
+
+        var slot = driveData.Slots.FirstOrDefault(entry => entry.SlotIndex == slotIndex);
+        if (slot is null)
+        {
+            message = ModText.Get("ui.storageDrive.slotEmpty");
+            return false;
+        }
+
+        var item = StorageCellCodec.CreateItem(slot);
+        this.ReturnCellItem(item, location, tile, preferPlayerInventory: true);
+        driveData.Slots.Remove(slot);
+        driveData.InsertedCellIds = driveData.Slots.Select(entry => entry.CellId).ToList();
+        this.repository.Save();
+
+        message = ModText.Format("ui.storageDrive.ejectedSlot", slotIndex + 1);
+        return true;
     }
 
     public void HandleStorageDriveRemoved(SObject drive, GameLocation location, Vector2 tile)
@@ -164,6 +225,39 @@ internal sealed class StorageDriveService
         return driveData;
     }
 
+    private bool TryResolveDrive(
+        SObject drive,
+        bool create,
+        out NetworkData network,
+        out StorageDriveData? driveData,
+        out Guid endpointId,
+        out string message)
+    {
+        network = null!;
+        driveData = null;
+        endpointId = Guid.Empty;
+        message = string.Empty;
+
+        if (drive.QualifiedItemId != "(BC)" + ModItemCatalog.StorageDrive)
+        {
+            message = ModText.Get("ui.storageDrive.notDrive");
+            return false;
+        }
+
+        if (!Guid.TryParse(drive.modData.GetValueOrDefault(EndpointIdentityService.NetworkIdKey), out var networkId))
+        {
+            message = ModText.Get("ui.storageDrive.notLinked");
+            return false;
+        }
+
+        endpointId = this.endpointIdentityService.EnsureEndpointId(drive);
+        network = this.repository.GetOrCreateNetwork(networkId);
+        driveData = create
+            ? this.GetOrCreateDrive(network, endpointId)
+            : network.StorageDrives.GetValueOrDefault(endpointId);
+        return true;
+    }
+
     private int GetInsertedCellCount(NetworkData network)
     {
         return network.StorageDrives.Values.Sum(drive => drive.Slots.Count);
@@ -172,7 +266,7 @@ internal sealed class StorageDriveService
     private StructuralActionResult InsertCellIntoNetwork(NetworkData network, StorageDriveData driveData, Item held)
     {
         if (driveData.Slots.Count >= SlotCount)
-            return StructuralActionResult.Fail("存储驱动器已满。");
+            return StructuralActionResult.Fail(ModText.Get("ui.storageDrive.full"));
 
         this.storageCellInitializer.EnsureCellData(held);
         var slotIndex = Enumerable.Range(0, SlotCount)
@@ -185,7 +279,7 @@ internal sealed class StorageDriveService
             && this.IsCellIdInserted(network, cellData.CellId))
         {
             if (!IsCellEmpty(cellData))
-                return StructuralActionResult.Fail("已有相同的非空存储元件插入网络。");
+                return StructuralActionResult.Fail(ModText.Get("ui.storageDrive.duplicateNonEmpty"));
 
             this.storageCellInitializer.ResetEmptyCellData(cellItem);
         }
@@ -197,7 +291,7 @@ internal sealed class StorageDriveService
         return new StructuralActionResult
         {
             Success = true,
-            Message = "已插入存储元件。",
+            Message = ModText.Get("ui.storageDrive.insertedOne"),
             ConsumeHeldOne = true
         };
     }
@@ -206,7 +300,7 @@ internal sealed class StorageDriveService
     {
         var slot = driveData.Slots.OrderByDescending(entry => entry.SlotIndex).FirstOrDefault();
         if (slot is null)
-            return StructuralActionResult.Fail("存储驱动器为空。");
+            return StructuralActionResult.Fail(ModText.Get("ui.storageDrive.empty"));
 
         var item = StorageCellCodec.CreateItem(slot);
         driveData.Slots.Remove(slot);
@@ -215,7 +309,7 @@ internal sealed class StorageDriveService
         return new StructuralActionResult
         {
             Success = true,
-            Message = "已弹出存储元件。",
+            Message = ModText.Get("ui.storageDrive.ejectedOne"),
             ReturnedSerializedItem = SerializedItemCodec.SerializePrototype(item)
         };
     }
@@ -224,7 +318,7 @@ internal sealed class StorageDriveService
     {
         if (driveData.Slots.Count >= SlotCount)
         {
-            Game1.addHUDMessage(new HUDMessage("存储驱动器已满。", HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("ui.storageDrive.full"), HUDMessage.error_type));
             this.LogGameplay($"action=storage_cell_insert result=fail player={DescribePlayer(Game1.player)} network={ShortId(network.NetworkId)} cell={Quote(held.DisplayName)} reason=\"drive_full\"");
             return;
         }
@@ -241,7 +335,7 @@ internal sealed class StorageDriveService
         {
             if (!IsCellEmpty(cellData))
             {
-                Game1.addHUDMessage(new HUDMessage("已有相同的非空存储元件插入网络。", HUDMessage.error_type));
+                Game1.addHUDMessage(new HUDMessage(ModText.Get("ui.storageDrive.duplicateNonEmpty"), HUDMessage.error_type));
                 this.LogGameplay($"action=storage_cell_insert result=fail player={DescribePlayer(Game1.player)} network={ShortId(network.NetworkId)} cell={Quote(cellItem.DisplayName)} cellId={ShortId(cellData.CellId)} reason=\"duplicate_non_empty_cell\"");
                 return;
             }
@@ -259,7 +353,7 @@ internal sealed class StorageDriveService
         else
             this.storageCellInitializer.ResetEmptyCellData(held);
 
-        Game1.addHUDMessage(new HUDMessage("已插入存储元件。", HUDMessage.newQuest_type));
+        Game1.addHUDMessage(new HUDMessage(ModText.Get("ui.storageDrive.insertedOne"), HUDMessage.newQuest_type));
         var insertedCapacity = ReadCellCapacity(slot);
         this.LogGameplay($"action=storage_cell_insert result=success player={DescribePlayer(Game1.player)} network={ShortId(network.NetworkId)} slot={slotIndex:N0} cell={Quote(cellItem.DisplayName)} cellId={ShortId(slot.CellId)} capacityUsed={insertedCapacity.Used:N0} capacityMax={insertedCapacity.Max:N0}");
     }
@@ -269,7 +363,7 @@ internal sealed class StorageDriveService
         var slot = driveData.Slots.OrderByDescending(entry => entry.SlotIndex).FirstOrDefault();
         if (slot is null)
         {
-            Game1.addHUDMessage(new HUDMessage("存储驱动器为空。", HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("ui.storageDrive.empty"), HUDMessage.error_type));
             this.LogGameplay($"action=storage_cell_eject result=fail player={DescribePlayer(Game1.player)} network={ShortId(network.NetworkId)} location={Quote(location.NameOrUniqueName)} tile={FormatTile(tile)} reason=\"drive_empty\"");
             return;
         }
@@ -279,7 +373,7 @@ internal sealed class StorageDriveService
 
         driveData.Slots.Remove(slot);
         driveData.InsertedCellIds = driveData.Slots.Select(entry => entry.CellId).ToList();
-        Game1.addHUDMessage(new HUDMessage("已弹出存储元件。", HUDMessage.newQuest_type));
+        Game1.addHUDMessage(new HUDMessage(ModText.Get("ui.storageDrive.ejectedOne"), HUDMessage.newQuest_type));
         var ejectedCapacity = ReadCellCapacity(slot);
         this.LogGameplay($"action=storage_cell_eject result=success player={DescribePlayer(Game1.player)} network={ShortId(network.NetworkId)} location={Quote(location.NameOrUniqueName)} tile={FormatTile(tile)} cell={Quote(item.DisplayName)} cellId={ShortId(slot.CellId)} capacityUsed={ejectedCapacity.Used:N0} capacityMax={ejectedCapacity.Max:N0}");
     }
@@ -314,6 +408,18 @@ internal sealed class StorageDriveService
         return StorageCellCodec.TryReadCellData(slot, out var data)
             ? (data.CapacityUsed, data.CapacityMax)
             : (0, 0);
+    }
+
+    private static string FormatItem(string qualifiedItemId)
+    {
+        try
+        {
+            return ItemRegistry.Create(qualifiedItemId).DisplayName;
+        }
+        catch
+        {
+            return qualifiedItemId;
+        }
     }
 
     private void LogGameplay(string message)

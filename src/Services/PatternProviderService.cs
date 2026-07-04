@@ -27,7 +27,7 @@ internal sealed class PatternProviderService
 
         if (!Guid.TryParse(provider.modData.GetValueOrDefault(EndpointIdentityService.NetworkIdKey), out var networkId))
         {
-            Game1.addHUDMessage(new HUDMessage("请先把这个样板供应器连接到网络。", HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("ui.patternProvider.notLinked"), HUDMessage.error_type));
             return true;
         }
 
@@ -51,10 +51,10 @@ internal sealed class PatternProviderService
     public StructuralActionResult ApplyInteract(SObject provider, string heldQualifiedItemId, string heldSerializedItem)
     {
         if (provider.QualifiedItemId != "(BC)" + ModItemCatalog.PatternProvider)
-            return StructuralActionResult.Fail("目标不是样板供应器。");
+            return StructuralActionResult.Fail(ModText.Get("ui.patternProvider.notProvider"));
 
         if (!Guid.TryParse(provider.modData.GetValueOrDefault(EndpointIdentityService.NetworkIdKey), out var networkId))
-            return StructuralActionResult.Fail("请先把这个样板供应器连接到网络。");
+            return StructuralActionResult.Fail(ModText.Get("ui.patternProvider.notLinked"));
 
         var endpointId = this.endpointIdentityService.EnsureEndpointId(provider);
         var network = this.repository.GetOrCreateNetwork(networkId);
@@ -70,7 +70,7 @@ internal sealed class PatternProviderService
             }
             catch
             {
-                return StructuralActionResult.Fail("无法读取这个样板物品。");
+                return StructuralActionResult.Fail(ModText.Get("ui.patternProvider.readFailed"));
             }
 
             var inserted = this.InsertPatternIntoNetwork(providerData, patternItem);
@@ -111,6 +111,67 @@ internal sealed class PatternProviderService
         this.repository.Save();
     }
 
+    public IReadOnlyList<string> DescribeProvider(SObject provider)
+    {
+        if (!this.TryResolveProvider(provider, create: false, out _, out var providerData, out _, out var message))
+            return new[] { message };
+
+        if (providerData is null || providerData.Slots.Count == 0)
+            return new[] { ModText.Get("ui.patternProvider.empty"), ModText.Get("ui.patternProvider.help") };
+
+        var lines = new List<string>
+        {
+            ModText.Format("ui.patternProvider.inserted", providerData.Slots.Count, SlotCount)
+        };
+        foreach (var slot in providerData.Slots.OrderBy(slot => slot.SlotIndex))
+            lines.Add(ModText.Format("ui.patternProvider.slot", slot.SlotIndex + 1, DescribePatternSlot(slot)));
+
+        return lines;
+    }
+
+    public IReadOnlyList<int> GetOccupiedSlotIndexes(SObject provider)
+    {
+        return this.TryResolveProvider(provider, create: false, out _, out var providerData, out _, out _)
+            && providerData is not null
+            ? providerData.Slots.OrderBy(slot => slot.SlotIndex).Select(slot => slot.SlotIndex).ToList()
+            : Array.Empty<int>();
+    }
+
+    public bool HasPatternSlot(SObject provider, int slotIndex)
+    {
+        return this.TryResolveProvider(provider, create: false, out _, out var providerData, out _, out _)
+            && providerData is not null
+            && providerData.Slots.Any(slot => slot.SlotIndex == slotIndex);
+    }
+
+    public bool TryEjectPatternSlot(SObject provider, int slotIndex, out string message)
+    {
+        if (!this.TryResolveProvider(provider, create: false, out _, out var providerData, out _, out message)
+            || providerData is null)
+        {
+            return false;
+        }
+
+        var slot = providerData.Slots.FirstOrDefault(entry => entry.SlotIndex == slotIndex);
+        if (slot is null)
+        {
+            message = ModText.Get("ui.patternProvider.slotEmpty");
+            return false;
+        }
+
+        var item = PatternCodec.CreateItem(slot);
+        if (!Game1.player.couldInventoryAcceptThisItem(item) || !Game1.player.addItemToInventoryBool(item))
+        {
+            message = ModText.Get("ui.patternProvider.inventoryFull");
+            return false;
+        }
+
+        providerData.Slots.Remove(slot);
+        this.repository.Save();
+        message = ModText.Format("ui.patternProvider.ejectedSlot", slotIndex + 1);
+        return true;
+    }
+
     private PatternProviderData GetOrCreateProvider(NetworkData network, Guid endpointId)
     {
         if (!network.PatternProviders.TryGetValue(endpointId, out var providerData))
@@ -122,13 +183,46 @@ internal sealed class PatternProviderService
         return providerData;
     }
 
+    private bool TryResolveProvider(
+        SObject provider,
+        bool create,
+        out NetworkData network,
+        out PatternProviderData? providerData,
+        out Guid endpointId,
+        out string message)
+    {
+        network = null!;
+        providerData = null;
+        endpointId = Guid.Empty;
+        message = string.Empty;
+
+        if (provider.QualifiedItemId != "(BC)" + ModItemCatalog.PatternProvider)
+        {
+            message = ModText.Get("ui.patternProvider.notProvider");
+            return false;
+        }
+
+        if (!Guid.TryParse(provider.modData.GetValueOrDefault(EndpointIdentityService.NetworkIdKey), out var networkId))
+        {
+            message = ModText.Get("ui.patternProvider.notLinked");
+            return false;
+        }
+
+        endpointId = this.endpointIdentityService.EnsureEndpointId(provider);
+        network = this.repository.GetOrCreateNetwork(networkId);
+        providerData = create
+            ? this.GetOrCreateProvider(network, endpointId)
+            : network.PatternProviders.GetValueOrDefault(endpointId);
+        return true;
+    }
+
     private StructuralActionResult InsertPatternIntoNetwork(PatternProviderData providerData, Item held)
     {
         if (providerData.Slots.Count >= SlotCount)
-            return StructuralActionResult.Fail("样板供应器已满。");
+            return StructuralActionResult.Fail(ModText.Get("ui.patternProvider.full"));
 
         if (!PatternCodec.TryRead(held, out _))
-            return StructuralActionResult.Fail("这个样板物品没有编码数据。");
+            return StructuralActionResult.Fail(ModText.Get("ui.patternProvider.noPatternData"));
 
         var slotIndex = Enumerable.Range(0, SlotCount)
             .First(index => providerData.Slots.All(slot => slot.SlotIndex != index));
@@ -137,7 +231,7 @@ internal sealed class PatternProviderService
         return new StructuralActionResult
         {
             Success = true,
-            Message = "已插入样板。",
+            Message = ModText.Get("ui.patternProvider.insertedOne"),
             ConsumeHeldOne = true
         };
     }
@@ -146,7 +240,7 @@ internal sealed class PatternProviderService
     {
         var slot = providerData.Slots.OrderByDescending(entry => entry.SlotIndex).FirstOrDefault();
         if (slot is null)
-            return StructuralActionResult.Fail("样板供应器为空。");
+            return StructuralActionResult.Fail(ModText.Get("ui.patternProvider.empty"));
 
         var item = PatternCodec.CreateItem(slot);
         providerData.Slots.Remove(slot);
@@ -154,7 +248,7 @@ internal sealed class PatternProviderService
         return new StructuralActionResult
         {
             Success = true,
-            Message = "已弹出样板。",
+            Message = ModText.Get("ui.patternProvider.ejectedOne"),
             ReturnedSerializedItem = SerializedItemCodec.SerializePrototype(item)
         };
     }
@@ -163,13 +257,13 @@ internal sealed class PatternProviderService
     {
         if (providerData.Slots.Count >= SlotCount)
         {
-            Game1.addHUDMessage(new HUDMessage("样板供应器已满。", HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("ui.patternProvider.full"), HUDMessage.error_type));
             return;
         }
 
         if (!PatternCodec.TryRead(held, out _))
         {
-            Game1.addHUDMessage(new HUDMessage("这个样板物品没有编码数据。", HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("ui.patternProvider.noPatternData"), HUDMessage.error_type));
             return;
         }
 
@@ -181,7 +275,7 @@ internal sealed class PatternProviderService
         if (held.Stack <= 0)
             Game1.player.removeItemFromInventory(held);
 
-        Game1.addHUDMessage(new HUDMessage("已插入样板。", HUDMessage.newQuest_type));
+        Game1.addHUDMessage(new HUDMessage(ModText.Get("ui.patternProvider.insertedOne"), HUDMessage.newQuest_type));
     }
 
     private void EjectPattern(PatternProviderData providerData)
@@ -189,19 +283,19 @@ internal sealed class PatternProviderService
         var slot = providerData.Slots.OrderByDescending(entry => entry.SlotIndex).FirstOrDefault();
         if (slot is null)
         {
-            Game1.addHUDMessage(new HUDMessage("样板供应器为空。", HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("ui.patternProvider.empty"), HUDMessage.error_type));
             return;
         }
 
         var item = PatternCodec.CreateItem(slot);
         if (!Game1.player.couldInventoryAcceptThisItem(item) || !Game1.player.addItemToInventoryBool(item))
         {
-            Game1.addHUDMessage(new HUDMessage("背包已满。", HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("ui.patternProvider.inventoryFull"), HUDMessage.error_type));
             return;
         }
 
         providerData.Slots.Remove(slot);
-        Game1.addHUDMessage(new HUDMessage("已弹出样板。", HUDMessage.newQuest_type));
+        Game1.addHUDMessage(new HUDMessage(ModText.Get("ui.patternProvider.ejectedOne"), HUDMessage.newQuest_type));
     }
 
     private void ReturnPatternItem(Item item, GameLocation location, Vector2 tile, bool preferPlayerInventory)
@@ -214,5 +308,20 @@ internal sealed class PatternProviderService
         }
 
         Game1.createItemDebris(item, (tile + new Vector2(0.5f, 0.5f)) * Game1.tileSize, -1, location);
+    }
+
+    private static string DescribePatternSlot(PatternSlotData slot)
+    {
+        var item = PatternCodec.CreateItem(slot);
+        if (!PatternCodec.TryRead(item, out var pattern))
+            return item.DisplayName;
+
+        var kind = pattern.Kind == PatternKind.Crafting
+            ? ModText.Get("ui.patternProvider.kind.crafting")
+            : ModText.Get("ui.patternProvider.kind.processing");
+        var machine = string.IsNullOrWhiteSpace(pattern.MachineQualifiedItemId)
+            ? string.Empty
+            : ModText.Format("ui.patternProvider.machineSuffix", pattern.MachineQualifiedItemId);
+        return ModText.Format("ui.patternProvider.patternLine", kind, PatternDisplayNames.Get(pattern), machine);
     }
 }

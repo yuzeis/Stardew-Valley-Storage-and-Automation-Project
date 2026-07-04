@@ -85,7 +85,7 @@ internal sealed class PatternExecutionService
         if (!Guid.TryParse(monitorObject.modData.GetValueOrDefault(EndpointIdentityService.NetworkIdKey), out var networkId)
             || !this.repository.TryGetNetwork(networkId, out var network))
         {
-            Game1.addHUDMessage(new HUDMessage("请先把这个合成监视器连接到网络。", HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("cpu.monitor.notLinked"), HUDMessage.error_type));
             return true;
         }
 
@@ -93,7 +93,7 @@ internal sealed class PatternExecutionService
         var held = Game1.player.CurrentItem;
         if (held is not null && PatternCodec.IsPatternItem(held) && !PatternCodec.TryRead(held, out queuePattern))
         {
-            Game1.addHUDMessage(new HUDMessage("这个样板物品没有编码数据。", HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("ui.patternProvider.noPatternData"), HUDMessage.error_type));
             return true;
         }
 
@@ -135,14 +135,14 @@ internal sealed class PatternExecutionService
         var job = network.Jobs.FirstOrDefault(candidate => candidate.JobId == jobId);
         if (job is null)
         {
-            message = "CPU 作业已不存在。";
+            message = ModText.Get("cpu.cancel.missing");
             this.LogGameplay($"action=cpu_cancel result=fail network={ShortId(network.NetworkId)} job={ShortId(jobId)} reason={Quote(message)}");
             return false;
         }
 
         if (job.State is CraftingJobState.Completed or CraftingJobState.Cancelled)
         {
-            message = "CPU 作业已经结束。";
+            message = ModText.Get("cpu.cancel.ended");
             this.LogGameplay($"action=cpu_cancel result=fail network={ShortId(network.NetworkId)} job={ShortId(jobId)} state={job.State} reason={Quote(message)}");
             return false;
         }
@@ -150,13 +150,13 @@ internal sealed class PatternExecutionService
         job.State = CraftingJobState.Cancelled;
         job.AssignedCpuEndpointId = null;
         job.StatusMessage = job.WaitingMachineLocationName.Length > 0
-            ? "已取消；机器内物品会保留在原处。"
-            : "已取消。";
+            ? ModText.Get("cpu.status.cancelledMachineKept")
+            : ModText.Get("cpu.status.cancelled");
         this.ReleaseUnconsumedReservations(job);
         this.repository.Save();
 
-        message = $"已取消 CPU 作业：{job.Pattern.DisplayName}。";
-        this.LogGameplay($"action=cpu_cancel result=success network={ShortId(network.NetworkId)} job={ShortId(job.JobId)} pattern={Quote(job.Pattern.DisplayName)} state={job.State} remainingReservations={job.Reservations.Sum(reservation => Math.Max(0, reservation.Count - reservation.ConsumedCount)):N0}");
+        message = ModText.Format("cpu.cancel.success", PatternDisplayNames.Get(job.Pattern));
+        this.LogGameplay($"action=cpu_cancel result=success network={ShortId(network.NetworkId)} job={ShortId(job.JobId)} pattern={Quote(PatternDisplayNames.Get(job.Pattern))} state={job.State} remainingReservations={job.Reservations.Sum(reservation => Math.Max(0, reservation.Count - reservation.ConsumedCount)):N0}");
         return true;
     }
 
@@ -164,58 +164,58 @@ internal sealed class PatternExecutionService
     {
         if (!this.getConfig().EnableAutocrafting)
         {
-            message = "自动合成已禁用。";
-            this.LogGameplay($"action=cpu_queue result=fail network={ShortId(network.NetworkId)} pattern={Quote(pattern.DisplayName)} batches={batches:N0} reason={Quote(message)}");
+            message = ModText.Get("cpu.queue.autocraftingDisabled");
+            this.LogGameplay($"action=cpu_queue result=fail network={ShortId(network.NetworkId)} pattern={Quote(PatternDisplayNames.Get(pattern))} batches={batches:N0} reason={Quote(message)}");
             return false;
         }
 
         if (pattern.Kind == PatternKind.Processing && !this.getConfig().EnableProcessingPatterns)
         {
-            message = "加工样板已禁用。";
-            this.LogGameplay($"action=cpu_queue result=fail network={ShortId(network.NetworkId)} pattern={Quote(pattern.DisplayName)} batches={batches:N0} reason={Quote(message)}");
+            message = ModText.Get("cpu.processing.disabled");
+            this.LogGameplay($"action=cpu_queue result=fail network={ShortId(network.NetworkId)} pattern={Quote(PatternDisplayNames.Get(pattern))} batches={batches:N0} reason={Quote(message)}");
             return false;
         }
 
         var targetOutputId = pattern.Outputs.FirstOrDefault(output => !string.IsNullOrWhiteSpace(output.QualifiedItemId))?.QualifiedItemId;
         if (string.IsNullOrWhiteSpace(targetOutputId))
         {
-            message = "样板没有具体产物。";
-            this.LogGameplay($"action=cpu_queue result=fail network={ShortId(network.NetworkId)} pattern={Quote(pattern.DisplayName)} batches={batches:N0} reason={Quote(message)}");
+            message = ModText.Get("cpu.pattern.noOutput");
+            this.LogGameplay($"action=cpu_queue result=fail network={ShortId(network.NetworkId)} pattern={Quote(PatternDisplayNames.Get(pattern))} batches={batches:N0} reason={Quote(message)}");
             return false;
         }
 
         if (pattern.MachineQualifiedItemId == CaskMachineQualifiedItemId)
         {
-            message = "陈酿使用生产流水线，不使用 CPU 作业。";
-            this.LogGameplay($"action=cpu_queue result=fail network={ShortId(network.NetworkId)} pattern={Quote(pattern.DisplayName)} batches={batches:N0} reason={Quote(message)}");
+            message = ModText.Get("cpu.queue.caskUsesPipeline");
+            this.LogGameplay($"action=cpu_queue result=fail network={ShortId(network.NetworkId)} pattern={Quote(PatternDisplayNames.Get(pattern))} batches={batches:N0} reason={Quote(message)}");
             return false;
         }
 
         var matrixNodeLimit = this.GetMatrixNodeLimit(network);
         if (matrixNodeLimit <= 0)
         {
-            message = "这个网络没有连接合成矩阵。";
-            this.LogGameplay($"action=cpu_queue result=fail network={ShortId(network.NetworkId)} pattern={Quote(pattern.DisplayName)} batches={batches:N0} reason={Quote(message)}");
+            message = ModText.Get("cpu.queue.noMatrix");
+            this.LogGameplay($"action=cpu_queue result=fail network={ShortId(network.NetworkId)} pattern={Quote(PatternDisplayNames.Get(pattern))} batches={batches:N0} reason={Quote(message)}");
             return false;
         }
 
         if (!this.TryCreatePlan(network, Guid.Empty, pattern, Math.Max(1, batches), out var steps, out var reservations, out var nodeCount, out message))
         {
-            this.LogGameplay($"action=cpu_queue result=fail network={ShortId(network.NetworkId)} pattern={Quote(pattern.DisplayName)} batches={batches:N0} reason={Quote(message)}");
+            this.LogGameplay($"action=cpu_queue result=fail network={ShortId(network.NetworkId)} pattern={Quote(PatternDisplayNames.Get(pattern))} batches={batches:N0} reason={Quote(message)}");
             return false;
         }
 
         if (steps.Count == 0)
         {
-            message = $"网络中已有足够的 {pattern.DisplayName}。";
-            this.LogGameplay($"action=cpu_queue result=success_no_job network={ShortId(network.NetworkId)} pattern={Quote(pattern.DisplayName)} batches={batches:N0} reason={Quote(message)}");
+            message = ModText.Format("cpu.queue.alreadyEnough", PatternDisplayNames.Get(pattern));
+            this.LogGameplay($"action=cpu_queue result=success_no_job network={ShortId(network.NetworkId)} pattern={Quote(PatternDisplayNames.Get(pattern))} batches={batches:N0} reason={Quote(message)}");
             return true;
         }
 
         if (nodeCount > matrixNodeLimit)
         {
-            message = $"合成矩阵容量不足：{nodeCount:N0}/{matrixNodeLimit:N0}。";
-            this.LogGameplay($"action=cpu_queue result=fail network={ShortId(network.NetworkId)} pattern={Quote(pattern.DisplayName)} batches={batches:N0} nodes={nodeCount:N0} matrixLimit={matrixNodeLimit:N0} reason={Quote(message)}");
+            message = ModText.Format("cpu.queue.matrixTooSmall", nodeCount, matrixNodeLimit);
+            this.LogGameplay($"action=cpu_queue result=fail network={ShortId(network.NetworkId)} pattern={Quote(PatternDisplayNames.Get(pattern))} batches={batches:N0} nodes={nodeCount:N0} matrixLimit={matrixNodeLimit:N0} reason={Quote(message)}");
             return false;
         }
 
@@ -233,8 +233,8 @@ internal sealed class PatternExecutionService
             CurrentStepIndex = 0,
             NodeCount = nodeCount,
             StatusMessage = isLongRunning
-                ? $"已规划 {steps.Count:N0} 步，{nodeCount:N0} 节点；最长加工约 {FormatProcessingDuration(GetMaxProcessingMinutes(steps))}。"
-                : $"已规划 {steps.Count:N0} 步，{nodeCount:N0} 节点。",
+                ? ModText.Format("cpu.status.plannedLong", steps.Count, nodeCount, FormatProcessingDuration(GetMaxProcessingMinutes(steps)))
+                : ModText.Format("cpu.status.planned", steps.Count, nodeCount),
             CreatedTick = Game1.ticks,
             IsLongRunning = isLongRunning
         };
@@ -242,8 +242,8 @@ internal sealed class PatternExecutionService
         network.Jobs.Add(job);
         this.repository.Save();
 
-        message = $"已排队 CPU 作业：{pattern.DisplayName}，共 {steps.Count:N0} 步。";
-        this.LogGameplay($"action=cpu_queue result=success network={ShortId(network.NetworkId)} job={ShortId(job.JobId)} pattern={Quote(pattern.DisplayName)} kind={pattern.Kind} batches={batches:N0} requested={job.RequestedCount:N0} steps={steps.Count:N0} nodes={nodeCount:N0} matrixLimit={matrixNodeLimit:N0} longJob={isLongRunning}");
+        message = ModText.Format("cpu.queue.success", PatternDisplayNames.Get(pattern), steps.Count);
+        this.LogGameplay($"action=cpu_queue result=success network={ShortId(network.NetworkId)} job={ShortId(job.JobId)} pattern={Quote(PatternDisplayNames.Get(pattern))} kind={pattern.Kind} batches={batches:N0} requested={job.RequestedCount:N0} steps={steps.Count:N0} nodes={nodeCount:N0} matrixLimit={matrixNodeLimit:N0} longJob={isLongRunning}");
         return true;
     }
 
@@ -282,37 +282,37 @@ internal sealed class PatternExecutionService
     {
         if (!this.getConfig().EnableProcessingPatterns)
         {
-            message = "加工样板已禁用。";
+            message = ModText.Get("cpu.processing.disabled");
             this.LogGameplay($"action=pipeline_toggle result=fail network={ShortId(network.NetworkId)} reason={Quote(message)}");
             return false;
         }
 
         if (pattern is null || pattern.Kind != PatternKind.Processing)
         {
-            message = "请先手持或选择一个加工样板。";
+            message = ModText.Get("pipeline.noPatternSelected");
             this.LogGameplay($"action=pipeline_toggle result=fail network={ShortId(network.NetworkId)} reason={Quote(message)}");
             return false;
         }
 
         if (string.IsNullOrWhiteSpace(pattern.MachineQualifiedItemId))
         {
-            message = "加工样板没有机器 ID。";
-            this.LogGameplay($"action=pipeline_toggle result=fail network={ShortId(network.NetworkId)} pattern={Quote(pattern.DisplayName)} reason={Quote(message)}");
+            message = ModText.Get("pipeline.noMachineId");
+            this.LogGameplay($"action=pipeline_toggle result=fail network={ShortId(network.NetworkId)} pattern={Quote(PatternDisplayNames.Get(pattern))} reason={Quote(message)}");
             return false;
         }
 
         if (pattern.MachineQualifiedItemId == CaskMachineQualifiedItemId)
         {
-            message = "陈酿请使用陈酿流水线按钮。";
-            this.LogGameplay($"action=pipeline_toggle result=fail network={ShortId(network.NetworkId)} pattern={Quote(pattern.DisplayName)} machine={Quote(pattern.MachineQualifiedItemId)} reason={Quote(message)}");
+            message = ModText.Get("pipeline.caskUseCaskButton");
+            this.LogGameplay($"action=pipeline_toggle result=fail network={ShortId(network.NetworkId)} pattern={Quote(PatternDisplayNames.Get(pattern))} machine={Quote(pattern.MachineQualifiedItemId)} reason={Quote(message)}");
             return false;
         }
 
         var outputKey = GetPrimaryPatternOutputIdentityKey(pattern);
         if (string.IsNullOrWhiteSpace(outputKey))
         {
-            message = "加工样板没有具体产物。";
-            this.LogGameplay($"action=pipeline_toggle result=fail network={ShortId(network.NetworkId)} pattern={Quote(pattern.DisplayName)} reason={Quote(message)}");
+            message = ModText.Get("cpu.pattern.noOutput");
+            this.LogGameplay($"action=pipeline_toggle result=fail network={ShortId(network.NetworkId)} pattern={Quote(PatternDisplayNames.Get(pattern))} reason={Quote(message)}");
             return false;
         }
 
@@ -325,12 +325,12 @@ internal sealed class PatternExecutionService
         {
             existing.Enabled = !existing.Enabled;
             existing.Pattern = ClonePattern(pattern);
-            existing.StatusMessage = existing.Enabled ? "已启用。" : "已禁用。";
+            existing.StatusMessage = existing.Enabled ? ModText.Get("pipeline.status.enabled") : ModText.Get("pipeline.status.disabled");
             this.repository.Save();
             message = existing.Enabled
-                ? $"已启用流水线：{pattern.DisplayName}。"
-                : $"已禁用流水线：{pattern.DisplayName}。";
-            this.LogGameplay($"action=pipeline_toggle result=success network={ShortId(network.NetworkId)} pipeline={ShortId(existing.PipelineId)} pattern={Quote(pattern.DisplayName)} machine={Quote(pattern.MachineQualifiedItemId)} enabled={existing.Enabled}");
+                ? ModText.Format("pipeline.enabled", PatternDisplayNames.Get(pattern))
+                : ModText.Format("pipeline.disabled", PatternDisplayNames.Get(pattern));
+            this.LogGameplay($"action=pipeline_toggle result=success network={ShortId(network.NetworkId)} pipeline={ShortId(existing.PipelineId)} pattern={Quote(PatternDisplayNames.Get(pattern))} machine={Quote(pattern.MachineQualifiedItemId)} enabled={existing.Enabled}");
             return true;
         }
 
@@ -345,13 +345,13 @@ internal sealed class PatternExecutionService
             ItemsPerCycle = 1,
             TargetKeep = 0,
             TickInterval = 240,
-            StatusMessage = "已启用。"
+            StatusMessage = ModText.Get("pipeline.status.enabled")
         };
         network.ProductionPipelines[pipeline.PipelineId] = pipeline;
         this.repository.Save();
 
-        message = $"已启用流水线：{pattern.DisplayName}。";
-        this.LogGameplay($"action=pipeline_toggle result=success network={ShortId(network.NetworkId)} pipeline={ShortId(pipeline.PipelineId)} pattern={Quote(pattern.DisplayName)} machine={Quote(pattern.MachineQualifiedItemId)} enabled=true created=true");
+        message = ModText.Format("pipeline.enabled", PatternDisplayNames.Get(pattern));
+        this.LogGameplay($"action=pipeline_toggle result=success network={ShortId(network.NetworkId)} pipeline={ShortId(pipeline.PipelineId)} pattern={Quote(PatternDisplayNames.Get(pattern))} machine={Quote(pattern.MachineQualifiedItemId)} enabled=true created=true");
         return true;
     }
 
@@ -359,14 +359,14 @@ internal sealed class PatternExecutionService
     {
         if (!this.getConfig().EnableProcessingPatterns)
         {
-            message = "加工样板已禁用。";
+            message = ModText.Get("cpu.processing.disabled");
             this.LogGameplay($"action=cask_pipeline_toggle result=fail network={ShortId(network.NetworkId)} item={Quote(inputItem.DisplayName)} itemId={Quote(inputItem.QualifiedItemId)} reason={Quote(message)}");
             return false;
         }
 
         if (!IsCaskAgeable(inputItem))
         {
-            message = "请先手持可陈酿的物品：酒、啤酒、淡啤酒、蜂蜜酒、奶酪或山羊奶酪。";
+            message = ModText.Get("caskPipeline.needAgeable");
             this.LogGameplay($"action=cask_pipeline_toggle result=fail network={ShortId(network.NetworkId)} item={Quote(inputItem.DisplayName)} itemId={Quote(inputItem.QualifiedItemId)} reason={Quote(message)}");
             return false;
         }
@@ -380,12 +380,12 @@ internal sealed class PatternExecutionService
         {
             existing.Enabled = !existing.Enabled;
             existing.StatusMessage = existing.Enabled
-                ? $"已启用；目标品质 q{NormalizeCaskTargetQuality(this.getConfig().CaskTargetQuality)}。"
-                : "已禁用。";
+                ? ModText.Format("caskPipeline.status.enabled", NormalizeCaskTargetQuality(this.getConfig().CaskTargetQuality))
+                : ModText.Get("pipeline.status.disabled");
             this.repository.Save();
             message = existing.Enabled
-                ? $"已启用陈酿流水线：{inputItem.DisplayName}。"
-                : $"已禁用陈酿流水线：{inputItem.DisplayName}。";
+                ? ModText.Format("caskPipeline.enabled", inputItem.DisplayName)
+                : ModText.Format("caskPipeline.disabled", inputItem.DisplayName);
             this.LogGameplay($"action=cask_pipeline_toggle result=success network={ShortId(network.NetworkId)} pipeline={ShortId(existing.PipelineId)} item={Quote(inputItem.DisplayName)} itemId={Quote(inputItem.QualifiedItemId)} enabled={existing.Enabled} targetQuality={NormalizeCaskTargetQuality(this.getConfig().CaskTargetQuality)}");
             return true;
         }
@@ -402,10 +402,9 @@ internal sealed class PatternExecutionService
             Enabled = true,
             Priority = network.ProductionPipelines.Count,
             Mode = ProductionPipelineMode.CaskAging,
-            Pattern = new PatternData
+            Pattern = PatternDisplayNames.Apply(new PatternData
             {
                 Kind = PatternKind.Processing,
-                DisplayName = $"陈酿：{inputItem.DisplayName}",
                 MachineQualifiedItemId = CaskMachineQualifiedItemId,
                 Inputs = new List<NetworkItemRequest> { CloneRequest(request, 1) },
                 Outputs = new List<NetworkItemRequest>
@@ -418,18 +417,18 @@ internal sealed class PatternExecutionService
                 },
                 ProcessingMinutes = 0,
                 SpeedClass = ProcessingSpeedClass.Slow
-            },
+            }, "pattern.name.caskAging", PatternDisplayNames.ItemArg(inputItem.QualifiedItemId)),
             MachineQualifiedItemId = CaskMachineQualifiedItemId,
             ItemsPerCycle = 1,
             TargetKeep = 0,
             TickInterval = 240,
-            StatusMessage = $"已启用；目标品质 q{NormalizeCaskTargetQuality(this.getConfig().CaskTargetQuality)}。"
+            StatusMessage = ModText.Format("caskPipeline.status.enabled", NormalizeCaskTargetQuality(this.getConfig().CaskTargetQuality))
         };
 
         network.ProductionPipelines[pipeline.PipelineId] = pipeline;
         this.repository.Save();
 
-        message = $"已启用陈酿流水线：{inputItem.DisplayName}。";
+        message = ModText.Format("caskPipeline.enabled", inputItem.DisplayName);
         this.LogGameplay($"action=cask_pipeline_toggle result=success network={ShortId(network.NetworkId)} pipeline={ShortId(pipeline.PipelineId)} item={Quote(inputItem.DisplayName)} itemId={Quote(inputItem.QualifiedItemId)} enabled=true created=true targetQuality={NormalizeCaskTargetQuality(this.getConfig().CaskTargetQuality)}");
         return true;
     }
@@ -438,7 +437,7 @@ internal sealed class PatternExecutionService
     {
         if (!network.ProductionPipelines.TryGetValue(pipelineId, out var pipeline))
         {
-            message = "流水线已不存在。";
+            message = ModText.Get("pipeline.missing");
             this.LogGameplay($"action=pipeline_update result=fail network={ShortId(network.NetworkId)} pipeline={ShortId(pipelineId)} requestAction={Quote(action)} reason={Quote(message)}");
             return false;
         }
@@ -447,56 +446,56 @@ internal sealed class PatternExecutionService
         {
             case PipelineActionToggle:
                 pipeline.Enabled = !pipeline.Enabled;
-                pipeline.StatusMessage = pipeline.Enabled ? "已启用。" : "已禁用。";
+                pipeline.StatusMessage = pipeline.Enabled ? ModText.Get("pipeline.status.enabled") : ModText.Get("pipeline.status.disabled");
                 message = pipeline.Enabled
-                    ? $"已启用流水线：{pipeline.Pattern.DisplayName}。"
-                    : $"已禁用流水线：{pipeline.Pattern.DisplayName}。";
+                    ? ModText.Format("pipeline.enabled", PatternDisplayNames.Get(pipeline.Pattern))
+                    : ModText.Format("pipeline.disabled", PatternDisplayNames.Get(pipeline.Pattern));
                 break;
 
             case PipelineActionPriorityUp:
                 if (!this.TryMovePipelinePriority(network, pipelineId, -1, out message))
                     return false;
-                pipeline.StatusMessage = "优先级已提高。";
+                pipeline.StatusMessage = ModText.Get("pipeline.status.priorityUp");
                 break;
 
             case PipelineActionPriorityDown:
                 if (!this.TryMovePipelinePriority(network, pipelineId, 1, out message))
                     return false;
-                pipeline.StatusMessage = "优先级已降低。";
+                pipeline.StatusMessage = ModText.Get("pipeline.status.priorityDown");
                 break;
 
             case PipelineActionTargetUp:
                 pipeline.TargetKeep = Math.Min(PipelineMaxTargetKeep, Math.Max(0, pipeline.TargetKeep) + PipelineTargetStep);
                 pipeline.StatusMessage = pipeline.TargetKeep > 0
-                    ? $"目标保有：{pipeline.TargetKeep:N0}。"
-                    : "未设置目标保有。";
-                message = $"流水线目标保有：{pipeline.TargetKeep:N0}。";
+                    ? ModText.Format("pipeline.status.targetKeep", pipeline.TargetKeep)
+                    : ModText.Get("pipeline.status.targetOff");
+                message = ModText.Format("pipeline.targetKeep", pipeline.TargetKeep);
                 break;
 
             case PipelineActionTargetDown:
                 pipeline.TargetKeep = Math.Max(0, pipeline.TargetKeep - PipelineTargetStep);
                 pipeline.StatusMessage = pipeline.TargetKeep > 0
-                    ? $"目标保有：{pipeline.TargetKeep:N0}。"
-                    : "未设置目标保有。";
+                    ? ModText.Format("pipeline.status.targetKeep", pipeline.TargetKeep)
+                    : ModText.Get("pipeline.status.targetOff");
                 message = pipeline.TargetKeep > 0
-                    ? $"流水线目标保有：{pipeline.TargetKeep:N0}。"
-                    : "流水线目标保有已关闭。";
+                    ? ModText.Format("pipeline.targetKeep", pipeline.TargetKeep)
+                    : ModText.Get("pipeline.targetOff");
                 break;
 
             case PipelineActionCycleUp:
                 pipeline.ItemsPerCycle = Math.Min(PipelineMaxItemsPerCycle, Math.Max(1, pipeline.ItemsPerCycle) + 1);
-                pipeline.StatusMessage = $"每轮处理：{pipeline.ItemsPerCycle:N0}。";
-                message = $"流水线每轮处理：{pipeline.ItemsPerCycle:N0}。";
+                pipeline.StatusMessage = ModText.Format("pipeline.status.itemsPerCycle", pipeline.ItemsPerCycle);
+                message = ModText.Format("pipeline.itemsPerCycle", pipeline.ItemsPerCycle);
                 break;
 
             case PipelineActionCycleDown:
                 pipeline.ItemsPerCycle = Math.Max(1, pipeline.ItemsPerCycle - 1);
-                pipeline.StatusMessage = $"每轮处理：{pipeline.ItemsPerCycle:N0}。";
-                message = $"流水线每轮处理：{pipeline.ItemsPerCycle:N0}。";
+                pipeline.StatusMessage = ModText.Format("pipeline.status.itemsPerCycle", pipeline.ItemsPerCycle);
+                message = ModText.Format("pipeline.itemsPerCycle", pipeline.ItemsPerCycle);
                 break;
 
             default:
-                message = "未知流水线操作。";
+                message = ModText.Get("pipeline.unknownAction");
                 return false;
         }
 
@@ -677,7 +676,7 @@ internal sealed class PatternExecutionService
 
             if (pipeline.TargetKeep > 0 && this.OutputCount(network, pipeline) >= pipeline.TargetKeep)
             {
-                pipeline.StatusMessage = $"已达到目标保有：{pipeline.TargetKeep:N0}。";
+                pipeline.StatusMessage = ModText.Format("pipeline.status.targetReached", pipeline.TargetKeep);
                 pipeline.LastRunTick = tick;
                 touchedPipelines.Add(pipeline.PipelineId);
                 changed = true;
@@ -771,7 +770,7 @@ internal sealed class PatternExecutionService
         var index = ordered.FindIndex(pipeline => pipeline.PipelineId == pipelineId);
         if (index < 0)
         {
-            message = "流水线已不存在。";
+            message = ModText.Get("pipeline.missing");
             return false;
         }
 
@@ -780,8 +779,8 @@ internal sealed class PatternExecutionService
         {
             this.NormalizePipelinePriorities(ordered);
             message = direction < 0
-                ? "流水线已经是最高优先级。"
-                : "流水线已经是最低优先级。";
+                ? ModText.Get("pipeline.priorityAlreadyHighest")
+                : ModText.Get("pipeline.priorityAlreadyLowest");
             return true;
         }
 
@@ -790,8 +789,8 @@ internal sealed class PatternExecutionService
         ordered[targetIndex] = moving;
         this.NormalizePipelinePriorities(ordered);
         message = direction < 0
-            ? $"已提高流水线优先级：{moving.Pattern.DisplayName}。"
-            : $"已降低流水线优先级：{moving.Pattern.DisplayName}。";
+            ? ModText.Format("pipeline.priorityRaised", PatternDisplayNames.Get(moving.Pattern))
+            : ModText.Format("pipeline.priorityLowered", PatternDisplayNames.Get(moving.Pattern));
         return true;
     }
 
@@ -820,8 +819,8 @@ internal sealed class PatternExecutionService
                 network,
                 target.Machine,
                 held,
-                "等待网络存储空间。",
-                "收取时网络存储发生变化。",
+                ModText.Get("machineOutput.waitingStorage"),
+                ModText.Get("machineOutput.storageChanged"),
                 out var depositMessage))
         {
             pipeline.StatusMessage = depositMessage;
@@ -829,7 +828,7 @@ internal sealed class PatternExecutionService
         }
 
         MachineStateHelper.ResetAfterAutomatedCollect(target.Machine);
-        pipeline.StatusMessage = $"已收取 {held.DisplayName}。";
+        pipeline.StatusMessage = ModText.Format("pipeline.status.collected", held.DisplayName);
         return true;
     }
 
@@ -837,7 +836,7 @@ internal sealed class PatternExecutionService
     {
         if (pipeline.Pattern.Inputs.Count == 0)
         {
-            pipeline.StatusMessage = "流水线样板没有输入。";
+            pipeline.StatusMessage = ModText.Get("pipeline.status.noInputs");
             return false;
         }
 
@@ -862,19 +861,19 @@ internal sealed class PatternExecutionService
         catch (Exception ex)
         {
             this.ReturnScratchInventory(network, scratchInventory, target);
-            pipeline.StatusMessage = $"机器自动投料失败：{ex.Message}";
+            pipeline.StatusMessage = ModText.Format("machineInput.autoloadFailed", ex.Message);
             return false;
         }
 
         if (target.Machine.heldObject.Value is null)
         {
             this.ReturnScratchInventory(network, scratchInventory, target);
-            pipeline.StatusMessage = "机器拒绝流水线输入。";
+            pipeline.StatusMessage = ModText.Get("pipeline.status.machineRejectedInput");
             return false;
         }
 
         this.ReturnScratchInventory(network, scratchInventory, target);
-        pipeline.StatusMessage = $"已向 {target.Machine.DisplayName} 投料。";
+        pipeline.StatusMessage = ModText.Format("pipeline.status.fedMachine", target.Machine.DisplayName);
         return true;
     }
 
@@ -891,7 +890,7 @@ internal sealed class PatternExecutionService
         var currentQuality = held is SObject obj ? obj.Quality : 0;
         if (currentQuality < targetQuality)
         {
-            pipeline.StatusMessage = $"陈酿中 {held.DisplayName}：q{currentQuality}/q{targetQuality}。";
+            pipeline.StatusMessage = ModText.Format("caskPipeline.status.aging", held.DisplayName, currentQuality, targetQuality);
             return false;
         }
 
@@ -899,8 +898,8 @@ internal sealed class PatternExecutionService
                 network,
                 target.Machine,
                 held,
-                "等待网络存储空间。",
-                "收取时网络存储发生变化。",
+                ModText.Get("machineOutput.waitingStorage"),
+                ModText.Get("machineOutput.storageChanged"),
                 out var depositMessage))
         {
             pipeline.StatusMessage = depositMessage;
@@ -908,7 +907,7 @@ internal sealed class PatternExecutionService
         }
 
         MachineStateHelper.ResetAfterAutomatedCollect(target.Machine);
-        pipeline.StatusMessage = $"已收取陈酿产物 {held.DisplayName} q{currentQuality}。";
+        pipeline.StatusMessage = ModText.Format("caskPipeline.status.collected", held.DisplayName, currentQuality);
         return true;
     }
 
@@ -929,7 +928,7 @@ internal sealed class PatternExecutionService
             .FirstOrDefault(endpoint => this.FindPlacedObject(endpoint)?.QualifiedItemId == "(BC)" + ModItemCatalog.MolecularAssembler);
         if (assembler is null)
         {
-            job.StatusMessage = "等待已连接的分子装配室。";
+            job.StatusMessage = ModText.Get("cpu.status.waitingAssembler");
             return false;
         }
 
@@ -946,7 +945,7 @@ internal sealed class PatternExecutionService
         {
             if (!this.transactionService.CanAcceptNetworkItem(network, output, output.Stack))
             {
-                job.StatusMessage = "等待网络存储空间。";
+                job.StatusMessage = ModText.Get("machineOutput.waitingStorage");
                 return false;
             }
         }
@@ -973,7 +972,7 @@ internal sealed class PatternExecutionService
             if (!this.transactionService.TryDepositItem(network, output, out var moved) || moved < expected)
             {
                 job.State = CraftingJobState.Failed;
-                job.StatusMessage = "材料已消耗，但合成产物无法存入。";
+                job.StatusMessage = ModText.Get("cpu.status.outputStoreFailedAfterConsume");
                 job.AssignedCpuEndpointId = null;
                 this.DropLeftover(assembler, output);
                 this.monitor.Log($"CPU job {job.JobId:N} failed to store crafted output {output.QualifiedItemId}; dropped leftover near assembler.", LogLevel.Warn);
@@ -984,7 +983,7 @@ internal sealed class PatternExecutionService
         step.CompletedBatches++;
         step.State = CraftingJobState.Running;
         this.SyncJobProgress(job);
-        job.StatusMessage = $"步骤 {step.StepIndex + 1:N0}/{job.Steps.Count:N0}：已合成 {step.CompletedBatches:N0}/{step.RequestedBatches:N0}。";
+        job.StatusMessage = ModText.Format("cpu.status.stepCrafted", step.StepIndex + 1, job.Steps.Count, step.CompletedBatches, step.RequestedBatches);
         if (step.CompletedBatches >= step.RequestedBatches)
             return this.AdvanceStep(job, step);
 
@@ -996,7 +995,7 @@ internal sealed class PatternExecutionService
         if (!this.getConfig().EnableProcessingPatterns)
         {
             job.State = CraftingJobState.Failed;
-            job.StatusMessage = "加工样板已禁用。";
+            job.StatusMessage = ModText.Get("cpu.processing.disabled");
             job.AssignedCpuEndpointId = null;
             return true;
         }
@@ -1010,7 +1009,7 @@ internal sealed class PatternExecutionService
         if (string.IsNullOrWhiteSpace(step.Pattern.MachineQualifiedItemId))
         {
             job.State = CraftingJobState.Failed;
-            job.StatusMessage = "加工样板没有机器 ID。";
+            job.StatusMessage = ModText.Get("pipeline.noMachineId");
             job.AssignedCpuEndpointId = null;
             return true;
         }
@@ -1053,7 +1052,7 @@ internal sealed class PatternExecutionService
             {
                 this.ReturnScratchInventory(network, scratchInventory, machineTarget);
                 this.RollbackReservationConsumption(consumedReservations);
-                job.StatusMessage = $"机器自动投料失败：{ex.Message}";
+                job.StatusMessage = ModText.Format("machineInput.autoloadFailed", ex.Message);
                 return false;
             }
 
@@ -1061,7 +1060,7 @@ internal sealed class PatternExecutionService
             {
                 this.ReturnScratchInventory(network, scratchInventory, machineTarget);
                 this.RollbackReservationConsumption(consumedReservations);
-                job.StatusMessage = "机器拒绝抽取出的输入物。";
+                job.StatusMessage = ModText.Get("cpu.status.machineRejectedExtractedInput");
                 return false;
             }
 
@@ -1072,15 +1071,15 @@ internal sealed class PatternExecutionService
             job.WaitingMachineTileX = machineTarget.Tile.X;
             job.WaitingMachineTileY = machineTarget.Tile.Y;
             var remainingMinutes = GetMachineRemainingMinutes(machineTarget.Machine, step.Pattern);
-            job.StatusMessage = $"步骤 {step.StepIndex + 1:N0}/{job.Steps.Count:N0}：等待 {machineTarget.Machine.DisplayName}（剩余 {FormatRemainingProcessingTime(remainingMinutes)}）。";
-            this.LogGameplay($"action=cpu_processing_wait result=success network={ShortId(network.NetworkId)} job={ShortId(job.JobId)} pattern={Quote(step.Pattern.DisplayName)} machine={Quote(machineTarget.Machine.DisplayName)} machineId={Quote(machineTarget.Machine.QualifiedItemId)} location={Quote(machineTarget.Location.NameOrUniqueName)} tile=({machineTarget.Tile.X:0},{machineTarget.Tile.Y:0}) remainingMinutes={remainingMinutes:N0}");
+            job.StatusMessage = ModText.Format("cpu.status.stepWaitingMachine", step.StepIndex + 1, job.Steps.Count, machineTarget.Machine.DisplayName, FormatRemainingProcessingTime(remainingMinutes));
+            this.LogGameplay($"action=cpu_processing_wait result=success network={ShortId(network.NetworkId)} job={ShortId(job.JobId)} pattern={Quote(PatternDisplayNames.Get(step.Pattern))} machine={Quote(machineTarget.Machine.DisplayName)} machineId={Quote(machineTarget.Machine.QualifiedItemId)} location={Quote(machineTarget.Location.NameOrUniqueName)} tile=({machineTarget.Tile.X:0},{machineTarget.Tile.Y:0}) remainingMinutes={remainingMinutes:N0}");
             return true;
         }
 
         job.State = CraftingJobState.WaitingForMachine;
         step.State = CraftingJobState.WaitingForMachine;
         job.StatusMessage = string.IsNullOrWhiteSpace(lastProbeMessage)
-            ? "等待机器接口旁边出现空闲的匹配机器。"
+            ? ModText.Get("cpu.status.waitingMatchingMachine")
             : lastProbeMessage;
         return false;
     }
@@ -1095,7 +1094,7 @@ internal sealed class PatternExecutionService
             {
                 job.State = CraftingJobState.WaitingForOutput;
                 step.State = CraftingJobState.WaitingForOutput;
-                job.StatusMessage = "追踪的机器已被移除；等待重新连接带有匹配产物的机器。";
+                job.StatusMessage = ModText.Get("cpu.status.trackedMachineRemoved");
                 return false;
             }
 
@@ -1104,14 +1103,14 @@ internal sealed class PatternExecutionService
             job.WaitingMachineLocationName = recoveredTarget.Location.NameOrUniqueName;
             job.WaitingMachineTileX = recoveredTarget.Tile.X;
             job.WaitingMachineTileY = recoveredTarget.Tile.Y;
-            job.StatusMessage = $"已找回移动后的机器：{job.WaitingMachineLocationName} ({job.WaitingMachineTileX:N0},{job.WaitingMachineTileY:N0})。";
+            job.StatusMessage = ModText.Format("cpu.status.recoveredMovedMachine", job.WaitingMachineLocationName, job.WaitingMachineTileX, job.WaitingMachineTileY);
         }
 
         var held = machine.heldObject.Value;
         if (held is null)
         {
             job.State = CraftingJobState.Failed;
-            job.StatusMessage = "追踪的机器产物消失了。";
+            job.StatusMessage = ModText.Get("cpu.status.trackedOutputMissing");
             job.AssignedCpuEndpointId = null;
             return true;
         }
@@ -1119,14 +1118,14 @@ internal sealed class PatternExecutionService
         if (!machine.readyForHarvest.Value)
         {
             var remainingMinutes = GetMachineRemainingMinutes(machine, step.Pattern);
-            job.StatusMessage = $"等待 {machine.DisplayName} 产出（剩余 {FormatRemainingProcessingTime(remainingMinutes)}）。";
+            job.StatusMessage = ModText.Format("cpu.status.waitingOutput", machine.DisplayName, FormatRemainingProcessingTime(remainingMinutes));
             return false;
         }
 
         if (!OutputMatchesPattern(step.Pattern, held))
         {
             job.State = CraftingJobState.Failed;
-            job.StatusMessage = $"机器产物不匹配：{held.QualifiedItemId}。";
+            job.StatusMessage = ModText.Format("cpu.status.outputMismatch", held.QualifiedItemId);
             job.AssignedCpuEndpointId = null;
             return true;
         }
@@ -1135,8 +1134,8 @@ internal sealed class PatternExecutionService
                 network,
                 machine,
                 held,
-                "等待网络空间存入机器产物。",
-                "收取机器产物时网络存储发生变化。",
+                ModText.Get("machineOutput.waitingStorageOutput"),
+                ModText.Get("machineOutput.storageChangedOutput"),
                 out var depositMessage))
         {
             job.StatusMessage = depositMessage;
@@ -1151,7 +1150,7 @@ internal sealed class PatternExecutionService
         job.WaitingMachineLocationName = string.Empty;
         job.WaitingMachineTileX = 0;
         job.WaitingMachineTileY = 0;
-        job.StatusMessage = $"步骤 {step.StepIndex + 1:N0}/{job.Steps.Count:N0}：已收取 {step.CompletedBatches:N0}/{step.RequestedBatches:N0}。";
+        job.StatusMessage = ModText.Format("cpu.status.stepCollected", step.StepIndex + 1, job.Steps.Count, step.CompletedBatches, step.RequestedBatches);
 
         if (step.CompletedBatches >= step.RequestedBatches)
             return this.AdvanceStep(job, step);
@@ -1190,20 +1189,20 @@ internal sealed class PatternExecutionService
         {
             if (totalSlots <= 0)
             {
-                changed |= this.SetStatus(job, "等待已连接的合成 CPU 核心。");
+                changed |= this.SetStatus(job, ModText.Get("cpu.status.waitingCpuCore"));
                 continue;
             }
 
             var nodeCount = job.NodeCount > 0 ? job.NodeCount : GetNodeCount(job.Pattern);
             if (matrixNodeLimit <= 0 || nodeCount > matrixNodeLimit)
             {
-                changed |= this.SetStatus(job, $"等待合成矩阵容量 {nodeCount:N0}/{Math.Max(0, matrixNodeLimit):N0}。");
+                changed |= this.SetStatus(job, ModText.Format("cpu.status.waitingMatrixCapacity", nodeCount, Math.Max(0, matrixNodeLimit)));
                 continue;
             }
 
             if (activeJobs.Count >= totalSlots)
             {
-                changed |= this.SetStatus(job, "等待空闲 CPU 槽位。");
+                changed |= this.SetStatus(job, ModText.Get("cpu.status.waitingCpuSlot"));
                 continue;
             }
 
@@ -1216,7 +1215,7 @@ internal sealed class PatternExecutionService
                 var activeLongJobs = activeJobs.Count(active => active.IsLongRunning);
                 if (activeLongJobs >= maxLongSlots)
                 {
-                    changed |= this.SetStatus(job, "等待未保留给快速作业的 CPU 槽位。");
+                    changed |= this.SetStatus(job, ModText.Get("cpu.status.waitingUnreservedCpuSlot"));
                     continue;
                 }
             }
@@ -1229,7 +1228,7 @@ internal sealed class PatternExecutionService
             var cpu = cpuEndpoints.FirstOrDefault(endpoint => !usedCpuIds.Contains(endpoint.EndpointId));
             if (cpu is null)
             {
-                changed |= this.SetStatus(job, "等待空闲 CPU 槽位。");
+                changed |= this.SetStatus(job, ModText.Get("cpu.status.waitingCpuSlot"));
                 continue;
             }
 
@@ -1243,10 +1242,10 @@ internal sealed class PatternExecutionService
             if (step is not null && step.State is not (CraftingJobState.WaitingForMachine or CraftingJobState.WaitingForOutput))
                 step.State = CraftingJobState.Running;
             job.StatusMessage = step is null
-                ? $"正在 CPU {cpu.EndpointId:N} 上运行。"
+                ? ModText.Format("cpu.status.runningOnCpu", cpu.EndpointId.ToString("N"))
                 : resumeState == CraftingJobState.WaitingForOutput
-                    ? $"已重新分配 CPU {cpu.EndpointId:N}；等待步骤 {step.StepIndex + 1:N0}/{job.Steps.Count:N0} 的机器产物：{step.Pattern.DisplayName}。"
-                    : $"正在运行步骤 {step.StepIndex + 1:N0}/{job.Steps.Count:N0}：{step.Pattern.DisplayName}。";
+                    ? ModText.Format("cpu.status.reassignedWaitingOutput", cpu.EndpointId.ToString("N"), step.StepIndex + 1, job.Steps.Count, PatternDisplayNames.Get(step.Pattern))
+                    : ModText.Format("cpu.status.runningStep", step.StepIndex + 1, job.Steps.Count, PatternDisplayNames.Get(step.Pattern));
             activeJobs.Add(job);
             changed = true;
         }
@@ -1269,7 +1268,7 @@ internal sealed class PatternExecutionService
             {
                 job.State = CraftingJobState.Planning;
                 job.AssignedCpuEndpointId = null;
-                job.StatusMessage = $"合成矩阵不再有 {nodeCount:N0} 个节点容量。";
+                job.StatusMessage = ModText.Format("cpu.status.matrixLostCapacity", nodeCount);
                 changed = true;
                 continue;
             }
@@ -1279,7 +1278,7 @@ internal sealed class PatternExecutionService
 
             job.State = CraftingJobState.Planning;
             job.AssignedCpuEndpointId = null;
-            job.StatusMessage = "已分配的 CPU 核心不再连接。";
+            job.StatusMessage = ModText.Get("cpu.status.assignedCpuDisconnected");
             changed = true;
         }
 
@@ -1581,7 +1580,7 @@ internal sealed class PatternExecutionService
         var targetOutput = targetPattern.Outputs.FirstOrDefault(output => !string.IsNullOrWhiteSpace(output.QualifiedItemId));
         if (targetOutput?.QualifiedItemId is null)
         {
-            message = "目标样板没有具体产物。";
+            message = ModText.Get("cpu.plan.targetNoOutput");
             return false;
         }
 
@@ -1599,7 +1598,7 @@ internal sealed class PatternExecutionService
         var requestedCount = Math.Max(1, targetBatches) * Math.Max(1, targetOutput.Count);
         if (!this.PlanPatternOutputNeed(context, targetPattern, targetOutput, requestedCount, 0))
         {
-            message = "缺少：" + string.Join(", ", context.MissingLines);
+            message = ModText.Format("cpu.plan.missingPrefix", string.Join(", ", context.MissingLines));
             return false;
         }
 
@@ -1609,7 +1608,7 @@ internal sealed class PatternExecutionService
         steps = context.Steps;
         reservations = context.Reservations;
         nodeCount = steps.Sum(step => GetNodeCount(step.Pattern) * Math.Max(1, step.RequestedBatches));
-        message = $"已规划 {steps.Count:N0} 步。";
+        message = ModText.Format("cpu.plan.success", steps.Count);
         return true;
     }
 
@@ -1617,7 +1616,7 @@ internal sealed class PatternExecutionService
     {
         if (targetOutput.QualifiedItemId is null)
         {
-            context.MissingLines.Add($"{pattern.DisplayName}：目标样板没有具体产物");
+            context.MissingLines.Add(ModText.Format("cpu.plan.patternNoOutput", PatternDisplayNames.Get(pattern)));
             return false;
         }
 
@@ -1640,7 +1639,7 @@ internal sealed class PatternExecutionService
             .Sum(output => Math.Max(1, output.Count));
         if (outputPerBatch <= 0)
         {
-            context.MissingLines.Add($"{targetOutput.QualifiedItemId}：样板没有可用产物");
+            context.MissingLines.Add(ModText.Format("cpu.plan.noUsableOutput", targetOutput.QualifiedItemId));
             return false;
         }
 
@@ -1675,7 +1674,7 @@ internal sealed class PatternExecutionService
         var producedAvailable = this.GetVirtualRequestCount(context, targetRequest);
         if (producedAvailable < deficit)
         {
-            context.MissingLines.Add($"{targetOutput.QualifiedItemId}：规划产物不足 {producedAvailable:N0}/{deficit:N0}");
+            context.MissingLines.Add(ModText.Format("cpu.plan.producedShort", targetOutput.QualifiedItemId, producedAvailable, deficit));
             return false;
         }
 
@@ -1688,7 +1687,7 @@ internal sealed class PatternExecutionService
     {
         if (depth > 32)
         {
-            context.MissingLines.Add($"{qualifiedItemId}：依赖链过深");
+            context.MissingLines.Add(ModText.Format("cpu.plan.dependencyTooDeep", qualifiedItemId));
             return false;
         }
 
@@ -1707,7 +1706,7 @@ internal sealed class PatternExecutionService
 
         if (!context.PatternsByOutput.TryGetValue(qualifiedItemId, out var pattern))
         {
-            context.MissingLines.Add($"{qualifiedItemId}：缺少 {deficit:N0}");
+            context.MissingLines.Add(ModText.Format("cpu.plan.missingItem", qualifiedItemId, deficit));
             return false;
         }
 
@@ -1716,7 +1715,7 @@ internal sealed class PatternExecutionService
             .Sum(output => Math.Max(1, output.Count));
         if (outputPerBatch <= 0)
         {
-            context.MissingLines.Add($"{qualifiedItemId}：样板没有可用产物");
+            context.MissingLines.Add(ModText.Format("cpu.plan.noUsableOutput", qualifiedItemId));
             return false;
         }
 
@@ -1746,7 +1745,7 @@ internal sealed class PatternExecutionService
         var producedAvailable = this.GetVirtualConcreteCount(context, qualifiedItemId);
         if (producedAvailable < deficit)
         {
-            context.MissingLines.Add($"{qualifiedItemId}：规划产物不足 {producedAvailable:N0}/{deficit:N0}");
+            context.MissingLines.Add(ModText.Format("cpu.plan.producedShort", qualifiedItemId, producedAvailable, deficit));
             return false;
         }
 
@@ -1765,7 +1764,7 @@ internal sealed class PatternExecutionService
 
         if (request.Category is null)
         {
-            context.MissingLines.Add($"未知输入：缺少 {count:N0}");
+        context.MissingLines.Add(ModText.Format("cpu.plan.unknownInputMissing", count));
             return false;
         }
 
@@ -1781,7 +1780,7 @@ internal sealed class PatternExecutionService
         if (available > 0)
             this.AddReservation(context, new NetworkItemRequest { Category = request.Category.Value, Count = available }, available);
 
-        context.MissingLines.Add($"分类 {request.Category.Value}：缺少 {count - available:N0}");
+        context.MissingLines.Add(ModText.Format("cpu.plan.categoryMissing", request.Category.Value, count - available));
         return false;
     }
 
@@ -1789,7 +1788,7 @@ internal sealed class PatternExecutionService
     {
         if (depth > 32)
         {
-            context.MissingLines.Add($"{request.DisplayKey}：依赖链过深");
+            context.MissingLines.Add(ModText.Format("cpu.plan.dependencyTooDeep", request.DisplayKey));
             return false;
         }
 
@@ -1803,7 +1802,7 @@ internal sealed class PatternExecutionService
 
         if (!this.TryFindPatternOutputForRequest(context, request, out var pattern, out var output))
         {
-            context.MissingLines.Add($"{request.DisplayKey}：缺少 {count - available:N0}");
+            context.MissingLines.Add(ModText.Format("cpu.plan.missingItem", request.DisplayKey, count - available));
             return false;
         }
 
@@ -1952,7 +1951,7 @@ internal sealed class PatternExecutionService
         var next = job.Steps[job.CurrentStepIndex];
         job.State = CraftingJobState.Running;
         next.State = CraftingJobState.Running;
-        job.StatusMessage = $"正在运行步骤 {next.StepIndex + 1:N0}/{job.Steps.Count:N0}：{next.Pattern.DisplayName}。";
+        job.StatusMessage = ModText.Format("cpu.status.runningStep", next.StepIndex + 1, job.Steps.Count, PatternDisplayNames.Get(next.Pattern));
         return true;
     }
 
@@ -1977,7 +1976,7 @@ internal sealed class PatternExecutionService
         extractedItems = new List<Item>();
         if (!this.transactionService.HasIngredients(network, requests, out var missingLines, jobId, autoConsumableOnly: true))
         {
-            message = "缺少：" + string.Join(", ", missingLines);
+            message = ModText.Format("cpu.plan.missingPrefix", string.Join(", ", missingLines));
             return false;
         }
 
@@ -1993,7 +1992,7 @@ internal sealed class PatternExecutionService
             if (extracted.Stack < request.Count)
             {
                 extractedItems.Add(extracted);
-                message = $"只抽取到 {request.DisplayKey} x{extracted.Stack:N0}/{request.Count:N0}。";
+                message = ModText.Format("machineInput.partialExtract", request.DisplayKey, extracted.Stack, request.Count);
                 this.ReturnExtractedInputs(network, extractedItems, fallbackTarget);
                 extractedItems.Clear();
                 return false;
@@ -2002,7 +2001,7 @@ internal sealed class PatternExecutionService
             extractedItems.Add(extracted);
         }
 
-        message = "已抽取机器输入物。";
+        message = ModText.Get("machineInput.extracted");
         return true;
     }
 
@@ -2044,7 +2043,7 @@ internal sealed class PatternExecutionService
         }
         catch (Exception ex)
         {
-            message = $"无法创建机器输入探测物品：{ex.Message}";
+            message = ModText.Format("machineInput.probeCreateFailed", ex.Message);
             return false;
         }
 
@@ -2055,17 +2054,17 @@ internal sealed class PatternExecutionService
         }
         catch (Exception ex)
         {
-            message = $"机器输入探测失败：{ex.Message}";
+            message = ModText.Format("machineInput.probeFailed", ex.Message);
             return false;
         }
 
-        message = $"机器拒绝 {probeItem.DisplayName}。";
+        message = ModText.Format("machineInput.rejected", probeItem.DisplayName);
         return false;
     }
 
     private bool TryConsumeReservations(CraftingJob job, IReadOnlyList<NetworkItemRequest> requests, List<ReservationConsume> consumed, out string message)
     {
-        message = "已消耗预留材料。";
+        message = ModText.Get("cpu.reservation.consumed");
         if (job.Reservations.Count == 0)
             return true;
 
@@ -2090,7 +2089,7 @@ internal sealed class PatternExecutionService
             if (remaining > 0)
             {
                 this.RollbackReservationConsumption(consumed);
-                message = $"预留材料不足：{request.DisplayKey} 需要 {request.Count:N0}，缺 {remaining:N0}。";
+                message = ModText.Format("cpu.reservation.short", request.DisplayKey, request.Count, remaining);
                 return false;
             }
         }
@@ -2139,7 +2138,7 @@ internal sealed class PatternExecutionService
         var expectedCount = Math.Max(0, held.Stack);
         if (expectedCount <= 0)
         {
-            message = "机器产物堆叠为空。";
+            message = ModText.Get("machineOutput.emptyStack");
             return false;
         }
 
@@ -2164,7 +2163,7 @@ internal sealed class PatternExecutionService
             var unrolled = Math.Max(0, moved - rolledBack);
             if (unrolled > 0)
                 TrimMachineOutputAfterPartialDeposit(machine, held, unrolled);
-            message = $"{changedMessage}；部分存入回滚不完整（{rollbackMessage}），机器产物减少了 {unrolled:N0}。";
+            message = ModText.Format("machineOutput.rollbackIncomplete", changedMessage, rollbackMessage, unrolled);
             return false;
         }
 
@@ -2189,13 +2188,13 @@ internal sealed class PatternExecutionService
                 && extracted.Stack >= count)
             {
                 rolledBack = extracted.Stack;
-                message = "已回滚部分机器产物存入。";
+                message = ModText.Get("machineOutput.rollbackSuccess");
                 return true;
             }
 
             rolledBack = Math.Max(0, extracted?.Stack ?? 0);
             message = rolledBack > 0
-                ? $"只回滚了 {rolledBack:N0}/{count:N0}；{extractMessage}"
+                ? ModText.Format("machineOutput.rollbackPartial", rolledBack, count, extractMessage)
                 : extractMessage;
         }
         catch (Exception ex)
@@ -2226,7 +2225,7 @@ internal sealed class PatternExecutionService
         {
             if (output.QualifiedItemId is null)
             {
-                message = "样板产物必须是具体物品。";
+                message = ModText.Get("cpu.output.mustBeConcrete");
                 return null;
             }
 
@@ -2237,7 +2236,7 @@ internal sealed class PatternExecutionService
             }
             catch (Exception ex)
             {
-                message = $"无法创建产物 {output.QualifiedItemId}：{ex.Message}";
+                message = ModText.Format("cpu.output.createFailed", output.QualifiedItemId, ex.Message);
                 return null;
             }
 
@@ -2261,8 +2260,8 @@ internal sealed class PatternExecutionService
         job.State = CraftingJobState.Completed;
         job.AssignedCpuEndpointId = null;
         this.ReleaseUnconsumedReservations(job);
-        job.StatusMessage = "已完成。";
-        this.LogGameplay($"action=cpu_complete result=success job={ShortId(job.JobId)} pattern={Quote(job.Pattern.DisplayName)} requested={job.RequestedCount:N0} completed={job.CompletedCount:N0} steps={job.Steps.Count:N0}");
+        job.StatusMessage = ModText.Get("cpu.status.completed");
+        this.LogGameplay($"action=cpu_complete result=success job={ShortId(job.JobId)} pattern={Quote(PatternDisplayNames.Get(job.Pattern))} requested={job.RequestedCount:N0} completed={job.CompletedCount:N0} steps={job.Steps.Count:N0}");
         return true;
     }
 
@@ -2284,11 +2283,11 @@ internal sealed class PatternExecutionService
 
         if (active.Count == 0)
         {
-            Game1.addHUDMessage(new HUDMessage("没有活跃的 SVSAP CPU 作业。", HUDMessage.newQuest_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("cpu.status.noActiveJobs"), HUDMessage.newQuest_type));
             return;
         }
 
-        var summary = string.Join(" | ", active.Select(job => $"{job.Pattern.DisplayName}：{FormatJobState(job.State)} {job.CompletedCount}/{job.RequestedCount}"));
+        var summary = string.Join(" | ", active.Select(job => ModText.Format("cpu.status.summaryPart", PatternDisplayNames.Get(job.Pattern), FormatJobState(job.State), job.CompletedCount, job.RequestedCount)));
         Game1.addHUDMessage(new HUDMessage(summary, HUDMessage.newQuest_type));
     }
 
@@ -2427,34 +2426,34 @@ internal sealed class PatternExecutionService
     {
         return minutes > 0
             ? "~" + FormatProcessingDuration(minutes)
-            : "即将完成";
+            : ModText.Get("cpu.duration.soon");
     }
 
     private static string FormatProcessingDuration(int minutes)
     {
         var safeMinutes = Math.Max(0, minutes);
         if (safeMinutes >= 1600)
-            return $"{Math.Ceiling(safeMinutes / 1600d):N0} 天";
+            return ModText.Format("cpu.duration.days", Math.Ceiling(safeMinutes / 1600d));
 
         if (safeMinutes >= 60)
-            return $"{Math.Ceiling(safeMinutes / 60d):N0} 小时";
+            return ModText.Format("cpu.duration.hours", Math.Ceiling(safeMinutes / 60d));
 
-        return $"{safeMinutes:N0} 分钟";
+        return ModText.Format("cpu.duration.minutes", safeMinutes);
     }
 
     private static string FormatJobState(CraftingJobState state)
     {
         return state switch
         {
-            CraftingJobState.Planning => "规划中",
-            CraftingJobState.MissingItems => "缺材料",
-            CraftingJobState.Reserved => "已预留",
-            CraftingJobState.Running => "运行中",
-            CraftingJobState.WaitingForMachine => "等机器",
-            CraftingJobState.WaitingForOutput => "等产出",
-            CraftingJobState.Completed => "已完成",
-            CraftingJobState.Cancelled => "已取消",
-            CraftingJobState.Failed => "失败",
+            CraftingJobState.Planning => ModText.Get("craftingMonitor.jobState.planning"),
+            CraftingJobState.MissingItems => ModText.Get("craftingMonitor.jobState.missing"),
+            CraftingJobState.Reserved => ModText.Get("craftingMonitor.jobState.reserved"),
+            CraftingJobState.Running => ModText.Get("craftingMonitor.jobState.running"),
+            CraftingJobState.WaitingForMachine => ModText.Get("craftingMonitor.jobState.waitingMachine"),
+            CraftingJobState.WaitingForOutput => ModText.Get("craftingMonitor.jobState.waitingOutput"),
+            CraftingJobState.Completed => ModText.Get("craftingMonitor.jobState.completed"),
+            CraftingJobState.Cancelled => ModText.Get("craftingMonitor.jobState.cancelled"),
+            CraftingJobState.Failed => ModText.Get("craftingMonitor.jobState.failed"),
             _ => state.ToString()
         };
     }

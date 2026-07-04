@@ -65,16 +65,16 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
         buttonX += 16;
         foreach (var option in new[]
         {
-            (Strategy: MaterialQualityStrategy.LowQualityFirst, Label: "低质"),
-            (Strategy: MaterialQualityStrategy.HighQualityFirst, Label: "高质"),
-            (Strategy: MaterialQualityStrategy.PreserveGoldIridium, Label: "保金铱")
+            (Strategy: MaterialQualityStrategy.LowQualityFirst, Label: ModText.Get("craftingTerminal.quality.low")),
+            (Strategy: MaterialQualityStrategy.HighQualityFirst, Label: ModText.Get("craftingTerminal.quality.high")),
+            (Strategy: MaterialQualityStrategy.PreserveGoldIridium, Label: ModText.Get("craftingTerminal.quality.preserve"))
         })
         {
             this.qualityButtons.Add(new ClickableComponent(new Rectangle(buttonX, buttonY, 76, 42), option.Strategy.ToString(), option.Label));
             buttonX += 86;
         }
 
-        this.craftableOnlyButton = new ClickableComponent(new Rectangle(buttonX, buttonY, 86, 42), "ready", "可做");
+        this.craftableOnlyButton = new ClickableComponent(new Rectangle(buttonX, buttonY, 86, 42), "ready", ModText.Get("craftingTerminal.ready"));
 
         var gridTop = top + 108;
         var gridBottom = buttonY - 18;
@@ -91,13 +91,13 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
         var snapshot = this.scanner.Scan(this.network);
         var innerX = this.xPositionOnScreen + SVSAPMenuWidgets.Pad;
         var top = this.yPositionOnScreen + 24;
-        var title = $"{this.network.Name} 合成终端  -  {visible.Count:N0} 个配方，网络 {snapshot.Entries.Count:N0} 类物品";
+        var title = ModText.Format("craftingTerminal.title", this.network.Name, visible.Count, snapshot.Entries.Count);
         b.DrawString(Game1.dialogueFont, title, new Vector2(innerX, top), Game1.textColor);
 
         SVSAPMenuWidgets.DrawSearchBox(b, this.searchBox, this.search);
         b.DrawString(
             Game1.smallFont,
-            $"批量 x{this.batches:N0}  ·  材料策略：{this.GetQualityStrategyLabel()}",
+            ModText.Format("craftingTerminal.summary", this.batches, this.GetQualityStrategyLabel()),
             new Vector2(this.searchBox.Right + 24, this.searchBox.Y + 10),
             Game1.textColor);
 
@@ -113,7 +113,7 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
         {
             b.DrawString(
                 Game1.smallFont,
-                "没有匹配的已知合成配方。",
+                ModText.Get("craftingTerminal.empty"),
                 new Vector2(this.gridArea.X + 8, this.gridArea.Y + 8),
                 Color.DarkSlateGray);
         }
@@ -258,9 +258,9 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
     {
         return this.qualityStrategy switch
         {
-            MaterialQualityStrategy.HighQualityFirst => "高品质优先",
-            MaterialQualityStrategy.PreserveGoldIridium => "保留金/铱",
-            _ => "低品质优先"
+            MaterialQualityStrategy.HighQualityFirst => ModText.Get("craftingTerminal.strategy.high"),
+            MaterialQualityStrategy.PreserveGoldIridium => ModText.Get("craftingTerminal.strategy.preserve"),
+            _ => ModText.Get("craftingTerminal.strategy.low")
         };
     }
 
@@ -291,8 +291,8 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
         var availability = this.GetAvailability(recipe);
         var lines = new List<string>
         {
-            $"产出 x{recipe.OutputCount * this.batches:N0}",
-            availability.CanCraft ? "材料齐全" : "缺少材料"
+            ModText.Format("craftingTerminal.tooltip.output", recipe.OutputCount * this.batches),
+            availability.CanCraft ? ModText.Get("craftingTerminal.tooltip.ready") : ModText.Get("craftingTerminal.tooltip.missing")
         };
         if (availability.MissingLines.Count > 0)
             lines.AddRange(availability.MissingLines.Take(6));
@@ -300,7 +300,7 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
             lines.AddRange(recipe.Ingredients.Take(6).Select(input => $"{input.DisplayKey} x{input.Count * this.batches:N0}"));
 
         if (recipe.Ingredients.Count > 6)
-            lines.Add($"另有 {recipe.Ingredients.Count - 6:N0} 种材料");
+            lines.Add(ModText.Format("craftingTerminal.tooltip.moreIngredients", recipe.Ingredients.Count - 6));
 
         SVSAPMenuWidgets.DrawTooltipBox(b, mx + 28, my + 28, recipe.DisplayName, lines);
     }

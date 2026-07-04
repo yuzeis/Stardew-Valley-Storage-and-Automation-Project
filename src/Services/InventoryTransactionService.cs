@@ -19,6 +19,13 @@ internal sealed class InventoryTransactionService
         new Vector2(0, 1),
         new Vector2(-1, 0)
     };
+    private static readonly string[] PersistentIdentityModDataKeySuffixes =
+    {
+        "/EndpointId",
+        "/MachineGuid",
+        "/NetworkId",
+        "/StoredWh"
+    };
 
     private readonly NetworkRepository repository;
     private readonly InventoryScanner scanner;
@@ -83,7 +90,7 @@ internal sealed class InventoryTransactionService
         var unreserved = entry is null ? 0L : Math.Max(0L, entry.TotalCount - reserved);
         if (entry is null || unreserved <= 0)
         {
-            message = "物品已不可用，或已被 CPU 作业预留。";
+            message = ModText.Get("inventory.itemUnavailableOrReserved");
             this.LogGameplay($"action=withdraw result=fail player={DescribePlayer(player)} network={ShortId(network.NetworkId)} requestedItem={Quote(requestedKey.QualifiedItemId)} requested={requestedCount:N0} available=0 reserved={reserved:N0} reason={Quote(message)}");
             return false;
         }
@@ -91,7 +98,7 @@ internal sealed class InventoryTransactionService
         var count = ClampToIntCount(requestedCount <= 0 ? unreserved : Math.Min((long)requestedCount, unreserved));
         if (count <= 0)
         {
-            message = "单次取出数量过大。";
+            message = ModText.Get("inventory.withdrawTooLarge");
             this.LogGameplay($"action=withdraw result=fail player={DescribePlayer(player)} network={ShortId(network.NetworkId)} requestedItem={Quote(requestedKey.QualifiedItemId)} requested={requestedCount:N0} available={unreserved:N0} reason={Quote(message)}");
             return false;
         }
@@ -101,7 +108,7 @@ internal sealed class InventoryTransactionService
         var acceptedByInventory = GetInventoryAcceptCount(player, output, count);
         if (acceptedByInventory <= 0)
         {
-            message = "背包已满。";
+            message = ModText.Get("inventory.backpackFull");
             this.LogGameplay($"action=withdraw result=fail player={DescribePlayer(player)} network={ShortId(network.NetworkId)} item={Quote(entry.Prototype.DisplayName)} itemId={Quote(entry.Key.QualifiedItemId)} requested={requestedCount:N0} planned={count:N0} reason={Quote(message)}");
             return false;
         }
@@ -123,7 +130,7 @@ internal sealed class InventoryTransactionService
         if (removed <= 0)
         {
             AbortCellTransactions(rollbackCells);
-            message = "无法从网络移除物品。";
+            message = ModText.Get("inventory.removeFailed");
             this.LogGameplay($"action=withdraw result=fail player={DescribePlayer(player)} network={ShortId(network.NetworkId)} item={Quote(entry.Prototype.DisplayName)} itemId={Quote(entry.Key.QualifiedItemId)} requested={requestedCount:N0} planned={count:N0} reason={Quote(message)}");
             return false;
         }
@@ -136,15 +143,73 @@ internal sealed class InventoryTransactionService
             AbortCellTransactions(rollbackCells);
 
             this.monitor.Log("Player inventory rejected an item after preflight; SVSAP restored the removed network sources.", LogLevel.Error);
-            message = "取出时背包发生变化，网络库存已回滚。";
+            message = ModText.Get("inventory.withdrawChangedRolledBack");
             this.LogGameplay($"action=withdraw result=fail player={DescribePlayer(player)} network={ShortId(network.NetworkId)} item={Quote(entry.Prototype.DisplayName)} itemId={Quote(entry.Key.QualifiedItemId)} requested={requestedCount:N0} removed={removed:N0} reason={Quote(message)}");
             return false;
         }
 
         CommitCellTransactions(rollbackCells);
         ReleaseChestLocks(rollbackChests);
-        message = $"已取出 {entry.Prototype.DisplayName} x{removed:N0}。";
+        message = ModText.Format("inventory.withdrawSuccess", entry.Prototype.DisplayName, removed);
         this.LogGameplay($"action=withdraw result=success player={DescribePlayer(player)} network={ShortId(network.NetworkId)} item={Quote(entry.Prototype.DisplayName)} itemId={Quote(entry.Key.QualifiedItemId)} requested={requestedCount:N0} moved={removed:N0} reservedBefore={reserved:N0} availableBefore={unreserved:N0}");
+        return true;
+    }
+
+    public bool TryExtractForTerminal(NetworkData network, ItemKey requestedKey, int requestedCount, out Item? extracted, out string message)
+    {
+        extracted = null;
+        var fresh = this.scanner.Scan(network);
+        var entry = fresh.Entries.FirstOrDefault(candidate => ItemKeyFactory.SameDisplayBucket(candidate.Key, requestedKey));
+        var reserved = entry is null ? 0L : this.GetReservedCountForEntry(network, entry, Guid.Empty);
+        var unreserved = entry is null ? 0L : Math.Max(0L, entry.TotalCount - reserved);
+        if (entry is null || unreserved <= 0)
+        {
+            message = ModText.Get("inventory.itemUnavailableOrReserved");
+            this.LogGameplay($"action=remote_terminal_extract result=fail network={ShortId(network.NetworkId)} requestedItem={Quote(requestedKey.QualifiedItemId)} requested={requestedCount:N0} available=0 reserved={reserved:N0} reason={Quote(message)}");
+            return false;
+        }
+
+        if (!SerializedItemCodec.CanRoundTripPrototype(entry.Prototype))
+        {
+            message = ModText.Get("remoteTerminal.withdrawLocalOnly");
+            this.LogGameplay($"action=remote_terminal_extract result=fail network={ShortId(network.NetworkId)} requestedItem={Quote(requestedKey.QualifiedItemId)} requested={requestedCount:N0} available={unreserved:N0} reason={Quote(message)}");
+            return false;
+        }
+
+        var count = ClampToIntCount(requestedCount <= 0 ? unreserved : Math.Min((long)requestedCount, unreserved));
+        if (count <= 0)
+        {
+            message = ModText.Get("inventory.withdrawTooLarge");
+            this.LogGameplay($"action=remote_terminal_extract result=fail network={ShortId(network.NetworkId)} requestedItem={Quote(requestedKey.QualifiedItemId)} requested={requestedCount:N0} available={unreserved:N0} reason={Quote(message)}");
+            return false;
+        }
+
+        var output = entry.Prototype.getOne();
+        output.Stack = count;
+
+        var removed = this.RemoveFromCellSources(network, entry, count, out var rollbackCells);
+        var rollbackChests = new List<ChestRollback>();
+        if (removed < count)
+        {
+            removed += this.RemoveFromChestSources(entry, count - removed, out var chestRollbacks);
+            rollbackChests.AddRange(chestRollbacks);
+        }
+
+        if (removed <= 0)
+        {
+            AbortCellTransactions(rollbackCells);
+            ReleaseChestLocks(rollbackChests);
+            message = ModText.Get("inventory.removeFailed");
+            this.LogGameplay($"action=remote_terminal_extract result=fail network={ShortId(network.NetworkId)} item={Quote(entry.Prototype.DisplayName)} itemId={Quote(entry.Key.QualifiedItemId)} requested={requestedCount:N0} planned={count:N0} reason={Quote(message)}");
+            return false;
+        }
+
+        output.Stack = removed;
+        extracted = output;
+        CommitCellTransactions(rollbackCells);
+        ReleaseChestLocks(rollbackChests);
+        message = ModText.Format("inventory.withdrawSuccess", entry.Prototype.DisplayName, removed);
+        this.LogGameplay($"action=remote_terminal_extract result=success network={ShortId(network.NetworkId)} item={Quote(entry.Prototype.DisplayName)} itemId={Quote(entry.Key.QualifiedItemId)} requested={requestedCount:N0} moved={removed:N0} reservedBefore={reserved:N0} availableBefore={unreserved:N0}");
         return true;
     }
 
@@ -155,7 +220,7 @@ internal sealed class InventoryTransactionService
         var unreservedCount = this.GetUnreservedCount(network, request, excludedReservationJobId, qualityStrategy, autoConsumableOnly: true);
         if (unreservedCount <= 0)
         {
-            message = "请求的物品已被其他 CPU 作业预留。";
+            message = ModText.Get("inventory.requestReserved");
             return false;
         }
 
@@ -175,7 +240,7 @@ internal sealed class InventoryTransactionService
 
         if (entry is null || entry.TotalCount <= 0)
         {
-            message = "请求的物品当前不可用。";
+            message = ModText.Get("inventory.requestUnavailable");
             return false;
         }
 
@@ -194,7 +259,7 @@ internal sealed class InventoryTransactionService
         {
             AbortCellTransactions(cellRollbacks);
             ReleaseChestLocks(chestRollbacks);
-            message = "无法抽取请求的物品。";
+            message = ModText.Get("inventory.extractFailed");
             return false;
         }
 
@@ -202,7 +267,7 @@ internal sealed class InventoryTransactionService
         extracted = output;
         CommitCellTransactions(cellRollbacks);
         ReleaseChestLocks(chestRollbacks);
-        message = $"已抽取 {output.DisplayName} x{removed:N0}。";
+        message = ModText.Format("inventory.extractSuccess", output.DisplayName, removed);
         return true;
     }
 
@@ -239,14 +304,14 @@ internal sealed class InventoryTransactionService
 
         if (candidate is null)
         {
-            message = "没有可用的未预留匹配物品。";
+            message = ModText.Get("inventory.noUnreservedMatch");
             return false;
         }
 
         var requestedCount = Math.Min(Math.Max(0, requestedCountSelector(candidate.Entry)), candidate.UnreservedCount);
         if (requestedCount <= 0)
         {
-            message = "匹配物品已经达到目标数量。";
+            message = ModText.Get("inventory.matchTargetReached");
             return false;
         }
 
@@ -312,12 +377,12 @@ internal sealed class InventoryTransactionService
 
         if (moved <= 0)
         {
-            message = sameOnly ? "没有可存入的同类物品。" : "没有可存入的物品。";
+            message = sameOnly ? ModText.Get("inventory.noSameToDeposit") : ModText.Get("inventory.noItemsToDeposit");
             this.LogGameplay($"action=deposit result=fail player={DescribePlayer(player)} network={ShortId(network.NetworkId)} mode={(sameOnly ? "same" : "all")} writableChests={chests.Count:N0} reason={Quote(message)}");
             return false;
         }
 
-        message = sameOnly ? $"已存入同类物品 x{moved:N0}。" : $"已存入物品 x{moved:N0}。";
+        message = sameOnly ? ModText.Format("inventory.depositSameSuccess", moved) : ModText.Format("inventory.depositAllSuccess", moved);
         this.LogGameplay($"action=deposit result=success player={DescribePlayer(player)} network={ShortId(network.NetworkId)} mode={(sameOnly ? "same" : "all")} moved={moved:N0} itemSummary={Quote(string.Join(",", movedDetails))}");
         return true;
     }
@@ -514,13 +579,13 @@ internal sealed class InventoryTransactionService
 
         if (candidate is null)
         {
-            message = "没有可用的未预留匹配物品。";
+            message = ModText.Get("inventory.noUnreservedMatch");
             return false;
         }
 
         prototype = candidate.Entry.Prototype.getOne();
         availableCount = candidate.UnreservedCount;
-        message = $"匹配 {prototype.DisplayName} x{availableCount:N0}。";
+        message = ModText.Format("inventory.matchFound", prototype.DisplayName, availableCount);
         return true;
     }
 
@@ -543,7 +608,7 @@ internal sealed class InventoryTransactionService
     {
         if (!this.HasIngredients(network, requests, out var missing, excludedReservationJobId, qualityStrategy, autoConsumableOnly: true))
         {
-            message = "缺少：" + string.Join(", ", missing);
+            message = ModText.Format("inventory.missingPrefix", string.Join(", ", missing));
             return false;
         }
 
@@ -589,12 +654,12 @@ internal sealed class InventoryTransactionService
                 RollbackCells(rollbackCells);
                 RollbackChests(rollbackChests);
                 AbortCellTransactions(rollbackCells);
-                message = $"消耗 {request.DisplayKey} 时库存发生变化。";
+                message = ModText.Format("inventory.consumeChanged", request.DisplayKey);
                 return false;
             }
         }
 
-        message = "已消耗合成材料。";
+        message = ModText.Get("inventory.ingredientsConsumed");
         CommitCellTransactions(rollbackCells);
         ReleaseChestLocks(rollbackChests);
         return true;
@@ -775,11 +840,16 @@ internal sealed class InventoryTransactionService
         if (!location.objects.TryGetValue(tile, out SObject? placedObject) || placedObject is not Chest found)
             return false;
 
-        if (IsChestLocked(found))
+        if (!IsSupportedNetworkChest(found) || IsChestLocked(found))
             return false;
 
         chest = found;
         return true;
+    }
+
+    private static bool IsSupportedNetworkChest(Chest chest)
+    {
+        return chest.SpecialChestType == Chest.SpecialChestTypes.None;
     }
 
     private static IEnumerable<(Vector2 Tile, Chest Chest)> GetAdjacentWritableChests(GameLocation location, Vector2 origin)
@@ -1178,6 +1248,9 @@ internal sealed class InventoryTransactionService
         if (Content.ModItemCatalog.TryGetStorageCellTier(item.QualifiedItemId, out _))
             return false;
 
+        if (HasPersistentIdentityModData(item))
+            return false;
+
         return CanAutoConsume(item);
     }
 
@@ -1197,17 +1270,21 @@ internal sealed class InventoryTransactionService
 
     private static bool PassesSerializationSafetyCheck(Item item)
     {
-        try
+        return SerializedItemCodec.CanRoundTripPrototype(item);
+    }
+
+    private static bool HasPersistentIdentityModData(Item item)
+    {
+        foreach (var key in item.modData.Keys)
         {
-            var prototype = item.getOne();
-            prototype.Stack = 1;
-            var restored = SerializedItemCodec.CreateItem(SerializedItemCodec.SerializePrototype(prototype), 1);
-            return prototype.canStackWith(restored) && restored.canStackWith(prototype);
+            foreach (var suffix in PersistentIdentityModDataKeySuffixes)
+            {
+                if (key.EndsWith(suffix, StringComparison.Ordinal))
+                    return true;
+            }
         }
-        catch
-        {
-            return false;
-        }
+
+        return false;
     }
 
     private bool TryCreateStoredItemPrototype(StoredItemStack stack, out Item prototype)

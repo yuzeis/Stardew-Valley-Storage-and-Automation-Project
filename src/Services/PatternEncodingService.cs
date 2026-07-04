@@ -101,10 +101,9 @@ internal sealed class PatternEncodingService
         var held = Game1.player.CurrentItem;
         if (held is StardewValley.Object obj && obj.Category == FishCategory)
         {
-            var heldFishPattern = new PatternData
+            var heldFishPattern = PatternDisplayNames.Apply(new PatternData
             {
                 Kind = PatternKind.Processing,
-                DisplayName = $"熏{held.DisplayName}",
                 MachineQualifiedItemId = FishSmokerQualifiedItemId,
                 ProcessingMinutes = 50,
                 SpeedClass = ProcessingSpeedClass.Medium,
@@ -117,7 +116,7 @@ internal sealed class PatternEncodingService
                 {
                     new() { QualifiedItemId = SmokedFishQualifiedItemId, Count = 1 }
                 }
-            };
+            }, "pattern.name.smoked", PatternDisplayNames.ItemArg(held.QualifiedItemId));
 
             patterns.RemoveAll(pattern => pattern.MachineQualifiedItemId == FishSmokerQualifiedItemId
                 && pattern.Inputs.Any(input => input.QualifiedItemId == held.QualifiedItemId));
@@ -147,7 +146,8 @@ internal sealed class PatternEncodingService
         {
             this.InsertHeldPattern(
                 patterns,
-                $"{held.DisplayName}酒",
+                "pattern.name.wine",
+                new[] { PatternDisplayNames.ItemArg(held.QualifiedItemId) },
                 KegQualifiedItemId,
                 10000,
                 ProcessingSpeedClass.Slow,
@@ -156,7 +156,8 @@ internal sealed class PatternEncodingService
                 WineQualifiedItemId);
             this.InsertHeldPattern(
                 patterns,
-                $"{held.DisplayName}果酱",
+                "pattern.name.jelly",
+                new[] { PatternDisplayNames.ItemArg(held.QualifiedItemId) },
                 PreservesJarQualifiedItemId,
                 4000,
                 ProcessingSpeedClass.Slow,
@@ -165,7 +166,8 @@ internal sealed class PatternEncodingService
                 JellyQualifiedItemId);
             this.InsertHeldPattern(
                 patterns,
-                held.QualifiedItemId == GrapeQualifiedItemId ? "葡萄干" : $"{held.DisplayName}干",
+                held.QualifiedItemId == GrapeQualifiedItemId ? "pattern.name.raisins" : "pattern.name.dried",
+                held.QualifiedItemId == GrapeQualifiedItemId ? Array.Empty<string>() : new[] { PatternDisplayNames.ItemArg(held.QualifiedItemId) },
                 DehydratorQualifiedItemId,
                 1440,
                 ProcessingSpeedClass.Medium,
@@ -179,7 +181,8 @@ internal sealed class PatternEncodingService
         {
             this.InsertHeldPattern(
                 patterns,
-                $"{held.DisplayName}汁",
+                "pattern.name.juice",
+                new[] { PatternDisplayNames.ItemArg(held.QualifiedItemId) },
                 KegQualifiedItemId,
                 6000,
                 ProcessingSpeedClass.Slow,
@@ -188,7 +191,8 @@ internal sealed class PatternEncodingService
                 JuiceQualifiedItemId);
             this.InsertHeldPattern(
                 patterns,
-                $"{held.DisplayName}腌菜",
+                "pattern.name.pickles",
+                new[] { PatternDisplayNames.ItemArg(held.QualifiedItemId) },
                 PreservesJarQualifiedItemId,
                 4000,
                 ProcessingSpeedClass.Slow,
@@ -202,7 +206,8 @@ internal sealed class PatternEncodingService
         {
             this.InsertHeldPattern(
                 patterns,
-                $"{held.DisplayName}干",
+                "pattern.name.dried",
+                new[] { PatternDisplayNames.ItemArg(held.QualifiedItemId) },
                 DehydratorQualifiedItemId,
                 1440,
                 ProcessingSpeedClass.Medium,
@@ -216,18 +221,18 @@ internal sealed class PatternEncodingService
     {
         return held.QualifiedItemId switch
         {
-            "(O)184" => this.InsertHeldPatternAndReturn(patterns, "奶酪", CheesePressQualifiedItemId, 200, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, CheeseQualifiedItemId),
-            "(O)186" => this.InsertHeldPatternAndReturn(patterns, "奶酪", CheesePressQualifiedItemId, 200, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, CheeseQualifiedItemId),
-            "(O)436" => this.InsertHeldPatternAndReturn(patterns, "山羊奶酪", CheesePressQualifiedItemId, 200, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, GoatCheeseQualifiedItemId),
-            "(O)438" => this.InsertHeldPatternAndReturn(patterns, "山羊奶酪", CheesePressQualifiedItemId, 200, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, GoatCheeseQualifiedItemId),
-            "(O)176" => this.InsertHeldPatternAndReturn(patterns, "蛋黄酱", MayonnaiseMachineQualifiedItemId, 180, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, MayonnaiseQualifiedItemId),
-            "(O)180" => this.InsertHeldPatternAndReturn(patterns, "蛋黄酱", MayonnaiseMachineQualifiedItemId, 180, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, MayonnaiseQualifiedItemId),
-            "(O)174" => this.InsertHeldPatternAndReturn(patterns, "蛋黄酱", MayonnaiseMachineQualifiedItemId, 180, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, MayonnaiseQualifiedItemId),
-            "(O)182" => this.InsertHeldPatternAndReturn(patterns, "蛋黄酱", MayonnaiseMachineQualifiedItemId, 180, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, MayonnaiseQualifiedItemId),
-            "(O)442" => this.InsertHeldPatternAndReturn(patterns, "鸭蛋黄酱", MayonnaiseMachineQualifiedItemId, 180, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, DuckMayonnaiseQualifiedItemId),
-            "(O)305" => this.InsertHeldPatternAndReturn(patterns, "虚空蛋黄酱", MayonnaiseMachineQualifiedItemId, 180, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, VoidMayonnaiseQualifiedItemId),
-            "(O)107" => this.InsertHeldPatternAndReturn(patterns, "恐龙蛋黄酱", MayonnaiseMachineQualifiedItemId, 180, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, DinosaurMayonnaiseQualifiedItemId),
-            "(O)440" => this.InsertHeldPatternAndReturn(patterns, "布料", LoomQualifiedItemId, 240, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, ClothQualifiedItemId),
+            "(O)184" => this.InsertHeldPatternAndReturn(patterns, "pattern.name.cheese", Array.Empty<string>(), CheesePressQualifiedItemId, 200, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, CheeseQualifiedItemId),
+            "(O)186" => this.InsertHeldPatternAndReturn(patterns, "pattern.name.cheese", Array.Empty<string>(), CheesePressQualifiedItemId, 200, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, CheeseQualifiedItemId),
+            "(O)436" => this.InsertHeldPatternAndReturn(patterns, "pattern.name.goatCheese", Array.Empty<string>(), CheesePressQualifiedItemId, 200, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, GoatCheeseQualifiedItemId),
+            "(O)438" => this.InsertHeldPatternAndReturn(patterns, "pattern.name.goatCheese", Array.Empty<string>(), CheesePressQualifiedItemId, 200, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, GoatCheeseQualifiedItemId),
+            "(O)176" => this.InsertHeldPatternAndReturn(patterns, "pattern.name.mayonnaise", Array.Empty<string>(), MayonnaiseMachineQualifiedItemId, 180, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, MayonnaiseQualifiedItemId),
+            "(O)180" => this.InsertHeldPatternAndReturn(patterns, "pattern.name.mayonnaise", Array.Empty<string>(), MayonnaiseMachineQualifiedItemId, 180, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, MayonnaiseQualifiedItemId),
+            "(O)174" => this.InsertHeldPatternAndReturn(patterns, "pattern.name.mayonnaise", Array.Empty<string>(), MayonnaiseMachineQualifiedItemId, 180, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, MayonnaiseQualifiedItemId),
+            "(O)182" => this.InsertHeldPatternAndReturn(patterns, "pattern.name.mayonnaise", Array.Empty<string>(), MayonnaiseMachineQualifiedItemId, 180, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, MayonnaiseQualifiedItemId),
+            "(O)442" => this.InsertHeldPatternAndReturn(patterns, "pattern.name.duckMayonnaise", Array.Empty<string>(), MayonnaiseMachineQualifiedItemId, 180, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, DuckMayonnaiseQualifiedItemId),
+            "(O)305" => this.InsertHeldPatternAndReturn(patterns, "pattern.name.voidMayonnaise", Array.Empty<string>(), MayonnaiseMachineQualifiedItemId, 180, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, VoidMayonnaiseQualifiedItemId),
+            "(O)107" => this.InsertHeldPatternAndReturn(patterns, "pattern.name.dinosaurMayonnaise", Array.Empty<string>(), MayonnaiseMachineQualifiedItemId, 180, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, DinosaurMayonnaiseQualifiedItemId),
+            "(O)440" => this.InsertHeldPatternAndReturn(patterns, "pattern.name.cloth", Array.Empty<string>(), LoomQualifiedItemId, 240, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, ClothQualifiedItemId),
             _ => false
         };
     }
@@ -236,10 +241,10 @@ internal sealed class PatternEncodingService
     {
         return held.QualifiedItemId switch
         {
-            TruffleQualifiedItemId => this.InsertHeldPatternAndReturn(patterns, "松露油", OilMakerQualifiedItemId, 360, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, TruffleOilQualifiedItemId),
-            CornQualifiedItemId => this.InsertHeldPatternAndReturn(patterns, "油", OilMakerQualifiedItemId, 1000, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, OilQualifiedItemId),
-            SunflowerQualifiedItemId => this.InsertHeldPatternAndReturn(patterns, "油", OilMakerQualifiedItemId, 60, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, OilQualifiedItemId),
-            SunflowerSeedsQualifiedItemId => this.InsertHeldPatternAndReturn(patterns, "油", OilMakerQualifiedItemId, 3200, ProcessingSpeedClass.Slow, held.QualifiedItemId, 1, OilQualifiedItemId),
+            TruffleQualifiedItemId => this.InsertHeldPatternAndReturn(patterns, "pattern.name.truffleOil", Array.Empty<string>(), OilMakerQualifiedItemId, 360, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, TruffleOilQualifiedItemId),
+            CornQualifiedItemId => this.InsertHeldPatternAndReturn(patterns, "pattern.name.oil", Array.Empty<string>(), OilMakerQualifiedItemId, 1000, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, OilQualifiedItemId),
+            SunflowerQualifiedItemId => this.InsertHeldPatternAndReturn(patterns, "pattern.name.oil", Array.Empty<string>(), OilMakerQualifiedItemId, 60, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, OilQualifiedItemId),
+            SunflowerSeedsQualifiedItemId => this.InsertHeldPatternAndReturn(patterns, "pattern.name.oil", Array.Empty<string>(), OilMakerQualifiedItemId, 3200, ProcessingSpeedClass.Slow, held.QualifiedItemId, 1, OilQualifiedItemId),
             _ => false
         };
     }
@@ -248,18 +253,19 @@ internal sealed class PatternEncodingService
     {
         return held.QualifiedItemId switch
         {
-            HopsQualifiedItemId => this.InsertHeldPatternAndReturn(patterns, "淡啤酒", KegQualifiedItemId, 2250, ProcessingSpeedClass.Slow, held.QualifiedItemId, 1, PaleAleQualifiedItemId),
-            WheatQualifiedItemId => this.InsertHeldPatternAndReturn(patterns, "啤酒", KegQualifiedItemId, 1750, ProcessingSpeedClass.Slow, held.QualifiedItemId, 1, BeerQualifiedItemId),
-            CoffeeBeanQualifiedItemId => this.InsertHeldPatternAndReturn(patterns, "咖啡", KegQualifiedItemId, 120, ProcessingSpeedClass.Fast, held.QualifiedItemId, 5, CoffeeQualifiedItemId),
-            HoneyQualifiedItemId => this.InsertHeldPatternAndReturn(patterns, "蜂蜜酒", KegQualifiedItemId, 600, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, MeadQualifiedItemId),
-            TeaLeavesQualifiedItemId => this.InsertHeldPatternAndReturn(patterns, "绿茶", KegQualifiedItemId, 180, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, GreenTeaQualifiedItemId),
+            HopsQualifiedItemId => this.InsertHeldPatternAndReturn(patterns, "pattern.name.paleAle", Array.Empty<string>(), KegQualifiedItemId, 2250, ProcessingSpeedClass.Slow, held.QualifiedItemId, 1, PaleAleQualifiedItemId),
+            WheatQualifiedItemId => this.InsertHeldPatternAndReturn(patterns, "pattern.name.beer", Array.Empty<string>(), KegQualifiedItemId, 1750, ProcessingSpeedClass.Slow, held.QualifiedItemId, 1, BeerQualifiedItemId),
+            CoffeeBeanQualifiedItemId => this.InsertHeldPatternAndReturn(patterns, "pattern.name.coffee", Array.Empty<string>(), KegQualifiedItemId, 120, ProcessingSpeedClass.Fast, held.QualifiedItemId, 5, CoffeeQualifiedItemId),
+            HoneyQualifiedItemId => this.InsertHeldPatternAndReturn(patterns, "pattern.name.mead", Array.Empty<string>(), KegQualifiedItemId, 600, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, MeadQualifiedItemId),
+            TeaLeavesQualifiedItemId => this.InsertHeldPatternAndReturn(patterns, "pattern.name.greenTea", Array.Empty<string>(), KegQualifiedItemId, 180, ProcessingSpeedClass.Fast, held.QualifiedItemId, 1, GreenTeaQualifiedItemId),
             _ => false
         };
     }
 
     private bool InsertHeldPatternAndReturn(
         List<PatternData> patterns,
-        string displayName,
+        string displayNameKey,
+        string[] displayNameArguments,
         string machineQualifiedItemId,
         int processingMinutes,
         ProcessingSpeedClass speedClass,
@@ -267,13 +273,14 @@ internal sealed class PatternEncodingService
         int inputCount,
         string outputQualifiedItemId)
     {
-        this.InsertHeldPattern(patterns, displayName, machineQualifiedItemId, processingMinutes, speedClass, inputQualifiedItemId, inputCount, outputQualifiedItemId);
+        this.InsertHeldPattern(patterns, displayNameKey, displayNameArguments, machineQualifiedItemId, processingMinutes, speedClass, inputQualifiedItemId, inputCount, outputQualifiedItemId);
         return true;
     }
 
     private void InsertHeldPattern(
         List<PatternData> patterns,
-        string displayName,
+        string displayNameKey,
+        string[] displayNameArguments,
         string machineQualifiedItemId,
         int processingMinutes,
         ProcessingSpeedClass speedClass,
@@ -287,10 +294,9 @@ internal sealed class PatternEncodingService
 
         patterns.Insert(
             0,
-            new PatternData
+            PatternDisplayNames.Apply(new PatternData
             {
                 Kind = PatternKind.Processing,
-                DisplayName = displayName,
                 MachineQualifiedItemId = machineQualifiedItemId,
                 ProcessingMinutes = processingMinutes,
                 SpeedClass = speedClass,
@@ -302,7 +308,7 @@ internal sealed class PatternEncodingService
                 {
                     new() { QualifiedItemId = outputQualifiedItemId, Count = 1 }
                 }
-            });
+            }, displayNameKey, displayNameArguments));
     }
 
     public bool TryEncode(PatternData data, out string message)
@@ -310,14 +316,14 @@ internal sealed class PatternEncodingService
         var blank = Game1.player.Items.FirstOrDefault(item => item?.QualifiedItemId == "(O)" + ModItemCatalog.BlankPattern);
         if (blank is null)
         {
-            message = "背包里没有空白样板。";
+            message = ModText.Get("pattern.encode.noBlank");
             return false;
         }
 
         var encoded = PatternCodec.CreatePatternItem(data);
         if (!Game1.player.couldInventoryAcceptThisItem(encoded))
         {
-            message = "背包没有空间接收已编码样板。";
+            message = ModText.Get("pattern.encode.inventoryFull");
             return false;
         }
 
@@ -326,7 +332,7 @@ internal sealed class PatternEncodingService
             Game1.player.removeItemFromInventory(blank);
 
         Game1.player.addItemToInventoryBool(encoded);
-        message = $"已写入样板：{data.DisplayName}。";
+        message = ModText.Format("pattern.encode.success", PatternDisplayNames.Get(data));
         return true;
     }
 }

@@ -31,7 +31,7 @@ internal static class ModText
     public static string NormalizeLanguage(string? value)
     {
         var normalized = (value ?? string.Empty).Trim().ToLowerInvariant();
-        return normalized.StartsWith("en", StringComparison.Ordinal) ? English : Chinese;
+        return normalized.StartsWith("zh", StringComparison.Ordinal) ? Chinese : English;
     }
 
     public static string FormatLanguage(string value)
@@ -68,12 +68,13 @@ internal static class ModText
 
     private static Dictionary<string, string> ReadLanguageFile(IModHelper helper, string language, IMonitor monitor)
     {
-        var path = Path.Combine(helper.DirectoryPath, "Lang", language + ".json");
+        var fileName = NormalizeLanguage(language) == English ? "en.json" : "default.json";
+        var path = Path.Combine(helper.DirectoryPath, "i18n", fileName);
         try
         {
             if (!File.Exists(path))
             {
-                monitor.Log($"SVSAP language file not found: {path}", LogLevel.Warn);
+                monitor.Log($"SVSAP i18n file not found: {path}", LogLevel.Warn);
                 return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             }
 
@@ -84,7 +85,7 @@ internal static class ModText
         }
         catch (Exception ex)
         {
-            monitor.Log($"Could not read SVSAP language file '{path}': {ex.Message}", LogLevel.Warn);
+            monitor.Log($"Could not read SVSAP i18n file '{path}': {ex.Message}", LogLevel.Warn);
             return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         }
     }

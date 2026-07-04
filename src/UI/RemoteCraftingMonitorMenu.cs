@@ -42,19 +42,19 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
         this.refreshButton = new ClickableComponent(
             new Rectangle(this.xPositionOnScreen + this.width - 172, this.yPositionOnScreen + this.height - 76, 116, 38),
             "refresh",
-            "刷新");
+            ModText.Get("craftingMonitor.button.refresh"));
         this.queueButton = new ClickableComponent(
             new Rectangle(this.xPositionOnScreen + this.width - 304, this.yPositionOnScreen + this.height - 76, 116, 38),
             "queue",
-            "排队");
+            ModText.Get("craftingMonitor.button.queue"));
         this.pipelineToggleButton = new ClickableComponent(
             new Rectangle(this.xPositionOnScreen + this.width - 436, this.yPositionOnScreen + this.height - 76, 116, 38),
             "toggle_pipeline",
-            "流水线");
+            ModText.Get("craftingMonitor.button.pipeline"));
         this.caskPipelineButton = new ClickableComponent(
             new Rectangle(this.xPositionOnScreen + this.width - 568, this.yPositionOnScreen + this.height - 76, 116, 38),
             "toggle_cask",
-            "陈酿");
+            ModText.Get("craftingMonitor.button.cask"));
 
         var amountX = this.xPositionOnScreen + 56;
         foreach (var amount in new[] { 1, 5, 10, 25, 100 })
@@ -98,7 +98,7 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
 
         var jobs = this.snapshot.Jobs;
         var pipelines = this.snapshot.Pipelines;
-        var title = $"{this.snapshot.NetworkName} 远程监视器 - {jobs.Count:N0} 个 CPU 作业，{pipelines.Count:N0} 条流水线";
+        var title = ModText.Format("remoteCraftingMonitor.title", this.snapshot.NetworkName, jobs.Count, pipelines.Count);
         b.DrawString(Game1.dialogueFont, title, new Vector2(this.xPositionOnScreen + 48, this.yPositionOnScreen + 32), Game1.textColor);
 
         var y = this.yPositionOnScreen + 86;
@@ -125,7 +125,7 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
                 var button = new ClickableComponent(
                     new Rectangle(this.xPositionOnScreen + this.width - 164, y - 4, 92, 34),
                     job.JobId.ToString("N"),
-                    "取消");
+                    ModText.Get("craftingMonitor.button.cancel"));
                 this.cancelButtons.Add(button);
                 SVSAPMenuWidgets.DrawButton(b, button);
             }
@@ -135,12 +135,12 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
 
         if (jobs.Count == 0)
         {
-            b.DrawString(Game1.smallFont, "没有 CPU 作业。", new Vector2(this.xPositionOnScreen + 64, y), Color.DarkSlateGray);
+            b.DrawString(Game1.smallFont, ModText.Get("craftingMonitor.noJobs"), new Vector2(this.xPositionOnScreen + 64, y), Color.DarkSlateGray);
             y += 38;
         }
         else if (this.jobScrollOffset + maxRows < jobs.Count)
         {
-            b.DrawString(Game1.smallFont, $"还有 {jobs.Count - this.jobScrollOffset - maxRows:N0} 个 CPU 作业。", new Vector2(this.xPositionOnScreen + 64, y), Color.DarkSlateGray);
+            b.DrawString(Game1.smallFont, ModText.Format("craftingMonitor.moreJobs", jobs.Count - this.jobScrollOffset - maxRows), new Vector2(this.xPositionOnScreen + 64, y), Color.DarkSlateGray);
             y += 32;
         }
 
@@ -152,26 +152,26 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
             {
                 var pipeline = pipelines[this.pipelineScrollOffset + i];
                 var color = pipeline.Enabled ? Game1.textColor : Color.DarkSlateGray;
-                var status = pipeline.Enabled ? "开" : "关";
-                var target = pipeline.TargetKeep > 0 ? pipeline.TargetKeep.ToString("N0") : "不限";
-                var mode = pipeline.Mode == ProductionPipelineMode.CaskAging ? "陈酿" : "加工";
-                var line = $"{status} {mode} {pipeline.DisplayName}  优先:{pipeline.Priority:N0} 保有:{target} 批量:{pipeline.ItemsPerCycle:N0}  {pipeline.StatusMessage}";
+                var status = pipeline.Enabled ? ModText.Get("craftingMonitor.state.on") : ModText.Get("craftingMonitor.state.off");
+                var target = pipeline.TargetKeep > 0 ? pipeline.TargetKeep.ToString("N0") : ModText.Get("craftingMonitor.unlimited");
+                var mode = pipeline.Mode == ProductionPipelineMode.CaskAging ? ModText.Get("craftingMonitor.mode.cask") : ModText.Get("craftingMonitor.mode.processing");
+                var line = ModText.Format("remoteCraftingMonitor.pipelineLine", status, mode, pipeline.DisplayName, pipeline.Priority, target, pipeline.ItemsPerCycle, pipeline.StatusMessage);
                 b.DrawString(Game1.smallFont, TrimTo(line, 56), new Vector2(this.xPositionOnScreen + 64, y), color);
 
                 var buttonX = this.xPositionOnScreen + this.width - 380;
                 this.DrawPipelineButton(b, pipeline, PatternExecutionService.PipelineActionToggle, status, buttonX, y - 3, 52, pipeline.Enabled ? Color.LightGreen : Color.White);
                 buttonX += 58;
-                this.DrawPipelineButton(b, pipeline, PatternExecutionService.PipelineActionPriorityUp, "优+", buttonX, y - 3, 38, Color.White);
+                this.DrawPipelineButton(b, pipeline, PatternExecutionService.PipelineActionPriorityUp, ModText.Get("craftingMonitor.button.priorityUp"), buttonX, y - 3, 38, Color.White);
                 buttonX += 44;
-                this.DrawPipelineButton(b, pipeline, PatternExecutionService.PipelineActionPriorityDown, "优-", buttonX, y - 3, 38, Color.White);
+                this.DrawPipelineButton(b, pipeline, PatternExecutionService.PipelineActionPriorityDown, ModText.Get("craftingMonitor.button.priorityDown"), buttonX, y - 3, 38, Color.White);
                 buttonX += 44;
-                this.DrawPipelineButton(b, pipeline, PatternExecutionService.PipelineActionTargetUp, "量+", buttonX, y - 3, 38, Color.White);
+                this.DrawPipelineButton(b, pipeline, PatternExecutionService.PipelineActionTargetUp, ModText.Get("craftingMonitor.button.targetUp"), buttonX, y - 3, 38, Color.White);
                 buttonX += 44;
-                this.DrawPipelineButton(b, pipeline, PatternExecutionService.PipelineActionTargetDown, "量-", buttonX, y - 3, 38, Color.White);
+                this.DrawPipelineButton(b, pipeline, PatternExecutionService.PipelineActionTargetDown, ModText.Get("craftingMonitor.button.targetDown"), buttonX, y - 3, 38, Color.White);
                 buttonX += 44;
-                this.DrawPipelineButton(b, pipeline, PatternExecutionService.PipelineActionCycleUp, "批+", buttonX, y - 3, 38, Color.White);
+                this.DrawPipelineButton(b, pipeline, PatternExecutionService.PipelineActionCycleUp, ModText.Get("craftingMonitor.button.cycleUp"), buttonX, y - 3, 38, Color.White);
                 buttonX += 44;
-                this.DrawPipelineButton(b, pipeline, PatternExecutionService.PipelineActionCycleDown, "批-", buttonX, y - 3, 38, Color.White);
+                this.DrawPipelineButton(b, pipeline, PatternExecutionService.PipelineActionCycleDown, ModText.Get("craftingMonitor.button.cycleDown"), buttonX, y - 3, 38, Color.White);
 
                 y += 42;
             }
@@ -183,12 +183,12 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
             {
                 b.DrawString(
                     Game1.smallFont,
-                    "长耗时 CPU 作业已待确认：再点一次排队。",
+                    ModText.Get("craftingMonitor.longJob.armed"),
                     new Vector2(this.xPositionOnScreen + 56, this.yPositionOnScreen + this.height - 138),
                     Color.Firebrick);
             }
 
-            var queueText = $"排队：{this.snapshot.QueuePattern.DisplayName} x{this.queueAmount:N0}";
+            var queueText = ModText.Format("craftingMonitor.queueLine", PatternDisplayNames.Get(this.snapshot.QueuePattern), this.queueAmount);
             b.DrawString(Game1.smallFont, TrimTo(queueText, 70), new Vector2(this.xPositionOnScreen + 56, this.yPositionOnScreen + this.height - 112), Game1.textColor);
 
             foreach (var button in this.amountButtons)
@@ -207,7 +207,7 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
         }
         else if (this.HasCaskPipelineItem())
         {
-            var caskText = $"陈酿流水线：{this.snapshot.CaskPipelineItemDisplayName}";
+            var caskText = ModText.Format("craftingMonitor.caskLine", this.snapshot.CaskPipelineItemDisplayName);
             b.DrawString(Game1.smallFont, TrimTo(caskText, 70), new Vector2(this.xPositionOnScreen + 56, this.yPositionOnScreen + this.height - 112), Game1.textColor);
             this.DrawBottomButton(b, this.caskPipelineButton);
         }
@@ -466,18 +466,18 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
     {
         return string.IsNullOrWhiteSpace(job.CpuSlotLabel)
             ? string.Empty
-            : $" CPU:{job.CpuSlotLabel}";
+            : ModText.Format("craftingMonitor.cpuSlot", job.CpuSlotLabel);
     }
 
     private static string FormatNodeCount(RemoteCraftingJobMessage job)
     {
-        return job.NodeCount > 0 ? $" 节点:{job.NodeCount:N0}" : string.Empty;
+        return job.NodeCount > 0 ? ModText.Format("craftingMonitor.nodeCount", job.NodeCount) : string.Empty;
     }
 
     private static string FormatReservations(RemoteCraftingJobMessage job)
     {
         return job.ReservedCount > 0
-            ? $" 预留:{job.RemainingReservedCount:N0}/{job.ReservedCount:N0}"
+            ? ModText.Format("craftingMonitor.reservations", job.RemainingReservedCount, job.ReservedCount)
             : string.Empty;
     }
 
@@ -485,15 +485,15 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
     {
         return state switch
         {
-            CraftingJobState.Planning => "规划中",
-            CraftingJobState.MissingItems => "缺材料",
-            CraftingJobState.Reserved => "已预留",
-            CraftingJobState.Running => "运行中",
-            CraftingJobState.WaitingForMachine => "等机器",
-            CraftingJobState.WaitingForOutput => "等产出",
-            CraftingJobState.Completed => "已完成",
-            CraftingJobState.Cancelled => "已取消",
-            CraftingJobState.Failed => "失败",
+            CraftingJobState.Planning => ModText.Get("craftingMonitor.jobState.planning"),
+            CraftingJobState.MissingItems => ModText.Get("craftingMonitor.jobState.missing"),
+            CraftingJobState.Reserved => ModText.Get("craftingMonitor.jobState.reserved"),
+            CraftingJobState.Running => ModText.Get("craftingMonitor.jobState.running"),
+            CraftingJobState.WaitingForMachine => ModText.Get("craftingMonitor.jobState.waitingMachine"),
+            CraftingJobState.WaitingForOutput => ModText.Get("craftingMonitor.jobState.waitingOutput"),
+            CraftingJobState.Completed => ModText.Get("craftingMonitor.jobState.completed"),
+            CraftingJobState.Cancelled => ModText.Get("craftingMonitor.jobState.cancelled"),
+            CraftingJobState.Failed => ModText.Get("craftingMonitor.jobState.failed"),
             _ => state.ToString()
         };
     }
