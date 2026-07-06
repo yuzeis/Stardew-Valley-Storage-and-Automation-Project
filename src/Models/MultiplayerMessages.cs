@@ -21,6 +21,7 @@ internal static class MultiplayerMessageTypes
 internal enum TerminalActionKind
 {
     Withdraw,
+    DepositSlot,
     DepositSame,
     DepositAll,
     ToggleHeldItemLock
@@ -49,6 +50,8 @@ internal sealed class TerminalSnapshotRequestMessage
     public Guid NetworkId { get; set; }
     public Guid EndpointId { get; set; }
     public bool Crafting { get; set; }
+    public int EntryOffset { get; set; }
+    public int EntryLimit { get; set; }
 }
 
 internal sealed class TerminalSnapshotResponseMessage
@@ -60,6 +63,10 @@ internal sealed class TerminalSnapshotResponseMessage
     public string Message { get; set; } = string.Empty;
     public string NetworkName { get; set; } = string.Empty;
     public int SourceCount { get; set; }
+    public int TotalEntryCount { get; set; }
+    public int EntryOffset { get; set; }
+    public int EntryLimit { get; set; }
+    public bool Truncated { get; set; }
     public NetworkStorageSummary StorageSummary { get; set; } = new();
     public List<string> LockedQualifiedItemIds { get; set; } = new();
     public List<RemoteInventoryEntryMessage> Entries { get; set; } = new();
@@ -101,6 +108,8 @@ internal sealed class TerminalActionRequestMessage
     public TerminalActionKind Action { get; set; }
     public ItemKey? ItemKey { get; set; }
     public int Amount { get; set; }
+    public int InventorySlotIndex { get; set; } = -1;
+    public bool DepositSingle { get; set; }
     public string HeldQualifiedItemId { get; set; } = string.Empty;
     public string HeldDisplayName { get; set; } = string.Empty;
     public List<TerminalItemPayloadMessage> DepositItems { get; set; } = new();
@@ -154,6 +163,7 @@ internal sealed class RemoteCraftingRecipeMessage
     public int OutputCount { get; set; }
     public bool CanCraft { get; set; }
     public List<string> MissingLines { get; set; } = new();
+    public List<CraftingMissingIngredient> MissingIngredients { get; set; } = new();
 }
 
 internal sealed class CraftingActionRequestMessage
@@ -200,6 +210,7 @@ internal sealed class CraftingMonitorSnapshotResponseMessage
 internal sealed class RemoteCraftingJobMessage
 {
     public Guid JobId { get; set; }
+    public PatternData? Pattern { get; set; }
     public string DisplayName { get; set; } = string.Empty;
     public CraftingJobState State { get; set; }
     public int RequestedCount { get; set; }
@@ -218,6 +229,7 @@ internal sealed class RemoteProductionPipelineMessage
     public bool Enabled { get; set; }
     public int Priority { get; set; }
     public ProductionPipelineMode Mode { get; set; }
+    public PatternData? Pattern { get; set; }
     public string DisplayName { get; set; } = string.Empty;
     public int TargetKeep { get; set; }
     public int ItemsPerCycle { get; set; }

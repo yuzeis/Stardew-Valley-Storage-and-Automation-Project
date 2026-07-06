@@ -22,6 +22,8 @@ internal sealed class InventoryTransactionService
     private static readonly string[] PersistentIdentityModDataKeySuffixes =
     {
         "/EndpointId",
+        "/CellId",
+        "/StorageCellData",
         "/MachineGuid",
         "/NetworkId",
         "/StoredWh"
@@ -336,6 +338,7 @@ internal sealed class InventoryTransactionService
         var chests = this.GetWritableChests(network).ToList();
         var moved = 0;
         var movedDetails = new List<string>();
+        string? blockedReason = null;
 
         for (var slot = 0; slot < player.Items.Count; slot++)
         {
@@ -343,14 +346,14 @@ internal sealed class InventoryTransactionService
             if (item is null || item.Stack <= 0)
                 continue;
 
-            if (!this.CanEnterNetwork(item))
-                continue;
-
-            if (network.LockedQualifiedItemIds.Contains(item.QualifiedItemId, StringComparer.Ordinal))
-                continue;
-
             if (sameOnly && !existing.Any(entry => ItemKeyFactory.SameStackBucket(entry.Key, entry.Prototype, ItemKeyFactory.FromItem(item), item)))
                 continue;
+
+            if (!this.CanDepositPlayerItem(network, item, out var depositMessage))
+            {
+                blockedReason ??= depositMessage;
+                continue;
+            }
 
             var beforeStack = item.Stack;
             if (this.getConfig().PreferStorageCellsForDeposits)
@@ -377,7 +380,7 @@ internal sealed class InventoryTransactionService
 
         if (moved <= 0)
         {
-            message = sameOnly ? ModText.Get("inventory.noSameToDeposit") : ModText.Get("inventory.noItemsToDeposit");
+            message = blockedReason ?? (sameOnly ? ModText.Get("inventory.noSameToDeposit") : ModText.Get("inventory.noItemsToDeposit"));
             this.LogGameplay($"action=deposit result=fail player={DescribePlayer(player)} network={ShortId(network.NetworkId)} mode={(sameOnly ? "same" : "all")} writableChests={chests.Count:N0} reason={Quote(message)}");
             return false;
         }
@@ -416,6 +419,103 @@ internal sealed class InventoryTransactionService
             RecordRecentAdded(network, item);
 
         return moved > 0;
+    }
+
+    public bool TryDepositPlayerSlot(
+        NetworkData network,
+        Farmer player,
+        int slotIndex,
+        bool single,
+        out int moved,
+        out string message)
+    {
+        moved = 0;
+        if (slotIndex < 0 || slotIndex >= player.Items.Count)
+        {
+            message = ModText.Get("inventory.slotChanged");
+            return false;
+        }
+
+        var item = player.Items[slotIndex];
+        if (item is null || item.Stack <= 0)
+        {
+            message = ModText.Get("inventory.slotChanged");
+            return false;
+        }
+
+        if (!this.CanDepositPlayerItem(network, item, out message))
+            return false;
+
+        if (single)
+        {
+            var one = item.getOne();
+            one.Stack = 1;
+            if (!this.TryDepositItem(network, one, out moved) || moved <= 0)
+            {
+                message = ModText.Get("terminal.depositBlocked.capacity");
+                return false;
+            }
+
+            item.Stack -= moved;
+            if (item.Stack <= 0)
+                player.Items[slotIndex] = null;
+        }
+        else
+        {
+            if (!this.TryDepositItem(network, item, out moved) || moved <= 0)
+            {
+                message = ModText.Get("terminal.depositBlocked.capacity");
+                return false;
+            }
+
+            if (item.Stack <= 0)
+                player.Items[slotIndex] = null;
+        }
+
+        message = ModText.Format("inventory.depositSlotSuccess", moved);
+        return true;
+    }
+
+    public bool CanDepositPlayerItem(NetworkData network, Item item, out string message)
+    {
+        if (item.Stack <= 0)
+        {
+            message = ModText.Get("inventory.slotChanged");
+            return false;
+        }
+
+        if (network.LockedQualifiedItemIds.Contains(item.QualifiedItemId, StringComparer.Ordinal))
+        {
+            message = ModText.Get("terminal.depositBlocked.locked");
+            return false;
+        }
+
+        if (!this.CanEnterNetwork(item))
+        {
+            if (item is SObject obj && obj.questItem.Value)
+                message = ModText.Get("terminal.depositBlocked.quest");
+            else if (item is MeleeWeapon)
+                message = ModText.Get("terminal.depositBlocked.weapon");
+            else if (item is Tool)
+                message = ModText.Get("terminal.depositBlocked.tool");
+            else if (Content.ModItemCatalog.TryGetStorageCellTier(item.QualifiedItemId, out _))
+                message = ModText.Get("terminal.depositBlocked.storageCell");
+            else if (HasPersistentIdentityModData(item))
+                message = ModText.Get("terminal.depositBlocked.persistent");
+            else
+                message = ModText.Get("terminal.depositBlocked");
+
+            return false;
+        }
+
+        if (this.GetNetworkInsertCapacity(network, item, Math.Max(1, item.Stack)) <= 0)
+        {
+            message = ModText.Get("terminal.depositBlocked.capacity");
+            return false;
+        }
+
+        message = string.Empty;
+        return true;
     }
 
     public bool TryReturnItemToNetwork(NetworkData network, Item item)
@@ -1305,7 +1405,10 @@ internal sealed class InventoryTransactionService
     private bool CanEnterNetwork(Item item)
     {
         if (Content.ModItemCatalog.TryGetStorageCellTier(item.QualifiedItemId, out _))
-            return true;
+            return false;
+
+        if (HasPersistentIdentityModData(item))
+            return false;
 
         if (item is MeleeWeapon)
             return this.getConfig().AllowWeaponsInNetwork;

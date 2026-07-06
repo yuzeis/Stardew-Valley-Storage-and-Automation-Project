@@ -16,6 +16,9 @@ internal sealed class NetworkInteractionService
     internal const string SelectedNetworkIdKey = ModItemCatalog.UniqueId + "/SelectedNetworkId";
     private const int ActionResponseCacheLimit = 256;
     private const int ClientReconcileCacheLimit = 256;
+    private const int RemoteTerminalSnapshotDefaultEntryLimit = 512;
+    private const int RemoteTerminalSnapshotMaxEntryLimit = 1024;
+    private const int RemoteTerminalSnapshotLocationLimit = 32;
 
     private static readonly Vector2[] AdjacentOffsets =
     {
@@ -50,9 +53,13 @@ internal sealed class NetworkInteractionService
     private readonly Queue<(long PlayerId, Guid TransactionId)> structuralResponseOrder = new();
     private readonly HashSet<Guid> reconciledTerminalTx = new();
     private readonly Queue<Guid> reconciledTerminalTxOrder = new();
+    private readonly HashSet<Guid> reconciledCraftingTx = new();
+    private readonly Queue<Guid> reconciledCraftingTxOrder = new();
+    private readonly HashSet<Guid> reconciledCraftingMonitorTx = new();
+    private readonly Queue<Guid> reconciledCraftingMonitorTxOrder = new();
     private readonly HashSet<Guid> reconciledStructuralTx = new();
     private readonly Queue<Guid> reconciledStructuralTxOrder = new();
-    private readonly Dictionary<Guid, List<Item>> pendingTerminalDeposits = new();
+    private readonly Dictionary<Guid, List<TerminalItemPayloadMessage>> pendingTerminalDepositItems = new();
     private readonly Dictionary<Guid, PendingStructuralHeldItem> pendingStructuralHeldItems = new();
     private readonly Dictionary<long, string> blockedPeerActionMessages = new();
 
@@ -285,16 +292,20 @@ internal sealed class NetworkInteractionService
         this.structuralResponseOrder.Clear();
         this.reconciledTerminalTx.Clear();
         this.reconciledTerminalTxOrder.Clear();
+        this.reconciledCraftingTx.Clear();
+        this.reconciledCraftingTxOrder.Clear();
+        this.reconciledCraftingMonitorTx.Clear();
+        this.reconciledCraftingMonitorTxOrder.Clear();
         this.reconciledStructuralTx.Clear();
         this.reconciledStructuralTxOrder.Clear();
         if (restorePendingItems)
         {
-            this.RestorePendingTerminalDeposits(Game1.currentLocation);
+            this.RestorePendingTerminalDepositItems();
             this.RestorePendingStructuralHeldItems();
         }
         else
         {
-            this.pendingTerminalDeposits.Clear();
+            this.pendingTerminalDepositItems.Clear();
             this.pendingStructuralHeldItems.Clear();
         }
     }
@@ -502,15 +513,12 @@ internal sealed class NetworkInteractionService
             return;
         }
 
-        PendingStructuralHeldItem? pending = null;
-        if (!this.TryCaptureStructuralHeldItem(request, out pending, out var captureMessage))
+        if (!this.TrackStructuralActingItem(request, out var trackingMessage))
         {
-            Game1.addHUDMessage(new HUDMessage(captureMessage, HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(trackingMessage, HUDMessage.error_type));
+            Game1.playSound("cancel");
             return;
         }
-
-        if (pending is not null)
-            this.pendingStructuralHeldItems[request.TransactionId] = pending;
 
         try
         {
@@ -520,26 +528,19 @@ internal sealed class NetworkInteractionService
                 modIDs: new[] { this.modManifest.UniqueID },
                 playerIDs: new[] { host.PlayerID });
         }
-        catch
+        catch (Exception ex)
         {
-            if (pending is not null)
-            {
-                this.pendingStructuralHeldItems.Remove(request.TransactionId);
-                this.RestoreEscrowedStructuralItem(pending, Game1.currentLocation);
-            }
-
-            throw;
+            this.RestorePendingStructuralHeldItem(request.TransactionId);
+            this.monitor.Log($"Failed to send SVSAP structural request {request.TransactionId:N}: {ex.Message}", LogLevel.Warn);
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("network.structural.sendFailed"), HUDMessage.error_type));
+            return;
         }
 
         this.LogGameplay($"action=structural_request result=sent player={DescribePlayer(Game1.player)} host={host.PlayerID} kind={request.Kind} location={Quote(request.LocationName)} tile=({request.TileX:0},{request.TileY:0}) tx={ShortId(request.TransactionId)}");
     }
 
-    private bool TryCaptureStructuralHeldItem(
-        StructuralActionRequestMessage request,
-        out PendingStructuralHeldItem? pending,
-        out string message)
+    private bool TrackStructuralActingItem(StructuralActionRequestMessage request, out string message)
     {
-        pending = null;
         message = string.Empty;
         if (Context.IsMainPlayer || request.TransactionId == Guid.Empty)
             return true;
@@ -548,23 +549,30 @@ internal sealed class NetworkInteractionService
         if (held is null)
             return true;
 
-        Item? escrowed = null;
+        Item? escrowedItem = null;
         if (ShouldEscrowStructuralHeldItem(request.Kind, held))
         {
-            if (Game1.player.Items.IndexOf(held) < 0 || held.Stack <= 0)
+            if (!string.Equals(held.QualifiedItemId, request.HeldQualifiedItemId, StringComparison.Ordinal)
+                || (!string.IsNullOrWhiteSpace(request.HeldSerializedItem) && !SerializedPrototypeMatches(held, request.HeldSerializedItem)))
             {
                 message = ModText.Get("network.structural.heldChanged");
                 return false;
             }
 
-            escrowed = held.getOne();
-            escrowed.Stack = 1;
+            escrowedItem = held.getOne();
+            escrowedItem.Stack = 1;
             held.Stack -= 1;
             if (held.Stack <= 0)
+            {
                 Game1.player.removeItemFromInventory(held);
+            }
+            else if (request.Kind == StructuralActionKind.StorageDriveInteract)
+            {
+                this.storageDriveService.ResetRemainingHeldStorageCell(held);
+            }
         }
 
-        pending = new PendingStructuralHeldItem(held, escrowed);
+        this.pendingStructuralHeldItems[request.TransactionId] = new PendingStructuralHeldItem(held, escrowedItem);
         return true;
     }
 
@@ -619,7 +627,7 @@ internal sealed class NetworkInteractionService
                 return;
             }
 
-            var response = this.ExecuteStructuralAction(request);
+            var response = this.ExecuteStructuralAction(request, e.FromPlayerID);
             this.RememberStructuralActionResponse(e.FromPlayerID, request.TransactionId, response);
             this.SendStructuralResponse(response, e.FromPlayerID);
         }
@@ -695,7 +703,9 @@ internal sealed class NetworkInteractionService
         if (response.TransactionId != Guid.Empty && !this.MarkClientTransactionReconciled(response.TransactionId, this.reconciledStructuralTx, this.reconciledStructuralTxOrder))
             return;
 
-        Game1.addHUDMessage(new HUDMessage(response.Message, response.Success ? HUDMessage.newQuest_type : HUDMessage.error_type));
+        Game1.addHUDMessage(new HUDMessage(
+            LocalizeRemoteResponse(response.Success, response.Message, "network.structural.succeeded", "Structure action completed.", "network.structural.failed", "Structure action failed; please retry."),
+            response.Success ? HUDMessage.newQuest_type : HUDMessage.error_type));
 
         this.pendingStructuralHeldItems.TryGetValue(response.TransactionId, out var pending);
         this.pendingStructuralHeldItems.Remove(response.TransactionId);
@@ -728,7 +738,7 @@ internal sealed class NetworkInteractionService
             consumeHeldAlreadyApplied: pending?.EscrowedItem is not null && response.ConsumeHeldOne);
     }
 
-    private StructuralActionResponseMessage ExecuteStructuralAction(StructuralActionRequestMessage request)
+    private StructuralActionResponseMessage ExecuteStructuralAction(StructuralActionRequestMessage request, long fromPlayerId)
     {
         var response = new StructuralActionResponseMessage
         {
@@ -744,6 +754,20 @@ internal sealed class NetworkInteractionService
             return response;
         }
 
+        var player = Game1.GetPlayer(fromPlayerId, onlyOnline: true);
+        if (player is null)
+        {
+            response.Message = ModText.Get("multiplayer.requestPlayerOffline");
+            return response;
+        }
+
+        var heldSerializedItem = request.HeldSerializedItem;
+        if (this.StructuralActionMayConsumeHeldItem(request) && string.IsNullOrWhiteSpace(heldSerializedItem))
+        {
+            response.Message = ModText.Get("network.structural.heldChanged");
+            return response;
+        }
+
         var result = this.ApplyStructuralAction(
             request.Kind,
             target,
@@ -753,7 +777,7 @@ internal sealed class NetworkInteractionService
             request.HeldQualifiedItemId,
             request.HeldDisplayName,
             request.HeldStack,
-            request.HeldSerializedItem);
+            heldSerializedItem);
 
         response.Success = result.Success;
         response.Message = result.Message;
@@ -761,6 +785,56 @@ internal sealed class NetworkInteractionService
         response.ReturnedSerializedItem = result.ReturnedSerializedItem;
         response.ResultNetworkId = result.ResultNetworkId;
         return response;
+    }
+
+    private bool StructuralActionMayConsumeHeldItem(StructuralActionRequestMessage request)
+    {
+        if (string.IsNullOrWhiteSpace(request.HeldQualifiedItemId))
+            return false;
+
+        if (!string.IsNullOrWhiteSpace(request.HeldSerializedItem))
+        {
+            try
+            {
+                var held = SerializedItemCodec.CreateItem(request.HeldSerializedItem, 1);
+                if (ShouldEscrowStructuralHeldItem(request.Kind, held))
+                    return true;
+            }
+            catch
+            {
+                // Fall back to qualified-id checks below.
+            }
+        }
+
+        return request.Kind switch
+        {
+            StructuralActionKind.StorageDriveInteract
+                => ModItemCatalog.TryGetStorageCellTier(request.HeldQualifiedItemId, out _),
+            StructuralActionKind.PatternProviderInteract
+                => request.HeldQualifiedItemId is "(O)" + ModItemCatalog.CraftingPattern
+                    or "(O)" + ModItemCatalog.ProcessingPattern,
+            StructuralActionKind.TransferBusConfigure
+                => request.HeldQualifiedItemId is "(O)" + ModItemCatalog.FilterCard
+                    or "(O)" + ModItemCatalog.SpeedCard
+                    or "(O)" + ModItemCatalog.CapacityCard
+                    or "(O)" + ModItemCatalog.QualityCard,
+            _ => false
+        };
+    }
+
+    private static bool SerializedPrototypeMatches(Item item, string expectedSerializedPrototype)
+    {
+        try
+        {
+            return string.Equals(
+                SerializedItemCodec.SerializePrototype(item.getOne()),
+                expectedSerializedPrototype,
+                StringComparison.Ordinal);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private StructuralActionResult ApplyStructuralAction(
@@ -927,6 +1001,33 @@ internal sealed class NetworkInteractionService
         this.pendingStructuralHeldItems.Clear();
     }
 
+    private void RestorePendingStructuralHeldItem(Guid transactionId)
+    {
+        if (transactionId == Guid.Empty || !this.pendingStructuralHeldItems.Remove(transactionId, out var pending))
+            return;
+
+        this.RestoreEscrowedStructuralItem(pending, Game1.currentLocation);
+    }
+
+    private void RestorePendingTerminalDepositItems()
+    {
+        foreach (var payloads in this.pendingTerminalDepositItems.Values.ToList())
+            this.RestoreTerminalDepositPayloads(payloads, Game1.currentLocation);
+
+        this.pendingTerminalDepositItems.Clear();
+    }
+
+    private void RestorePendingTerminalDepositItems(Guid transactionId, IReadOnlyList<TerminalItemPayloadMessage> fallbackPayloads)
+    {
+        if (transactionId != Guid.Empty && this.pendingTerminalDepositItems.Remove(transactionId, out var pending))
+        {
+            this.RestoreTerminalDepositPayloads(pending, Game1.currentLocation);
+            return;
+        }
+
+        this.RestoreTerminalDepositPayloads(fallbackPayloads, Game1.currentLocation);
+    }
+
     private void RestoreEscrowedStructuralItem(PendingStructuralHeldItem pending, GameLocation? location)
     {
         var item = pending.EscrowedItem;
@@ -934,14 +1035,6 @@ internal sealed class NetworkInteractionService
             return;
 
         this.RestoreItemsToPlayer(new[] { item }, location);
-    }
-
-    private void RestorePendingTerminalDeposits(GameLocation? location)
-    {
-        foreach (var pending in this.pendingTerminalDeposits.Values.ToList())
-            this.RestoreItemsToPlayer(pending, location);
-
-        this.pendingTerminalDeposits.Clear();
     }
 
     private void DeliverRemoteTerminalWithdrawal(TerminalActionResponseMessage response)
@@ -960,75 +1053,86 @@ internal sealed class NetworkInteractionService
         }
     }
 
-    private void RestoreTerminalPayloads(IEnumerable<TerminalItemPayloadMessage> payloads, GameLocation? location)
+    private void RestoreTerminalDepositPayloads(IEnumerable<TerminalItemPayloadMessage> payloads, GameLocation? location)
     {
         foreach (var payload in payloads)
         {
-            if (!TryCreateTerminalPayloadItem(payload, out var item))
+            if (string.IsNullOrWhiteSpace(payload.SerializedItem) || payload.Count <= 0)
                 continue;
 
-            this.RestoreItemsToPlayer(new[] { item }, location);
+            try
+            {
+                var item = SerializedItemCodec.CreateItem(payload.SerializedItem, payload.Count);
+                this.RestoreItemsToPlayer(new[] { item }, location);
+            }
+            catch (Exception ex)
+            {
+                this.monitor.Log($"Could not restore remote terminal escrow payload: {ex.Message}", LogLevel.Warn);
+            }
         }
     }
 
     private void RestoreItemsToPlayer(IEnumerable<Item> items, GameLocation? location)
     {
+        if (Game1.player is not null)
+            this.RestoreItemsToFarmer(Game1.player, items, location);
+    }
+
+    private void RestoreItemsToFarmer(Farmer player, IEnumerable<Item> items, GameLocation? location)
+    {
+        var dropLocation = player.currentLocation ?? location ?? Game1.currentLocation;
         foreach (var item in items)
         {
             if (item.Stack <= 0)
                 continue;
 
-            if (Game1.player is not null && Game1.player.addItemToInventoryBool(item))
+            if (player.addItemToInventoryBool(item))
                 continue;
 
-            if (Context.IsWorldReady && Game1.player is not null)
-                Game1.createItemDebris(item, Game1.player.getStandingPosition(), -1, location ?? Game1.currentLocation);
+            if (Context.IsWorldReady && dropLocation is not null)
+                Game1.createItemDebris(item, player.getStandingPosition(), -1, dropLocation);
         }
+    }
+
+    private static string LocalizeRemoteResponse(bool success, string? responseMessage, string successKey, string successFallback, string failureKey, string failureFallback)
+    {
+        if (!success && !string.IsNullOrWhiteSpace(responseMessage))
+            return responseMessage;
+
+        return success
+            ? ModText.Get(successKey, successFallback)
+            : ModText.Get(failureKey, failureFallback);
+    }
+
+    private static List<TerminalItemPayloadMessage> CloneTerminalPayloads(IEnumerable<TerminalItemPayloadMessage> payloads)
+    {
+        return payloads
+            .Where(payload => !string.IsNullOrWhiteSpace(payload.SerializedItem) && payload.Count > 0)
+            .Select(payload => new TerminalItemPayloadMessage
+            {
+                SerializedItem = payload.SerializedItem,
+                Count = payload.Count
+            })
+            .ToList();
+    }
+
+    internal static int NormalizeTerminalSnapshotEntryLimit(int requestedLimit)
+    {
+        if (requestedLimit <= 0)
+            return RemoteTerminalSnapshotDefaultEntryLimit;
+
+        return Math.Clamp(requestedLimit, 1, RemoteTerminalSnapshotMaxEntryLimit);
     }
 
     private static TerminalItemPayloadMessage CreateTerminalPayload(Item item)
     {
+        var prototype = item.getOne();
+        prototype.Stack = 1;
         return new TerminalItemPayloadMessage
         {
-            SerializedItem = SerializedItemCodec.SerializePrototype(item.getOne()),
+            SerializedItem = SerializedItemCodec.SerializePrototype(prototype),
             Count = item.Stack
         };
-    }
-
-    private static bool TryCreateTerminalPayloadItem(TerminalItemPayloadMessage payload, out Item item)
-    {
-        item = null!;
-        if (string.IsNullOrWhiteSpace(payload.SerializedItem) || payload.Count <= 0)
-            return false;
-
-        try
-        {
-            item = SerializedItemCodec.CreateItem(payload.SerializedItem, payload.Count);
-            return item.Stack > 0;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private static bool CanRemoteTerminalDepositItem(Item item)
-    {
-        if (ModItemCatalog.TryGetStorageCellTier(item.QualifiedItemId, out _))
-            return true;
-
-        if (item is Tool or MeleeWeapon)
-            return false;
-
-        if (item is SObject obj && obj.questItem.Value)
-            return false;
-
-        return PassesRemoteTerminalSerializationCheck(item);
-    }
-
-    private static bool PassesRemoteTerminalSerializationCheck(Item item)
-    {
-        return SerializedItemCodec.CanRoundTripPrototype(item);
     }
 
     private bool TryGetPeerActionBlock(long playerId, out string message)
@@ -1212,11 +1316,28 @@ internal sealed class NetworkInteractionService
             return;
         }
 
+        this.SendRemoteTerminalSnapshotRequest(networkId, endpointId, entryOffset: 0, entryLimit: RemoteTerminalSnapshotDefaultEntryLimit);
+    }
+
+    private void SendRemoteTerminalSnapshotRequest(Guid networkId, Guid endpointId, int entryOffset, int entryLimit)
+    {
+        if (Context.IsMainPlayer)
+            return;
+
+        var host = this.multiplayerHelper.GetConnectedPlayers().FirstOrDefault(peer => peer.IsHost);
+        if (host is null || !host.HasSmapi || host.GetMod(this.modManifest.UniqueID) is null)
+        {
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("multiplayer.hostNeedsSVSAPTerminal"), HUDMessage.error_type));
+            return;
+        }
+
         var request = new TerminalSnapshotRequestMessage
         {
             NetworkId = networkId,
             EndpointId = endpointId,
-            Crafting = crafting
+            Crafting = false,
+            EntryOffset = Math.Max(0, entryOffset),
+            EntryLimit = NormalizeTerminalSnapshotEntryLimit(entryLimit)
         };
 
         this.multiplayerHelper.SendMessage(
@@ -1351,12 +1472,24 @@ internal sealed class NetworkInteractionService
         var response = e.ReadAs<TerminalSnapshotResponseMessage>();
         if (!response.Success)
         {
-            Game1.addHUDMessage(new HUDMessage(response.Message, HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteTerminal.snapshotFailed", "SVSAP terminal snapshot failed; please retry."), HUDMessage.error_type));
             return;
         }
 
-        Game1.activeClickableMenu = new RemoteNetworkTerminalMenu(response, this.SendRemoteTerminalActionRequest);
+        if (Game1.activeClickableMenu is RemoteNetworkTerminalMenu remoteMenu && remoteMenu.MatchesNetwork(response.NetworkId))
+            remoteMenu.ApplySnapshot(response);
+        else
+            Game1.activeClickableMenu = this.CreateRemoteTerminalMenu(response);
+
         Game1.playSound("bigSelect");
+    }
+
+    private RemoteNetworkTerminalMenu CreateRemoteTerminalMenu(TerminalSnapshotResponseMessage snapshot)
+    {
+        return new RemoteNetworkTerminalMenu(
+            snapshot,
+            this.SendRemoteTerminalActionRequest,
+            this.SendRemoteTerminalSnapshotRequest);
     }
 
     private bool SendRemoteTerminalActionRequest(TerminalActionRequestMessage request, TerminalSnapshotResponseMessage snapshot)
@@ -1367,20 +1500,13 @@ internal sealed class NetworkInteractionService
         var host = this.multiplayerHelper.GetConnectedPlayers().FirstOrDefault(peer => peer.IsHost);
         if (host is null || !host.HasSmapi || host.GetMod(this.modManifest.UniqueID) is null)
         {
+            this.RestoreTerminalDepositPayloads(request.DepositItems, Game1.currentLocation);
             Game1.addHUDMessage(new HUDMessage(ModText.Get("multiplayer.hostNeedsSVSAPTerminal"), HUDMessage.error_type));
             return false;
         }
 
-        List<Item>? capturedDepositItems = null;
-        if (IsTerminalDepositAction(request.Action)
-            && !this.TryCaptureRemoteTerminalDeposit(request, snapshot, out capturedDepositItems, out var captureMessage))
-        {
-            Game1.addHUDMessage(new HUDMessage(captureMessage, HUDMessage.error_type));
-            return false;
-        }
-
-        if (capturedDepositItems is not null)
-            this.pendingTerminalDeposits[request.TransactionId] = capturedDepositItems;
+        if (request.TransactionId != Guid.Empty && request.DepositItems.Count > 0)
+            this.pendingTerminalDepositItems[request.TransactionId] = CloneTerminalPayloads(request.DepositItems);
 
         try
         {
@@ -1392,14 +1518,9 @@ internal sealed class NetworkInteractionService
         }
         catch (Exception ex)
         {
-            if (capturedDepositItems is not null)
-            {
-                this.pendingTerminalDeposits.Remove(request.TransactionId);
-                this.RestoreItemsToPlayer(capturedDepositItems, Game1.currentLocation);
-            }
-
+            this.RestorePendingTerminalDepositItems(request.TransactionId, request.DepositItems);
             this.monitor.Log($"Failed to send SVSAP terminal request {request.TransactionId:N}: {ex.Message}", LogLevel.Warn);
-            Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteTerminal.sendFailedRestored"), HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteTerminal.sendFailed"), HUDMessage.error_type));
             return false;
         }
 
@@ -1408,111 +1529,63 @@ internal sealed class NetworkInteractionService
         return true;
     }
 
-    private bool TryCaptureRemoteTerminalDeposit(
-        TerminalActionRequestMessage request,
-        TerminalSnapshotResponseMessage snapshot,
-        out List<Item> capturedItems,
-        out string message)
-    {
-        capturedItems = new List<Item>();
-        message = string.Empty;
-        request.DepositItems.Clear();
-
-        var sameOnly = request.Action == TerminalActionKind.DepositSame;
-        for (var slot = 0; slot < Game1.player.Items.Count; slot++)
-        {
-            var item = Game1.player.Items[slot];
-            if (item is null || item.Stack <= 0)
-                continue;
-
-            if (snapshot.LockedQualifiedItemIds.Contains(item.QualifiedItemId, StringComparer.Ordinal))
-                continue;
-
-            if (!CanRemoteTerminalDepositItem(item))
-                continue;
-
-            if (sameOnly && !RemoteSnapshotHasSameStack(snapshot, item))
-                continue;
-
-            var captured = item.getOne();
-            captured.Stack = item.Stack;
-            TerminalItemPayloadMessage payload;
-            try
-            {
-                payload = CreateTerminalPayload(captured);
-            }
-            catch (Exception ex)
-            {
-                this.monitor.Log($"Skipped remote terminal deposit item that could not be serialized: {ex.Message}", LogLevel.Warn);
-                continue;
-            }
-
-            capturedItems.Add(captured);
-            request.DepositItems.Add(payload);
-            Game1.player.Items[slot] = null;
-        }
-
-        if (capturedItems.Count > 0)
-            return true;
-
-        message = sameOnly ? ModText.Get("inventory.noSameToDeposit") : ModText.Get("inventory.noItemsToDeposit");
-        return false;
-    }
-
-    private static bool RemoteSnapshotHasSameStack(TerminalSnapshotResponseMessage snapshot, Item item)
-    {
-        var itemKey = ItemKeyFactory.FromItem(item);
-        foreach (var entry in snapshot.Entries)
-        {
-            try
-            {
-                var prototype = SerializedItemCodec.CreateItem(entry.SerializedItemPrototype, 1);
-                if (ItemKeyFactory.SameStackBucket(entry.Key, prototype, itemKey, item))
-                    return true;
-            }
-            catch
-            {
-                // Ignore unreadable remote prototypes; they cannot safely define a same-item match.
-            }
-        }
-
-        return false;
-    }
-
-    private static bool IsTerminalDepositAction(TerminalActionKind action)
-    {
-        return action is TerminalActionKind.DepositSame or TerminalActionKind.DepositAll;
-    }
-
     private void HandleTerminalActionRequest(ModMessageReceivedEventArgs e)
     {
         if (!Context.IsMainPlayer)
             return;
 
-        var request = e.ReadAs<TerminalActionRequestMessage>();
-        if (this.TryGetPeerActionBlock(e.FromPlayerID, out var blockMessage))
+        TerminalActionRequestMessage? request = null;
+        try
         {
-            var blocked = new TerminalActionResponseMessage
+            request = e.ReadAs<TerminalActionRequestMessage>();
+            if (this.TryGetPeerActionBlock(e.FromPlayerID, out var blockMessage))
             {
-                TransactionId = request.TransactionId,
-                NetworkId = request.NetworkId,
-                Message = blockMessage
-            };
-            this.RememberTerminalActionResponse(e.FromPlayerID, request.TransactionId, blocked);
-            this.SendTerminalActionResponse(blocked, e.FromPlayerID);
-            return;
-        }
+                var blocked = CreateTerminalFailureResponse(request, blockMessage);
+                this.RememberTerminalActionResponse(e.FromPlayerID, request.TransactionId, blocked);
+                this.SendTerminalActionResponse(blocked, e.FromPlayerID);
+                return;
+            }
 
-        if (this.TryGetCachedTerminalActionResponse(e.FromPlayerID, request.TransactionId, out var cached))
+            if (this.TryGetCachedTerminalActionResponse(e.FromPlayerID, request.TransactionId, out var cached))
+            {
+                this.SendTerminalActionResponse(cached, e.FromPlayerID);
+                return;
+            }
+
+            var response = this.ExecuteTerminalActionRequest(request, e.FromPlayerID);
+            this.RememberTerminalActionResponse(e.FromPlayerID, request.TransactionId, response);
+
+            this.SendTerminalActionResponse(response, e.FromPlayerID);
+        }
+        catch (Exception ex)
         {
-            this.SendTerminalActionResponse(cached, e.FromPlayerID);
-            return;
+            this.monitor.Log($"Failed to execute SVSAP terminal request from {e.FromPlayerID}: {ex.Message}", LogLevel.Warn);
+            if (request is null || request.TransactionId == Guid.Empty)
+                return;
+
+            var response = CreateTerminalFailureResponse(request);
+            this.RememberTerminalActionResponse(e.FromPlayerID, request.TransactionId, response);
+
+            try
+            {
+                this.SendTerminalActionResponse(response, e.FromPlayerID);
+            }
+            catch (Exception sendEx)
+            {
+                this.monitor.Log($"Failed to send SVSAP terminal failure response to {e.FromPlayerID}: {sendEx.Message}", LogLevel.Warn);
+            }
         }
+    }
 
-        var response = this.ExecuteTerminalActionRequest(request, e.FromPlayerID);
-        this.RememberTerminalActionResponse(e.FromPlayerID, request.TransactionId, response);
-
-        this.SendTerminalActionResponse(response, e.FromPlayerID);
+    private static TerminalActionResponseMessage CreateTerminalFailureResponse(TerminalActionRequestMessage request, string? message = null)
+    {
+        return new TerminalActionResponseMessage
+        {
+            TransactionId = request.TransactionId,
+            NetworkId = request.NetworkId,
+            Message = message ?? ModText.Get("remoteTerminal.actionFailed"),
+            ReturnedDepositItems = CloneTerminalPayloads(request.DepositItems)
+        };
     }
 
     private void SendTerminalActionResponse(TerminalActionResponseMessage response, long playerId)
@@ -1555,29 +1628,31 @@ internal sealed class NetworkInteractionService
         if (response.TransactionId != Guid.Empty && !this.MarkClientTransactionReconciled(response.TransactionId, this.reconciledTerminalTx, this.reconciledTerminalTxOrder))
             return;
 
-        this.pendingTerminalDeposits.TryGetValue(response.TransactionId, out var pendingDeposit);
-        this.pendingTerminalDeposits.Remove(response.TransactionId);
+        this.pendingTerminalDepositItems.TryGetValue(response.TransactionId, out var pendingDepositItems);
+        this.pendingTerminalDepositItems.Remove(response.TransactionId);
 
         if (response.Success)
         {
             this.DeliverRemoteTerminalWithdrawal(response);
-            if (pendingDeposit is not null)
-                this.RestoreTerminalPayloads(response.ReturnedDepositItems, Game1.currentLocation);
+            this.RestoreTerminalDepositPayloads(response.ReturnedDepositItems, Game1.currentLocation);
         }
-        else if (pendingDeposit is not null)
+        else if (response.ReturnedDepositItems.Count > 0)
         {
-            this.RestoreItemsToPlayer(pendingDeposit, Game1.currentLocation);
+            this.RestoreTerminalDepositPayloads(response.ReturnedDepositItems, Game1.currentLocation);
+        }
+        else if (pendingDepositItems is not null)
+        {
+            this.RestoreTerminalDepositPayloads(pendingDepositItems, Game1.currentLocation);
         }
 
-        Game1.addHUDMessage(new HUDMessage(response.Message, response.Success ? HUDMessage.newQuest_type : HUDMessage.error_type));
-
-        if (response.Snapshot is null || !response.Snapshot.Success)
-            return;
+        Game1.addHUDMessage(new HUDMessage(
+            LocalizeRemoteResponse(response.Success, response.Message, "remoteTerminal.actionSucceeded", "SVSAP terminal action completed.", "remoteTerminal.actionFailed", "SVSAP terminal action failed; please retry."),
+            response.Success ? HUDMessage.newQuest_type : HUDMessage.error_type));
 
         if (Game1.activeClickableMenu is RemoteNetworkTerminalMenu remoteMenu && remoteMenu.MatchesNetwork(response.NetworkId))
-            remoteMenu.ApplySnapshot(response.Snapshot);
-        else
-            Game1.activeClickableMenu = new RemoteNetworkTerminalMenu(response.Snapshot, this.SendRemoteTerminalActionRequest);
+        {
+            remoteMenu.MarkActionComplete(response.Snapshot);
+        }
     }
 
     private void HandleCraftingSnapshotRequest(ModMessageReceivedEventArgs e)
@@ -1603,7 +1678,7 @@ internal sealed class NetworkInteractionService
         var response = e.ReadAs<CraftingSnapshotResponseMessage>();
         if (!response.Success)
         {
-            Game1.addHUDMessage(new HUDMessage(response.Message, HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteCrafting.snapshotFailed", "SVSAP crafting snapshot failed; please retry."), HUDMessage.error_type));
             return;
         }
 
@@ -1615,26 +1690,36 @@ internal sealed class NetworkInteractionService
         Game1.playSound("bigSelect");
     }
 
-    private void SendRemoteCraftingActionRequest(CraftingActionRequestMessage request)
+    private bool SendRemoteCraftingActionRequest(CraftingActionRequestMessage request)
     {
         if (Context.IsMainPlayer)
-            return;
+            return false;
 
         var host = this.multiplayerHelper.GetConnectedPlayers().FirstOrDefault(peer => peer.IsHost);
         if (host is null || !host.HasSmapi || host.GetMod(this.modManifest.UniqueID) is null)
         {
             Game1.addHUDMessage(new HUDMessage(ModText.Get("multiplayer.hostNeedsSVSAPCrafting"), HUDMessage.error_type));
-            return;
+            return false;
         }
 
-        this.multiplayerHelper.SendMessage(
-            request,
-            MultiplayerMessageTypes.CraftingActionRequest,
-            modIDs: new[] { this.modManifest.UniqueID },
-            playerIDs: new[] { host.PlayerID });
+        try
+        {
+            this.multiplayerHelper.SendMessage(
+                request,
+                MultiplayerMessageTypes.CraftingActionRequest,
+                modIDs: new[] { this.modManifest.UniqueID },
+                playerIDs: new[] { host.PlayerID });
+        }
+        catch (Exception ex)
+        {
+            this.monitor.Log($"Failed to send SVSAP crafting request {request.TransactionId:N}: {ex.Message}", LogLevel.Warn);
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteCrafting.sendFailed"), HUDMessage.error_type));
+            return false;
+        }
 
         this.LogGameplay($"action=remote_crafting_request result=sent player={DescribePlayer(Game1.player)} host={host.PlayerID} network={ShortId(request.NetworkId)} endpoint={ShortId(request.EndpointId)} recipe={Quote(request.RecipeName)} batches={request.Batches:N0} quality={request.QualityStrategy} tx={ShortId(request.TransactionId)}");
         Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteCrafting.requestSent"), HUDMessage.newQuest_type));
+        return true;
     }
 
     private void HandleCraftingActionRequest(ModMessageReceivedEventArgs e)
@@ -1705,15 +1790,17 @@ internal sealed class NetworkInteractionService
             return;
 
         var response = e.ReadAs<CraftingActionResponseMessage>();
-        Game1.addHUDMessage(new HUDMessage(response.Message, response.Success ? HUDMessage.newQuest_type : HUDMessage.error_type));
-
-        if (response.Snapshot is null || !response.Snapshot.Success)
+        if (response.TransactionId != Guid.Empty && !this.MarkClientTransactionReconciled(response.TransactionId, this.reconciledCraftingTx, this.reconciledCraftingTxOrder))
             return;
 
+        Game1.addHUDMessage(new HUDMessage(
+            LocalizeRemoteResponse(response.Success, response.Message, "remoteCrafting.actionSucceeded", "SVSAP crafting action completed.", "remoteCrafting.actionFailed", "SVSAP crafting action failed; please retry."),
+            response.Success ? HUDMessage.newQuest_type : HUDMessage.error_type));
+
         if (Game1.activeClickableMenu is RemoteCraftingTerminalMenu remoteMenu && remoteMenu.MatchesNetwork(response.NetworkId))
-            remoteMenu.ApplySnapshot(response.Snapshot);
-        else
-            Game1.activeClickableMenu = this.CreateRemoteCraftingMenu(response.Snapshot);
+        {
+            remoteMenu.MarkActionComplete(response.Snapshot);
+        }
     }
 
     private RemoteCraftingTerminalMenu CreateRemoteCraftingMenu(CraftingSnapshotResponseMessage snapshot)
@@ -1747,7 +1834,7 @@ internal sealed class NetworkInteractionService
         var response = e.ReadAs<CraftingMonitorSnapshotResponseMessage>();
         if (!response.Success)
         {
-            Game1.addHUDMessage(new HUDMessage(response.Message, HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteMonitor.snapshotFailed", "SVSAP monitor snapshot failed; please retry."), HUDMessage.error_type));
             return;
         }
 
@@ -1759,26 +1846,36 @@ internal sealed class NetworkInteractionService
         Game1.playSound("bigSelect");
     }
 
-    private void SendRemoteCraftingMonitorActionRequest(CraftingMonitorActionRequestMessage request)
+    private bool SendRemoteCraftingMonitorActionRequest(CraftingMonitorActionRequestMessage request)
     {
         if (Context.IsMainPlayer)
-            return;
+            return false;
 
         var host = this.multiplayerHelper.GetConnectedPlayers().FirstOrDefault(peer => peer.IsHost);
         if (host is null || !host.HasSmapi || host.GetMod(this.modManifest.UniqueID) is null)
         {
             Game1.addHUDMessage(new HUDMessage(ModText.Get("multiplayer.hostNeedsSVSAPMonitor"), HUDMessage.error_type));
-            return;
+            return false;
         }
 
-        this.multiplayerHelper.SendMessage(
-            request,
-            MultiplayerMessageTypes.CraftingMonitorActionRequest,
-            modIDs: new[] { this.modManifest.UniqueID },
-            playerIDs: new[] { host.PlayerID });
+        try
+        {
+            this.multiplayerHelper.SendMessage(
+                request,
+                MultiplayerMessageTypes.CraftingMonitorActionRequest,
+                modIDs: new[] { this.modManifest.UniqueID },
+                playerIDs: new[] { host.PlayerID });
+        }
+        catch (Exception ex)
+        {
+            this.monitor.Log($"Failed to send SVSAP monitor request {request.TransactionId:N}: {ex.Message}", LogLevel.Warn);
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteMonitor.sendFailed"), HUDMessage.error_type));
+            return false;
+        }
 
         this.LogGameplay($"action=remote_monitor_request result=sent player={DescribePlayer(Game1.player)} host={host.PlayerID} network={ShortId(request.NetworkId)} endpoint={ShortId(request.EndpointId)} requestAction={request.Action} job={(request.JobId.HasValue ? ShortId(request.JobId.Value) : "none")} batches={request.Batches:N0} tx={ShortId(request.TransactionId)}");
         Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteMonitor.requestSent"), HUDMessage.newQuest_type));
+        return true;
     }
 
     private void HandleCraftingMonitorActionRequest(ModMessageReceivedEventArgs e)
@@ -1849,21 +1946,17 @@ internal sealed class NetworkInteractionService
             return;
 
         var response = e.ReadAs<CraftingMonitorActionResponseMessage>();
-        Game1.addHUDMessage(new HUDMessage(response.Message, response.Success ? HUDMessage.newQuest_type : HUDMessage.error_type));
-
-        if (response.Snapshot is null || !response.Snapshot.Success)
+        if (response.TransactionId != Guid.Empty && !this.MarkClientTransactionReconciled(response.TransactionId, this.reconciledCraftingMonitorTx, this.reconciledCraftingMonitorTxOrder))
             return;
+
+        Game1.addHUDMessage(new HUDMessage(
+            LocalizeRemoteResponse(response.Success, response.Message, "remoteMonitor.actionSucceeded", "SVSAP monitor action completed.", "remoteMonitor.actionFailed", "SVSAP monitor action failed; please retry."),
+            response.Success ? HUDMessage.newQuest_type : HUDMessage.error_type));
 
         if (Game1.activeClickableMenu is RemoteCraftingMonitorMenu remoteMenu && remoteMenu.MatchesNetwork(response.NetworkId))
         {
-            remoteMenu.ApplySnapshot(response.Snapshot);
+            remoteMenu.MarkActionComplete(response.Snapshot);
             remoteMenu.ApplyActionResult(response);
-        }
-        else
-        {
-            var newMenu = this.CreateRemoteCraftingMonitorMenu(response.Snapshot);
-            newMenu.ApplyActionResult(response);
-            Game1.activeClickableMenu = newMenu;
         }
     }
 
@@ -1880,7 +1973,8 @@ internal sealed class NetworkInteractionService
         var response = new TerminalActionResponseMessage
         {
             TransactionId = request.TransactionId,
-            NetworkId = request.NetworkId
+            NetworkId = request.NetworkId,
+            ReturnedDepositItems = CloneTerminalPayloads(request.DepositItems)
         };
 
         if (!this.repository.TryGetNetwork(request.NetworkId, out var network))
@@ -1915,12 +2009,16 @@ internal sealed class NetworkInteractionService
                 success = this.TryExecuteRemoteTerminalWithdraw(network, request, response, out actionMessage);
                 break;
 
+            case TerminalActionKind.DepositSlot:
+                success = this.TryExecuteRemoteTerminalDepositPayloads(network, request, response, out actionMessage);
+                break;
+
             case TerminalActionKind.DepositSame:
-                success = this.TryExecuteRemoteTerminalDeposit(network, request, sameOnly: true, response, out actionMessage);
+                success = this.TryExecuteRemoteTerminalDepositPayloads(network, request, response, out actionMessage);
                 break;
 
             case TerminalActionKind.DepositAll:
-                success = this.TryExecuteRemoteTerminalDeposit(network, request, sameOnly: false, response, out actionMessage);
+                success = this.TryExecuteRemoteTerminalDepositPayloads(network, request, response, out actionMessage);
                 break;
 
             case TerminalActionKind.ToggleHeldItemLock:
@@ -1957,57 +2055,88 @@ internal sealed class NetworkInteractionService
             return false;
         }
 
-        response.ReturnedSerializedItem = SerializedItemCodec.SerializePrototype(extracted.getOne());
+        response.ReturnedSerializedItem = SerializedItemCodec.SerializePrototype(extracted);
         response.ReturnedCount = extracted.Stack;
         return true;
     }
 
-    private bool TryExecuteRemoteTerminalDeposit(
+    private bool TryExecuteRemoteTerminalDepositPayloads(
         NetworkData network,
         TerminalActionRequestMessage request,
-        bool sameOnly,
         TerminalActionResponseMessage response,
         out string message)
     {
-        response.ReturnedDepositItems.Clear();
+        response.ReturnedDepositItems = new List<TerminalItemPayloadMessage>();
         if (request.DepositItems.Count == 0)
+            return Fail(ModText.Get(request.Action == TerminalActionKind.DepositSame ? "inventory.noSameToDeposit" : "inventory.noItemsToDeposit"), out message);
+
+        if (request.DepositItems.Count > 48)
         {
-            message = sameOnly ? ModText.Get("inventory.noSameToDeposit") : ModText.Get("inventory.noItemsToDeposit");
-            return false;
+            response.ReturnedDepositItems = CloneTerminalPayloads(request.DepositItems);
+            return Fail(ModText.Get("remoteTerminal.invalidPayload"), out message);
         }
 
-        var existing = sameOnly ? this.inventoryScanner.Scan(network).Entries : new List<NetworkInventoryEntry>();
-        var moved = 0;
+        var movedTotal = 0;
+        string? blockedReason = null;
         foreach (var payload in request.DepositItems)
         {
-            if (!TryCreateTerminalPayloadItem(payload, out var item))
-                continue;
-
-            if (item.Stack <= 0)
-                continue;
-
-            if (network.LockedQualifiedItemIds.Contains(item.QualifiedItemId, StringComparer.Ordinal)
-                || !CanRemoteTerminalDepositItem(item)
-                || (sameOnly && !existing.Any(entry => ItemKeyFactory.SameStackBucket(entry.Key, entry.Prototype, ItemKeyFactory.FromItem(item), item))))
+            if (string.IsNullOrWhiteSpace(payload.SerializedItem) || payload.Count <= 0 || payload.Count > 999)
             {
-                response.ReturnedDepositItems.Add(CreateTerminalPayload(item));
+                response.ReturnedDepositItems.Add(payload);
+                blockedReason ??= ModText.Get("remoteTerminal.invalidPayload");
                 continue;
             }
 
-            if (this.transactionService.TryDepositItem(network, item, out var movedFromStack) && movedFromStack > 0)
-                moved += movedFromStack;
+            Item item;
+            try
+            {
+                item = SerializedItemCodec.CreateItem(payload.SerializedItem, payload.Count);
+            }
+            catch (Exception ex)
+            {
+                this.monitor.Log($"Rejected malformed remote terminal deposit payload: {ex.Message}", LogLevel.Warn);
+                response.ReturnedDepositItems.Add(payload);
+                blockedReason ??= ModText.Get("remoteTerminal.invalidPayload");
+                continue;
+            }
 
+            if (!this.transactionService.CanDepositPlayerItem(network, item, out var depositMessage))
+            {
+                response.ReturnedDepositItems.Add(CreateTerminalPayload(item));
+                blockedReason ??= depositMessage;
+                continue;
+            }
+
+            var before = item.Stack;
+            if (!this.transactionService.TryDepositItem(network, item, out var moved) || moved <= 0)
+            {
+                response.ReturnedDepositItems.Add(CreateTerminalPayload(item));
+                blockedReason ??= ModText.Get("terminal.depositBlocked.capacity");
+                continue;
+            }
+
+            movedTotal += moved;
             if (item.Stack > 0)
                 response.ReturnedDepositItems.Add(CreateTerminalPayload(item));
+
+            if (moved < before)
+                blockedReason ??= ModText.Get("terminal.depositBlocked.capacity");
         }
 
-        if (moved <= 0)
+        if (movedTotal <= 0)
         {
-            message = sameOnly ? ModText.Get("inventory.noSameToDeposit") : ModText.Get("inventory.noItemsToDeposit");
-            return false;
+            if (response.ReturnedDepositItems.Count == 0)
+                response.ReturnedDepositItems = CloneTerminalPayloads(request.DepositItems);
+
+            return Fail(blockedReason ?? ModText.Get("terminal.depositBlocked.capacity"), out message);
         }
 
-        message = sameOnly ? ModText.Format("inventory.depositSameSuccess", moved) : ModText.Format("inventory.depositAllSuccess", moved);
+        message = request.Action switch
+        {
+            TerminalActionKind.DepositSame => ModText.Format("inventory.depositSameSuccess", movedTotal),
+            TerminalActionKind.DepositAll => ModText.Format("inventory.depositAllSuccess", movedTotal),
+            _ => ModText.Format("inventory.depositSlotSuccess", movedTotal)
+        };
         return true;
     }
 
@@ -2214,6 +2343,14 @@ internal sealed class NetworkInteractionService
 
         var snapshot = this.inventoryScanner.Scan(network);
         this.transactionService.ApplyReservationOverlay(network, snapshot);
+        var totalEntries = snapshot.Entries.Count;
+        var entryLimit = NormalizeTerminalSnapshotEntryLimit(request.EntryLimit);
+        var entryOffset = Math.Clamp(request.EntryOffset, 0, totalEntries);
+        var entries = snapshot.Entries
+            .Skip(entryOffset)
+            .Take(entryLimit)
+            .ToList();
+
         return new TerminalSnapshotResponseMessage
         {
             NetworkId = request.NetworkId,
@@ -2221,9 +2358,13 @@ internal sealed class NetworkInteractionService
             Success = true,
             NetworkName = network.Name,
             SourceCount = snapshot.SourceCount,
+            TotalEntryCount = totalEntries,
+            EntryOffset = entryOffset,
+            EntryLimit = entryLimit,
+            Truncated = entryOffset + entries.Count < totalEntries,
             StorageSummary = snapshot.StorageSummary,
             LockedQualifiedItemIds = network.LockedQualifiedItemIds.OrderBy(id => id, StringComparer.Ordinal).ToList(),
-            Entries = snapshot.Entries
+            Entries = entries
                 .Select(entry => new RemoteInventoryEntryMessage
                 {
                     QualifiedItemId = entry.Key.QualifiedItemId,
@@ -2240,6 +2381,7 @@ internal sealed class NetworkInteractionService
                     LastAddedSequence = entry.LastAddedSequence,
                     StackCount = entry.Locations.Count,
                     Locations = entry.Locations
+                        .Take(RemoteTerminalSnapshotLocationLimit)
                         .Select(location => new RemoteItemStackLocationMessage
                         {
                             SourceKind = location.SourceKind,
@@ -2303,7 +2445,8 @@ internal sealed class NetworkInteractionService
                     OutputSerializedItemPrototype = SerializedItemCodec.SerializePrototype(recipe.OutputPrototype.getOne()),
                     OutputCount = recipe.OutputCount,
                     CanCraft = availability.CanCraft,
-                    MissingLines = availability.MissingLines
+                    MissingLines = availability.MissingLines,
+                    MissingIngredients = availability.MissingIngredients
                 };
             })
             .ToList();
@@ -2356,6 +2499,7 @@ internal sealed class NetworkInteractionService
                     return new RemoteCraftingJobMessage
                     {
                         JobId = job.JobId,
+                        Pattern = job.Pattern,
                         DisplayName = PatternDisplayNames.Get(job.Pattern),
                         State = job.State,
                         RequestedCount = job.RequestedCount,
@@ -2378,6 +2522,7 @@ internal sealed class NetworkInteractionService
                     Enabled = pipeline.Enabled,
                     Priority = pipeline.Priority,
                     Mode = pipeline.Mode,
+                    Pattern = pipeline.Pattern,
                     DisplayName = PatternDisplayNames.Get(pipeline.Pattern),
                     TargetKeep = pipeline.TargetKeep,
                     ItemsPerCycle = pipeline.ItemsPerCycle,

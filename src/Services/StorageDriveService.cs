@@ -380,14 +380,26 @@ internal sealed class StorageDriveService
 
     private void ReturnCellItem(Item item, GameLocation location, Vector2 tile, bool preferPlayerInventory)
     {
-        if (preferPlayerInventory
-            && Game1.player.couldInventoryAcceptThisItem(item)
-            && Game1.player.addItemToInventoryBool(item))
+        if (preferPlayerInventory && TryPlaceCellInEmptyInventorySlot(Game1.player, item))
         {
             return;
         }
 
         Game1.createItemDebris(item, (tile + new Vector2(0.5f, 0.5f)) * Game1.tileSize, -1, location);
+    }
+
+    private static bool TryPlaceCellInEmptyInventorySlot(Farmer player, Item item)
+    {
+        for (var i = 0; i < player.Items.Count; i++)
+        {
+            if (player.Items[i] is not null)
+                continue;
+
+            player.Items[i] = item;
+            return true;
+        }
+
+        return false;
     }
 
     private bool IsCellIdInserted(NetworkData network, Guid cellId)

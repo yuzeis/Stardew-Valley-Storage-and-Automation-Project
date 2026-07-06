@@ -16,6 +16,19 @@ internal sealed class CraftingAvailability
 {
     public bool CanCraft { get; set; }
     public List<string> MissingLines { get; set; } = new();
+    public List<CraftingMissingIngredient> MissingIngredients { get; set; } = new();
+}
+
+internal sealed class CraftingMissingIngredient
+{
+    public NetworkItemRequest Request { get; set; } = new();
+    public int AvailableCount { get; set; }
+    public int RequiredCount { get; set; }
+
+    public string ToDisplayLine()
+    {
+        return $"{this.Request.DisplayKey}: {this.AvailableCount:N0}/{this.RequiredCount:N0}";
+    }
 }
 
 internal enum MaterialQualityStrategy

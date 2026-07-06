@@ -44,6 +44,7 @@ public sealed class ModEntry : Mod
             helper.WriteConfig(this.config);
 
         ModText.Load(helper, this.config.Language, this.Monitor);
+        StorageCellStackingPatch.Apply(this.ModManifest.UniqueID, this.Monitor);
 
         var contentInjector = new ContentInjector(() => this.config, this.Monitor);
         this.endpointIdentityService = new EndpointIdentityService(this.Monitor);
@@ -108,6 +109,7 @@ public sealed class ModEntry : Mod
         helper.Events.GameLoop.SaveLoaded += this.OnSaveLoaded;
         helper.Events.GameLoop.DayStarted += this.OnDayStarted;
         helper.Events.GameLoop.Saving += this.OnSaving;
+        helper.Events.GameLoop.ReturnedToTitle += this.OnReturnedToTitle;
         helper.Events.GameLoop.UpdateTicked += this.transferBusService.OnUpdateTicked;
         helper.Events.GameLoop.UpdateTicked += this.patternExecutionService.OnUpdateTicked;
         helper.Events.Player.InventoryChanged += this.OnInventoryChanged;
@@ -115,6 +117,7 @@ public sealed class ModEntry : Mod
         helper.Events.Multiplayer.PeerContextReceived += this.OnPeerContextReceived;
         helper.Events.Multiplayer.PeerDisconnected += this.OnPeerDisconnected;
         helper.Events.Multiplayer.ModMessageReceived += this.networkInteractionService.OnModMessageReceived;
+        helper.Events.World.ChestInventoryChanged += this.OnChestInventoryChanged;
         helper.Events.World.ObjectListChanged += this.OnObjectListChanged;
         helper.Events.World.TerrainFeatureListChanged += this.OnTerrainFeatureListChanged;
 
@@ -168,7 +171,7 @@ public sealed class ModEntry : Mod
 
         if (Game1.player is not null)
         {
-            this.storageCellInitializer.InitializeInventory(Game1.player.Items);
+            this.storageCellInitializer.InitializeInventory(Game1.player);
             SyncSVSAPCraftingRecipeUnlocks(Game1.player, this.config);
         }
 
@@ -181,6 +184,7 @@ public sealed class ModEntry : Mod
         this.networkRepository.Load();
         this.networkInteractionService.RecoverPendingTransactions();
         this.networkInteractionService.RebuildPlacedEndpointCache();
+        this.NormalizeLoadedStorageCells();
     }
 
     private void OnDayStarted(object? sender, DayStartedEventArgs e)
@@ -197,9 +201,38 @@ public sealed class ModEntry : Mod
         this.networkRepository.Save();
     }
 
+    private void OnReturnedToTitle(object? sender, ReturnedToTitleEventArgs e)
+    {
+        this.networkInteractionService.ClearActionResponseCaches();
+    }
+
     private void OnInventoryChanged(object? sender, InventoryChangedEventArgs e)
     {
-        this.storageCellInitializer.InitializeInventory(e.Player.Items);
+        this.storageCellInitializer.InitializeInventory(e.Player);
+    }
+
+    private void OnChestInventoryChanged(object? sender, ChestInventoryChangedEventArgs e)
+    {
+        if (!Context.IsMainPlayer)
+            return;
+
+        if (e.Chest is not null)
+            this.storageCellInitializer.InitializeChest(e.Chest, e.Location);
+    }
+
+    private void NormalizeLoadedStorageCells()
+    {
+        foreach (var farmer in Game1.getAllFarmers())
+            this.storageCellInitializer.InitializeInventory(farmer);
+
+        foreach (var location in Game1.locations)
+        {
+            foreach (var placedObject in location.Objects.Values)
+            {
+                if (placedObject is StardewValley.Objects.Chest chest)
+                    this.storageCellInitializer.InitializeChest(chest, location);
+            }
+        }
     }
 
     private static void SyncSVSAPCraftingRecipeUnlocks(Farmer player, ModConfig config)
@@ -338,7 +371,10 @@ public sealed class ModEntry : Mod
     {
         this.networkInteractionService.ClearPeerActionBlock(peer.PlayerID);
 
-        if (!Context.IsMainPlayer || peer.IsHost)
+        if (Context.IsMainPlayer && peer.IsHost)
+            return;
+
+        if (!Context.IsMainPlayer && !peer.IsHost)
             return;
 
         var peerMod = peer.HasSmapi ? peer.GetMod(this.ModManifest.UniqueID) : null;
@@ -350,9 +386,13 @@ public sealed class ModEntry : Mod
         if (string.Equals(localVersion, peerVersion, StringComparison.OrdinalIgnoreCase))
             return;
 
-        var message = ModText.Format("multiplayer.versionMismatch", localVersion, peerVersion);
-        this.networkInteractionService.SetPeerActionBlock(peer.PlayerID, message);
-        this.WarnPeerVersionMismatch(peer, message, localVersion, peerVersion);
+        var hostVersion = Context.IsMainPlayer ? localVersion : peerVersion;
+        var playerVersion = Context.IsMainPlayer ? peerVersion : localVersion;
+        var message = ModText.Format("multiplayer.versionMismatch", hostVersion, playerVersion);
+        if (Context.IsMainPlayer)
+            this.networkInteractionService.SetPeerActionBlock(peer.PlayerID, message);
+
+        this.WarnPeerVersionMismatch(peer, message, hostVersion, playerVersion);
     }
 
     private bool PeerHasThisMod(IMultiplayerPeer peer)
@@ -391,12 +431,12 @@ public sealed class ModEntry : Mod
             Game1.addHUDMessage(new HUDMessage(ModText.Get("multiplayer.allPlayersNeedSVSAP"), HUDMessage.error_type));
     }
 
-    private void WarnPeerVersionMismatch(IMultiplayerPeer peer, string message, string localVersion, string peerVersion)
+    private void WarnPeerVersionMismatch(IMultiplayerPeer peer, string message, string hostVersion, string playerVersion)
     {
         if (!this.warnedMissingSVSAPPeers.Add(peer.PlayerID))
             return;
 
-        this.Monitor.Log($"{message} (peer {peer.PlayerID} has {peerVersion}; host has {localVersion})", LogLevel.Warn);
+        this.Monitor.Log($"{message} (peer {peer.PlayerID}; host has {hostVersion}; player has {playerVersion})", LogLevel.Warn);
 
         if (Context.IsWorldReady)
             Game1.addHUDMessage(new HUDMessage(message, HUDMessage.error_type));

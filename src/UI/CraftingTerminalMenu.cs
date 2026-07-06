@@ -22,6 +22,7 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
     private Rectangle searchBox;
     private Rectangle gridArea;
     private string search = string.Empty;
+    private readonly TextBox searchInput;
     private int batches = 1;
     private bool showCraftableOnly;
     private MaterialQualityStrategy qualityStrategy = MaterialQualityStrategy.LowQualityFirst;
@@ -44,6 +45,7 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
         this.getActionBlockMessage = getActionBlockMessage ?? (() => null);
         this.recipes = this.craftingRecipeService.GetKnownRecipes();
         this.BuildLayout();
+        this.searchInput = SVSAPMenuWidgets.CreateSearchTextBox(this.searchBox, this.search);
         SVSAPMenuWidgets.PositionCloseButton(this.upperRightCloseButton, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
     }
 
@@ -84,6 +86,7 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
 
     public override void draw(SpriteBatch b)
     {
+        this.SyncSearchFromInput();
         SVSAPMenuWidgets.DrawPanel(b, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
 
         var visible = this.GetVisibleRecipes();
@@ -201,25 +204,14 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
             return;
         }
 
-        if (key == Keys.Back)
-        {
-            if (this.search.Length > 0)
-            {
-                this.search = this.search[..^1];
-                this.ResetScroll();
-            }
-            return;
-        }
-
-        var typed = SVSAPMenuWidgets.TryConvertKey(key);
-        if (typed is not null && this.search.Length < 40)
-        {
-            this.search += typed.Value;
-            this.ResetScroll();
-            return;
-        }
-
+        this.SyncSearchFromInput();
         base.receiveKeyPress(key);
+    }
+
+    protected override void cleanupBeforeExit()
+    {
+        SVSAPMenuWidgets.ReleaseSearchTextBox(this.searchInput);
+        base.cleanupBeforeExit();
     }
 
     public override void receiveScrollWheelAction(int direction)
@@ -231,6 +223,7 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
 
     private List<NetworkCraftingRecipe> GetVisibleRecipes()
     {
+        this.SyncSearchFromInput();
         var visible = this.recipes.AsEnumerable();
 
         if (this.showCraftableOnly)
@@ -278,6 +271,12 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
     private void ResetScroll()
     {
         this.recipeGrid.ResetScroll();
+    }
+
+    private void SyncSearchFromInput()
+    {
+        if (SVSAPMenuWidgets.SyncSearchText(this.searchInput, ref this.search))
+            this.ResetScroll();
     }
 
     private void DrawHoverTooltip(SpriteBatch b, IReadOnlyList<NetworkCraftingRecipe> visible)

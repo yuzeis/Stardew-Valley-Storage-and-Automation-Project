@@ -1,6 +1,5 @@
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
-using Microsoft.Xna.Framework.Input;
 using SVSAP.Models;
 using SVSAP.Services;
 using StardewValley;
@@ -64,6 +63,43 @@ internal static class SVSAPMenuWidgets
         b.DrawString(Game1.smallFont, searchText, new Vector2(bounds.X + 14, bounds.Y + 10), searchColor);
     }
 
+    public static TextBox CreateSearchTextBox(Rectangle bounds, string value)
+    {
+        var search = new TextBox(Game1.content.Load<Texture2D>("LooseSprites\\textBox"), Game1.staminaRect, Game1.smallFont, Game1.textColor)
+        {
+            X = bounds.X,
+            Y = bounds.Y,
+            Width = bounds.Width,
+            Height = bounds.Height,
+            Text = NormalizeSearchText(value),
+            Selected = true
+        };
+        search.textLimit = 40;
+        Game1.keyboardDispatcher.Subscriber = search;
+        return search;
+    }
+
+    public static bool SyncSearchText(TextBox searchInput, ref string value)
+    {
+        var normalized = NormalizeSearchText(searchInput.Text);
+        if (string.Equals(normalized, value, StringComparison.Ordinal))
+            return false;
+
+        value = normalized;
+        if (!string.Equals(searchInput.Text, normalized, StringComparison.Ordinal))
+            searchInput.Text = normalized;
+
+        return true;
+    }
+
+    public static void ReleaseSearchTextBox(TextBox searchInput)
+    {
+        if (Game1.keyboardDispatcher.Subscriber == searchInput)
+            Game1.keyboardDispatcher.Subscriber = null!;
+
+        searchInput.Selected = false;
+    }
+
     public static void DrawTab(SpriteBatch b, ClickableComponent button, bool selected)
     {
         DrawInsetBox(b, button.bounds, selected ? Color.LightGreen : Color.White);
@@ -83,12 +119,14 @@ internal static class SVSAPMenuWidgets
 
     public static void DrawTooltipBox(SpriteBatch b, int x, int y, string header, IReadOnlyList<string> lines)
     {
+        var maxContentWidth = Math.Min(560, Math.Max(64, Game1.uiViewport.Width - 48));
+        var displayLines = NormalizeTooltipLines(lines, maxContentWidth);
         var width = (int)Game1.smallFont.MeasureString(header).X;
-        foreach (var line in lines)
+        foreach (var line in displayLines)
             width = Math.Max(width, (int)Game1.smallFont.MeasureString(line).X);
 
         width = Math.Min(Game1.uiViewport.Width - 16, Math.Max(180, width + 32));
-        var height = 42 + lines.Count * 24;
+        var height = Math.Min(Math.Max(64, Game1.uiViewport.Height - 16), 42 + displayLines.Count * 24);
 
         if (x + width > Game1.uiViewport.Width)
             x = Game1.uiViewport.Width - width - 8;
@@ -99,8 +137,96 @@ internal static class SVSAPMenuWidgets
 
         DrawPanel(b, new Rectangle(x, y, width, height));
         Utility.drawTextWithShadow(b, header, Game1.smallFont, new Vector2(x + 16, y + 12), Game1.textColor);
-        for (var i = 0; i < lines.Count; i++)
-            b.DrawString(Game1.smallFont, lines[i], new Vector2(x + 16, y + 38 + i * 24), Game1.textColor);
+        for (var i = 0; i < displayLines.Count; i++)
+        {
+            var lineY = y + 38 + i * 24;
+            if (lineY + 20 > y + height - 8)
+                break;
+
+            b.DrawString(Game1.smallFont, displayLines[i], new Vector2(x + 16, lineY), Game1.textColor);
+        }
+    }
+
+    private static List<string> NormalizeTooltipLines(IReadOnlyList<string> lines, int maxWidth)
+    {
+        var result = new List<string>();
+        foreach (var line in lines)
+        {
+            var normalized = (line ?? string.Empty).Replace("\r\n", "\n").Replace('\r', '\n');
+            foreach (var segment in normalized.Split('\n'))
+                AddWrappedTooltipSegment(segment, maxWidth, result);
+        }
+
+        return result;
+    }
+
+    private static void AddWrappedTooltipSegment(string segment, int maxWidth, List<string> result)
+    {
+        if (string.IsNullOrWhiteSpace(segment))
+        {
+            result.Add(string.Empty);
+            return;
+        }
+
+        var words = segment.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (words.Length <= 1)
+        {
+            AddWrappedTooltipToken(segment, maxWidth, result);
+            return;
+        }
+
+        var current = string.Empty;
+        foreach (var word in words)
+        {
+            var candidate = current.Length == 0 ? word : current + " " + word;
+            if (Game1.smallFont.MeasureString(candidate).X <= maxWidth)
+            {
+                current = candidate;
+                continue;
+            }
+
+            if (current.Length > 0)
+                result.Add(current);
+
+            if (Game1.smallFont.MeasureString(word).X > maxWidth)
+            {
+                AddWrappedTooltipToken(word, maxWidth, result);
+                current = string.Empty;
+            }
+            else
+            {
+                current = word;
+            }
+        }
+
+        if (current.Length > 0)
+            result.Add(current);
+    }
+
+    private static void AddWrappedTooltipToken(string text, int maxWidth, List<string> result)
+    {
+        if (Game1.smallFont.MeasureString(text).X <= maxWidth)
+        {
+            result.Add(text);
+            return;
+        }
+
+        var current = string.Empty;
+        foreach (var ch in text)
+        {
+            var candidate = current + ch;
+            if (current.Length == 0 || Game1.smallFont.MeasureString(candidate).X <= maxWidth)
+            {
+                current = candidate;
+                continue;
+            }
+
+            result.Add(current);
+            current = ch.ToString();
+        }
+
+        if (current.Length > 0)
+            result.Add(current);
     }
 
     public static void DrawItemCount(SpriteBatch b, Rectangle cell, long count)
@@ -145,18 +271,14 @@ internal static class SVSAPMenuWidgets
         return (n / 1_000_000_000d).ToString("0.#") + "B";
     }
 
-    public static char? TryConvertKey(Keys key)
+    private static string NormalizeSearchText(string? value)
     {
-        if (key >= Keys.A && key <= Keys.Z)
-            return (char)('a' + (key - Keys.A));
+        var normalized = (value ?? string.Empty)
+            .Replace('\r', ' ')
+            .Replace('\n', ' ')
+            .Replace('\t', ' ');
 
-        if (key >= Keys.D0 && key <= Keys.D9)
-            return (char)('0' + (key - Keys.D0));
-
-        if (key >= Keys.NumPad0 && key <= Keys.NumPad9)
-            return (char)('0' + (key - Keys.NumPad0));
-
-        return key == Keys.Space ? ' ' : null;
+        return normalized.Length <= 40 ? normalized : normalized[..40];
     }
 
     public static Item? CreateIconItem(string qualifiedItemId, string serializedPrototype = "", int stack = 1)
@@ -293,17 +415,24 @@ internal sealed class SVSAPIconGrid<T> where T : class
 internal sealed class SVSAPBackpackGrid
 {
     public Rectangle Bounds { get; private set; }
+    public int Columns { get; private set; } = SVSAPMenuWidgets.BackpackColumns;
     public int Rows { get; private set; } = 1;
 
     public void SetBounds(Rectangle bounds)
     {
         this.Bounds = bounds;
-        this.Rows = Math.Max(1, (int)Math.Ceiling(Game1.player.Items.Count / (double)SVSAPMenuWidgets.BackpackColumns));
+        this.Columns = GetColumnCount(bounds.Width);
+        this.Rows = Math.Max(1, (int)Math.Ceiling(Game1.player.Items.Count / (double)this.Columns));
     }
 
-    public static int GetHeight()
+    public static int GetColumnCount(int availableWidth)
     {
-        return Math.Max(1, (int)Math.Ceiling(Game1.player.Items.Count / (double)SVSAPMenuWidgets.BackpackColumns))
+        return Math.Clamp(Math.Max(1, availableWidth / SVSAPMenuWidgets.Cell), 1, SVSAPMenuWidgets.BackpackColumns);
+    }
+
+    public static int GetHeight(int columns)
+    {
+        return Math.Max(1, (int)Math.Ceiling(Game1.player.Items.Count / (double)Math.Max(1, columns)))
             * SVSAPMenuWidgets.Cell;
     }
 
@@ -314,10 +443,10 @@ internal sealed class SVSAPBackpackGrid
 
         var c = (x - this.Bounds.X) / SVSAPMenuWidgets.Cell;
         var r = (y - this.Bounds.Y) / SVSAPMenuWidgets.Cell;
-        if (c < 0 || c >= SVSAPMenuWidgets.BackpackColumns || r < 0 || r >= this.Rows)
+        if (c < 0 || c >= this.Columns || r < 0 || r >= this.Rows)
             return -1;
 
-        var idx = r * SVSAPMenuWidgets.BackpackColumns + c;
+        var idx = r * this.Columns + c;
         return idx < Game1.player.Items.Count ? idx : -1;
     }
 
@@ -325,8 +454,8 @@ internal sealed class SVSAPBackpackGrid
     {
         for (var i = 0; i < Game1.player.Items.Count; i++)
         {
-            var r = i / SVSAPMenuWidgets.BackpackColumns;
-            var c = i % SVSAPMenuWidgets.BackpackColumns;
+            var r = i / this.Columns;
+            var c = i % this.Columns;
             var cell = new Rectangle(
                 this.Bounds.X + c * SVSAPMenuWidgets.Cell,
                 this.Bounds.Y + r * SVSAPMenuWidgets.Cell,

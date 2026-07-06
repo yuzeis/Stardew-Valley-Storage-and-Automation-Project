@@ -9,7 +9,7 @@ namespace SVSAP.UI;
 
 internal sealed class RemoteCraftingTerminalMenu : IClickableMenu
 {
-    private readonly Action<CraftingActionRequestMessage> sendCraftRequest;
+    private readonly Func<CraftingActionRequestMessage, bool> sendCraftRequest;
     private readonly Action<int, MaterialQualityStrategy> requestSnapshot;
     private CraftingSnapshotResponseMessage snapshot;
     private readonly List<ClickableComponent> amountButtons = new();
@@ -19,13 +19,16 @@ internal sealed class RemoteCraftingTerminalMenu : IClickableMenu
     private Rectangle searchBox;
     private Rectangle gridArea;
     private string search = string.Empty;
+    private readonly TextBox searchInput;
+    private readonly Dictionary<string, string> displayNameCache = new();
     private int batches;
     private bool showCraftableOnly;
     private MaterialQualityStrategy qualityStrategy;
+    private bool requestPending;
 
     public RemoteCraftingTerminalMenu(
         CraftingSnapshotResponseMessage snapshot,
-        Action<CraftingActionRequestMessage> sendCraftRequest,
+        Func<CraftingActionRequestMessage, bool> sendCraftRequest,
         Action<int, MaterialQualityStrategy> requestSnapshot)
         : base(
             x: Math.Max(0, (Game1.uiViewport.Width - 980) / 2),
@@ -40,6 +43,7 @@ internal sealed class RemoteCraftingTerminalMenu : IClickableMenu
         this.batches = Math.Max(1, snapshot.Batches);
         this.qualityStrategy = snapshot.QualityStrategy;
         this.BuildLayout();
+        this.searchInput = SVSAPMenuWidgets.CreateSearchTextBox(this.searchBox, this.search);
         SVSAPMenuWidgets.PositionCloseButton(this.upperRightCloseButton, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
     }
 
@@ -88,11 +92,21 @@ internal sealed class RemoteCraftingTerminalMenu : IClickableMenu
         this.snapshot = updatedSnapshot;
         this.batches = Math.Max(1, updatedSnapshot.Batches);
         this.qualityStrategy = updatedSnapshot.QualityStrategy;
+        this.requestPending = false;
+        this.displayNameCache.Clear();
         this.recipeGrid.ClampScroll(this.GetVisibleRecipes().Count);
+    }
+
+    public void MarkActionComplete(CraftingSnapshotResponseMessage? updatedSnapshot)
+    {
+        this.requestPending = false;
+        if (updatedSnapshot is not null && updatedSnapshot.Success)
+            this.ApplySnapshot(updatedSnapshot);
     }
 
     public override void draw(SpriteBatch b)
     {
+        this.SyncSearchFromInput();
         SVSAPMenuWidgets.DrawPanel(b, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
 
         var visible = this.GetVisibleRecipes();
@@ -107,6 +121,9 @@ internal sealed class RemoteCraftingTerminalMenu : IClickableMenu
             ModText.Format("remoteCraftingTerminal.summary", this.batches, this.GetQualityStrategyLabel()),
             new Vector2(this.searchBox.Right + 24, this.searchBox.Y + 10),
             Game1.textColor);
+
+        if (this.requestPending)
+            b.DrawString(Game1.smallFont, ModText.Get("remoteCrafting.pendingInline"), new Vector2(innerX, top + 36), Color.Firebrick);
 
         this.recipeGrid.Draw(
             b,
@@ -181,7 +198,14 @@ internal sealed class RemoteCraftingTerminalMenu : IClickableMenu
         if (recipe is null)
             return;
 
-        this.sendCraftRequest(new CraftingActionRequestMessage
+        if (this.requestPending)
+        {
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteCrafting.requestPending"), HUDMessage.error_type));
+            Game1.playSound("cancel");
+            return;
+        }
+
+        var sent = this.sendCraftRequest(new CraftingActionRequestMessage
         {
             TransactionId = Guid.NewGuid(),
             NetworkId = this.snapshot.NetworkId,
@@ -190,7 +214,8 @@ internal sealed class RemoteCraftingTerminalMenu : IClickableMenu
             Batches = this.batches,
             QualityStrategy = this.qualityStrategy
         });
-        Game1.playSound("smallSelect");
+        this.requestPending = sent;
+        Game1.playSound(sent ? "smallSelect" : "cancel");
     }
 
     public override void receiveKeyPress(Keys key)
@@ -201,25 +226,14 @@ internal sealed class RemoteCraftingTerminalMenu : IClickableMenu
             return;
         }
 
-        if (key == Keys.Back)
-        {
-            if (this.search.Length > 0)
-            {
-                this.search = this.search[..^1];
-                this.ResetScroll();
-            }
-            return;
-        }
-
-        var typed = SVSAPMenuWidgets.TryConvertKey(key);
-        if (typed is not null && this.search.Length < 40)
-        {
-            this.search += typed.Value;
-            this.ResetScroll();
-            return;
-        }
-
+        this.SyncSearchFromInput();
         base.receiveKeyPress(key);
+    }
+
+    protected override void cleanupBeforeExit()
+    {
+        SVSAPMenuWidgets.ReleaseSearchTextBox(this.searchInput);
+        base.cleanupBeforeExit();
     }
 
     public override void receiveScrollWheelAction(int direction)
@@ -231,6 +245,7 @@ internal sealed class RemoteCraftingTerminalMenu : IClickableMenu
 
     private List<RemoteCraftingRecipeMessage> GetVisibleRecipes()
     {
+        this.SyncSearchFromInput();
         var visible = this.snapshot.Recipes.AsEnumerable();
 
         if (this.showCraftableOnly)
@@ -238,12 +253,14 @@ internal sealed class RemoteCraftingTerminalMenu : IClickableMenu
 
         if (!string.IsNullOrWhiteSpace(this.search))
         {
-            visible = visible.Where(recipe => recipe.DisplayName.Contains(this.search, StringComparison.CurrentCultureIgnoreCase)
+            visible = visible.Where(recipe => this.GetRecipeDisplayName(recipe).Contains(this.search, StringComparison.CurrentCultureIgnoreCase)
                 || recipe.Name.Contains(this.search, StringComparison.OrdinalIgnoreCase)
                 || recipe.OutputQualifiedItemId.Contains(this.search, StringComparison.OrdinalIgnoreCase));
         }
 
-        return visible.ToList();
+        return visible
+            .OrderBy(this.GetRecipeDisplayName, StringComparer.CurrentCultureIgnoreCase)
+            .ToList();
     }
 
     private string GetQualityStrategyLabel()
@@ -261,6 +278,26 @@ internal sealed class RemoteCraftingTerminalMenu : IClickableMenu
         this.recipeGrid.ResetScroll();
     }
 
+    private void SyncSearchFromInput()
+    {
+        if (SVSAPMenuWidgets.SyncSearchText(this.searchInput, ref this.search))
+            this.ResetScroll();
+    }
+
+    private string GetRecipeDisplayName(RemoteCraftingRecipeMessage recipe)
+    {
+        var cacheKey = string.IsNullOrWhiteSpace(recipe.OutputSerializedItemPrototype)
+            ? recipe.OutputQualifiedItemId
+            : recipe.OutputSerializedItemPrototype;
+        if (this.displayNameCache.TryGetValue(cacheKey, out var cached))
+            return cached;
+
+        var item = SVSAPMenuWidgets.CreateIconItem(recipe.OutputQualifiedItemId, recipe.OutputSerializedItemPrototype, recipe.OutputCount);
+        var value = item?.DisplayName ?? recipe.OutputQualifiedItemId;
+        this.displayNameCache[cacheKey] = value;
+        return value;
+    }
+
     private void DrawHoverTooltip(SpriteBatch b, IReadOnlyList<RemoteCraftingRecipeMessage> visible)
     {
         var mx = Game1.getMouseX();
@@ -274,8 +311,9 @@ internal sealed class RemoteCraftingTerminalMenu : IClickableMenu
             ModText.Format("craftingTerminal.tooltip.output", recipe.OutputCount * this.batches),
             recipe.CanCraft ? ModText.Get("craftingTerminal.tooltip.ready") : ModText.Get("craftingTerminal.tooltip.missing")
         };
-        lines.AddRange(recipe.MissingLines.Take(6));
+        if (recipe.MissingIngredients.Count > 0)
+            lines.AddRange(recipe.MissingIngredients.Take(6).Select(ingredient => ingredient.ToDisplayLine()));
 
-        SVSAPMenuWidgets.DrawTooltipBox(b, mx + 28, my + 28, recipe.DisplayName, lines);
+        SVSAPMenuWidgets.DrawTooltipBox(b, mx + 28, my + 28, this.GetRecipeDisplayName(recipe), lines);
     }
 }

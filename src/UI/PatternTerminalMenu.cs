@@ -17,6 +17,7 @@ internal sealed class PatternTerminalMenu : IClickableMenu
     private Rectangle searchBox;
     private Rectangle gridArea;
     private string search = string.Empty;
+    private readonly TextBox searchInput;
 
     public PatternTerminalMenu(PatternEncodingService patternEncodingService)
         : base(
@@ -28,6 +29,7 @@ internal sealed class PatternTerminalMenu : IClickableMenu
     {
         this.patternEncodingService = patternEncodingService;
         this.BuildLayout();
+        this.searchInput = SVSAPMenuWidgets.CreateSearchTextBox(this.searchBox, this.search);
         SVSAPMenuWidgets.PositionCloseButton(this.upperRightCloseButton, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
     }
 
@@ -50,6 +52,7 @@ internal sealed class PatternTerminalMenu : IClickableMenu
 
     public override void draw(SpriteBatch b)
     {
+        this.SyncSearchFromInput();
         SVSAPMenuWidgets.DrawPanel(b, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
 
         var patterns = this.GetVisiblePatterns();
@@ -125,25 +128,14 @@ internal sealed class PatternTerminalMenu : IClickableMenu
             return;
         }
 
-        if (key == Keys.Back)
-        {
-            if (this.search.Length > 0)
-            {
-                this.search = this.search[..^1];
-                this.ResetScroll();
-            }
-            return;
-        }
-
-        var typed = SVSAPMenuWidgets.TryConvertKey(key);
-        if (typed is not null && this.search.Length < 40)
-        {
-            this.search += typed.Value;
-            this.ResetScroll();
-            return;
-        }
-
+        this.SyncSearchFromInput();
         base.receiveKeyPress(key);
+    }
+
+    protected override void cleanupBeforeExit()
+    {
+        SVSAPMenuWidgets.ReleaseSearchTextBox(this.searchInput);
+        base.cleanupBeforeExit();
     }
 
     public override void receiveScrollWheelAction(int direction)
@@ -155,6 +147,7 @@ internal sealed class PatternTerminalMenu : IClickableMenu
 
     private List<PatternData> GetVisiblePatterns()
     {
+        this.SyncSearchFromInput();
         var patterns = this.mode == PatternKind.Crafting
             ? this.patternEncodingService.GetCraftingPatterns()
             : this.patternEncodingService.GetProcessingPatterns();
@@ -172,6 +165,12 @@ internal sealed class PatternTerminalMenu : IClickableMenu
     private void ResetScroll()
     {
         this.patternGrid.ResetScroll();
+    }
+
+    private void SyncSearchFromInput()
+    {
+        if (SVSAPMenuWidgets.SyncSearchText(this.searchInput, ref this.search))
+            this.ResetScroll();
     }
 
     private void DrawHoverTooltip(SpriteBatch b, IReadOnlyList<PatternData> patterns)

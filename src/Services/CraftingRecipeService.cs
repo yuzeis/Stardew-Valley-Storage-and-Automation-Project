@@ -58,11 +58,30 @@ internal sealed class CraftingRecipeService
     public CraftingAvailability GetAvailability(NetworkData network, NetworkCraftingRecipe recipe, int batches, MaterialQualityStrategy qualityStrategy = MaterialQualityStrategy.LowQualityFirst)
     {
         var requests = Scale(recipe.Ingredients, batches);
-        var canCraft = this.transactionService.HasIngredients(network, requests, out var missing, qualityStrategy: qualityStrategy, autoConsumableOnly: true);
+        var missing = new List<CraftingMissingIngredient>();
+        foreach (var request in requests)
+        {
+            var available = this.transactionService.GetUnreservedCount(
+                network,
+                request,
+                qualityStrategy: qualityStrategy,
+                autoConsumableOnly: true);
+            if (available < request.Count)
+            {
+                missing.Add(new CraftingMissingIngredient
+                {
+                    Request = request,
+                    AvailableCount = available,
+                    RequiredCount = request.Count
+                });
+            }
+        }
+
         return new CraftingAvailability
         {
-            CanCraft = canCraft,
-            MissingLines = missing
+            CanCraft = missing.Count == 0,
+            MissingIngredients = missing,
+            MissingLines = missing.Select(line => line.ToDisplayLine()).ToList()
         };
     }
 

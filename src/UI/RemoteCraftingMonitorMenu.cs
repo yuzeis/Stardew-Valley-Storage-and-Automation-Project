@@ -11,7 +11,7 @@ namespace SVSAP.UI;
 internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
 {
     private CraftingMonitorSnapshotResponseMessage snapshot;
-    private readonly Action<CraftingMonitorActionRequestMessage> sendRequest;
+    private readonly Func<CraftingMonitorActionRequestMessage, bool> sendRequest;
     private readonly Action<Guid, Guid> requestSnapshot;
     private readonly List<ClickableComponent> amountButtons = new();
     private readonly List<ClickableComponent> cancelButtons = new();
@@ -24,10 +24,11 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
     private int jobScrollOffset;
     private int pipelineScrollOffset;
     private bool longJobConfirmationArmed;
+    private bool requestPending;
 
     public RemoteCraftingMonitorMenu(
         CraftingMonitorSnapshotResponseMessage snapshot,
-        Action<CraftingMonitorActionRequestMessage> sendRequest,
+        Func<CraftingMonitorActionRequestMessage, bool> sendRequest,
         Action<Guid, Guid> requestSnapshot)
         : base(
             x: Math.Max(0, (Game1.uiViewport.Width - 980) / 2),
@@ -83,7 +84,15 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
         }
 
         this.snapshot = updated;
+        this.requestPending = false;
         this.ClampScrolls();
+    }
+
+    public void MarkActionComplete(CraftingMonitorSnapshotResponseMessage? updated)
+    {
+        this.requestPending = false;
+        if (updated is not null && updated.Success)
+            this.ApplySnapshot(updated);
     }
 
     public void ApplyActionResult(CraftingMonitorActionResponseMessage response)
@@ -100,6 +109,8 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
         var pipelines = this.snapshot.Pipelines;
         var title = ModText.Format("remoteCraftingMonitor.title", this.snapshot.NetworkName, jobs.Count, pipelines.Count);
         b.DrawString(Game1.dialogueFont, title, new Vector2(this.xPositionOnScreen + 48, this.yPositionOnScreen + 32), Game1.textColor);
+        if (this.requestPending)
+            b.DrawString(Game1.smallFont, ModText.Get("remoteMonitor.pendingInline"), new Vector2(this.xPositionOnScreen + 48, this.yPositionOnScreen + 66), Color.Firebrick);
 
         var y = this.yPositionOnScreen + 86;
         this.cancelButtons.Clear();
@@ -117,7 +128,7 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
                 CraftingJobState.Cancelled => Color.DarkSlateGray,
                 _ => Game1.textColor
             };
-            var detail = $"{job.DisplayName}  {FormatJobState(job.State)}{FormatCpuSlot(job)}{FormatNodeCount(job)}{FormatReservations(job)}  {job.CompletedCount:N0}/{job.RequestedCount:N0}  {job.StatusMessage}";
+            var detail = $"{GetJobDisplayName(job)}  {FormatJobState(job.State)}{FormatCpuSlot(job)}{FormatNodeCount(job)}{FormatReservations(job)}  {job.CompletedCount:N0}/{job.RequestedCount:N0}";
             b.DrawString(Game1.smallFont, TrimTo(detail, 94), new Vector2(this.xPositionOnScreen + 64, y), color);
 
             if (job.CanCancel)
@@ -155,7 +166,7 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
                 var status = pipeline.Enabled ? ModText.Get("craftingMonitor.state.on") : ModText.Get("craftingMonitor.state.off");
                 var target = pipeline.TargetKeep > 0 ? pipeline.TargetKeep.ToString("N0") : ModText.Get("craftingMonitor.unlimited");
                 var mode = pipeline.Mode == ProductionPipelineMode.CaskAging ? ModText.Get("craftingMonitor.mode.cask") : ModText.Get("craftingMonitor.mode.processing");
-                var line = ModText.Format("remoteCraftingMonitor.pipelineLine", status, mode, pipeline.DisplayName, pipeline.Priority, target, pipeline.ItemsPerCycle, pipeline.StatusMessage);
+                var line = ModText.Format("remoteCraftingMonitor.pipelineLine", status, mode, GetPipelineDisplayName(pipeline), pipeline.Priority, target, pipeline.ItemsPerCycle, FormatPipelineStatus(pipeline));
                 b.DrawString(Game1.smallFont, TrimTo(line, 56), new Vector2(this.xPositionOnScreen + 64, y), color);
 
                 var buttonX = this.xPositionOnScreen + this.width - 380;
@@ -207,7 +218,7 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
         }
         else if (this.HasCaskPipelineItem())
         {
-            var caskText = ModText.Format("craftingMonitor.caskLine", this.snapshot.CaskPipelineItemDisplayName);
+            var caskText = ModText.Format("craftingMonitor.caskLine", this.GetCaskPipelineItemDisplayName());
             b.DrawString(Game1.smallFont, TrimTo(caskText, 70), new Vector2(this.xPositionOnScreen + 56, this.yPositionOnScreen + this.height - 112), Game1.textColor);
             this.DrawBottomButton(b, this.caskPipelineButton);
         }
@@ -244,7 +255,7 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
             if (this.HasCaskPipelineItem() && this.caskPipelineButton.containsPoint(x, y))
             {
                 this.longJobConfirmationArmed = false;
-                this.sendRequest(new CraftingMonitorActionRequestMessage
+                this.SendMutation(new CraftingMonitorActionRequestMessage
                 {
                     TransactionId = Guid.NewGuid(),
                     NetworkId = this.snapshot.NetworkId,
@@ -253,14 +264,13 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
                     QueuePattern = this.snapshot.QueuePattern,
                     CaskPipelineItemPrototype = this.snapshot.CaskPipelineItemPrototype
                 });
-                Game1.playSound("smallSelect");
                 return;
             }
 
             if (this.HasProcessingQueuePattern() && this.pipelineToggleButton.containsPoint(x, y))
             {
                 this.longJobConfirmationArmed = false;
-                this.sendRequest(new CraftingMonitorActionRequestMessage
+                this.SendMutation(new CraftingMonitorActionRequestMessage
                 {
                     TransactionId = Guid.NewGuid(),
                     NetworkId = this.snapshot.NetworkId,
@@ -269,13 +279,12 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
                     QueuePattern = this.snapshot.QueuePattern,
                     CaskPipelineItemPrototype = this.snapshot.CaskPipelineItemPrototype
                 });
-                Game1.playSound("smallSelect");
                 return;
             }
 
             if (this.queueButton.containsPoint(x, y))
             {
-                this.sendRequest(new CraftingMonitorActionRequestMessage
+                this.SendMutation(new CraftingMonitorActionRequestMessage
                 {
                     TransactionId = Guid.NewGuid(),
                     NetworkId = this.snapshot.NetworkId,
@@ -286,14 +295,13 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
                     Batches = Math.Max(1, this.queueAmount),
                     ConfirmLongJob = this.longJobConfirmationArmed
                 });
-                Game1.playSound("smallSelect");
                 return;
             }
         }
         else if (this.HasCaskPipelineItem() && this.caskPipelineButton.containsPoint(x, y))
         {
             this.longJobConfirmationArmed = false;
-            this.sendRequest(new CraftingMonitorActionRequestMessage
+            this.SendMutation(new CraftingMonitorActionRequestMessage
             {
                 TransactionId = Guid.NewGuid(),
                 NetworkId = this.snapshot.NetworkId,
@@ -301,7 +309,6 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
                 Action = CraftingMonitorActionKind.ToggleCaskPipeline,
                 CaskPipelineItemPrototype = this.snapshot.CaskPipelineItemPrototype
             });
-            Game1.playSound("smallSelect");
             return;
         }
 
@@ -312,7 +319,7 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
 
             if (Guid.TryParse(button.name, out var jobId))
             {
-                this.sendRequest(new CraftingMonitorActionRequestMessage
+                this.SendMutation(new CraftingMonitorActionRequestMessage
                 {
                     TransactionId = Guid.NewGuid(),
                     NetworkId = this.snapshot.NetworkId,
@@ -322,7 +329,6 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
                     QueuePattern = this.snapshot.QueuePattern,
                     CaskPipelineItemPrototype = this.snapshot.CaskPipelineItemPrototype
                 });
-                Game1.playSound("smallSelect");
             }
             return;
         }
@@ -335,7 +341,7 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
             var parts = button.name.Split('|');
             if (parts.Length == 2 && Guid.TryParse(parts[1], out var pipelineId))
             {
-                this.sendRequest(new CraftingMonitorActionRequestMessage
+                this.SendMutation(new CraftingMonitorActionRequestMessage
                 {
                     TransactionId = Guid.NewGuid(),
                     NetworkId = this.snapshot.NetworkId,
@@ -346,10 +352,24 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
                     QueuePattern = this.snapshot.QueuePattern,
                     CaskPipelineItemPrototype = this.snapshot.CaskPipelineItemPrototype
                 });
-                Game1.playSound("smallSelect");
             }
             return;
         }
+    }
+
+    private bool SendMutation(CraftingMonitorActionRequestMessage request)
+    {
+        if (this.requestPending)
+        {
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteMonitor.requestPending"), HUDMessage.error_type));
+            Game1.playSound("cancel");
+            return false;
+        }
+
+        var sent = this.sendRequest(request);
+        this.requestPending = sent;
+        Game1.playSound(sent ? "smallSelect" : "cancel");
+        return sent;
     }
 
     public override void receiveKeyPress(Keys key)
@@ -388,13 +408,45 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
         return this.snapshot.QueuePattern is not null || this.HasCaskPipelineItem();
     }
 
+    private static string GetJobDisplayName(RemoteCraftingJobMessage job)
+    {
+        return job.Pattern is not null
+            ? PatternDisplayNames.Get(job.Pattern)
+            : job.JobId.ToString("N").Substring(0, 8);
+    }
+
+    private static string GetPipelineDisplayName(RemoteProductionPipelineMessage pipeline)
+    {
+        return pipeline.Pattern is not null
+            ? PatternDisplayNames.Get(pipeline.Pattern)
+            : pipeline.PipelineId.ToString("N").Substring(0, 8);
+    }
+
+    private string GetCaskPipelineItemDisplayName()
+    {
+        var item = SVSAPMenuWidgets.CreateIconItem(string.Empty, this.snapshot.CaskPipelineItemPrototype);
+        return item?.DisplayName ?? ModText.Get("common.none");
+    }
+
+    private static string FormatPipelineStatus(RemoteProductionPipelineMessage pipeline)
+    {
+        if (!pipeline.Enabled)
+            return ModText.Get("pipeline.status.disabled");
+
+        if (pipeline.TargetKeep > 0)
+            return ModText.Format("pipeline.status.targetKeep", pipeline.TargetKeep);
+
+        return ModText.Get("pipeline.status.enabled");
+    }
+
     private static bool SameQueuePattern(PatternData? left, PatternData? right)
     {
         if (left is null || right is null)
             return left is null && right is null;
 
         return left.Kind == right.Kind
-            && string.Equals(left.DisplayName, right.DisplayName, StringComparison.Ordinal)
+            && string.Equals(left.DisplayNameKey, right.DisplayNameKey, StringComparison.Ordinal)
+            && left.DisplayNameArguments.SequenceEqual(right.DisplayNameArguments, StringComparer.Ordinal)
             && string.Equals(left.MachineQualifiedItemId, right.MachineQualifiedItemId, StringComparison.Ordinal);
     }
 

@@ -2,6 +2,7 @@ using System.Reflection;
 using Microsoft.Xna.Framework;
 using SVSAP.Content;
 using SVSAP.Models;
+using SVSAP.UI;
 using StardewModdingAPI;
 using StardewValley;
 using SObject = StardewValley.Object;
@@ -50,6 +51,9 @@ internal sealed class RuntimeSelfTestService
         var tests = new (string Name, Action Body)[]
         {
             ("storage-cell-roundtrip", this.TestStorageCellRoundTrip),
+            ("storage-cell-stack-guard", this.TestStorageCellStackGuard),
+            ("storage-cell-network-guard", this.TestStorageCellNetworkGuard),
+            ("storage-cell-stack-normalize", this.TestStorageCellStackNormalize),
             ("deposit-route-and-extract", this.TestDepositRouteAndExtract),
             ("wal-snapshot-recovery", this.TestWalSnapshotRecovery),
             ("preserved-parent-output", this.TestPreservedParentOutputMatch),
@@ -59,8 +63,14 @@ internal sealed class RuntimeSelfTestService
             ("v1-processing-catalog-scope", this.TestV1ProcessingCatalogScope),
             ("farmhand-hard-block", this.TestFarmhandHardBlock),
             ("remote-action-response-cache", this.TestRemoteActionResponseCache),
+            ("remote-terminal-payload-escrow", this.TestRemoteTerminalPayloadEscrow),
+            ("remote-snapshot-paging-contract", this.TestRemoteSnapshotPagingContract),
+            ("remote-localized-snapshot-contract", this.TestRemoteLocalizedSnapshotContract),
+            ("search-textbox-contract", this.TestSearchTextBoxContract),
             ("crafting-terminal-contention-no-dupe", this.TestCraftingTerminalContentionNoDupe),
             ("remote-lock-targets-request-item", this.TestRemoteLockTargetsRequestItem),
+            ("terminal-slot-lock-guard", this.TestTerminalSlotLockGuard),
+            ("persistent-state-network-guard", this.TestPersistentStateNetworkGuard),
             ("structural-kernel-no-inventory-side-effects", this.TestStructuralKernelNoInventorySideEffects),
             ("structural-request-idempotent", this.TestStructuralRequestIdempotent),
             ("structural-host-failure-response", this.TestStructuralHostFailureResponse),
@@ -100,6 +110,50 @@ internal sealed class RuntimeSelfTestService
         Assert(data.CapacityMax == StorageCellTierInfo.GetCapacity(StorageCellTier.OneK), "cell capacity must survive round-trip");
         Assert(data.Items.Count == 1 && data.Items[0].Count == 37, "stored stack count must survive round-trip");
         Assert(data.CapacityUsed == StorageCellTierInfo.CalculateUsedBytes(data.Items), "cell capacity used must be SVSAP byte usage");
+    }
+
+    private void TestStorageCellStackGuard()
+    {
+        var filled = StorageCellCodec.CreateItem(this.CreateStorageCellSlot(StorageCellTier.OneK, 0, ("(O)388", 37)));
+        var empty = ItemRegistry.Create(GetStorageCellQualifiedItemId(StorageCellTier.OneK));
+        this.storageCellInitializer.EnsureCellData(empty);
+
+        Assert(!StorageCellStackingPatch.CanStackPreservingCellState(filled, empty), "SVSAP storage cells must never stack with each other");
+        Assert(!filled.canStackWith(empty) && !empty.canStackWith(filled), "Harmony canStackWith guard must reject storage-cell merges both ways");
+    }
+
+    private void TestStorageCellNetworkGuard()
+    {
+        var network = this.CreateTemporaryNetwork(out var networkId);
+        try
+        {
+            var cell = ItemRegistry.Create(GetStorageCellQualifiedItemId(StorageCellTier.OneK));
+            this.storageCellInitializer.EnsureCellData(cell);
+            Assert(!this.transactionService.CanDepositPlayerItem(network, cell, out var message), "storage cells must not enter normal network storage");
+            Assert(message == ModText.Get("terminal.depositBlocked.storageCell"), "storage-cell network rejection should use a specific player-facing reason");
+        }
+        finally
+        {
+            this.CleanupTemporaryNetwork(networkId);
+        }
+    }
+
+    private void TestStorageCellStackNormalize()
+    {
+        var stacked = StorageCellCodec.CreateItem(this.CreateStorageCellSlot(StorageCellTier.OneK, 0, ("(O)388", 37)));
+        stacked.Stack = 2;
+        var items = new List<Item?> { stacked, null, null };
+
+        this.storageCellInitializer.InitializeInventory(items);
+
+        var cells = items.Where(item => item is not null && ModItemCatalog.TryGetStorageCellTier(item!.QualifiedItemId, out _)).Cast<Item>().ToList();
+        Assert(cells.Count == 2, "stack normalization must split a two-cell stack into two physical cell items");
+        Assert(cells.All(cell => cell.Stack == 1), "normalized storage cells must each have stack size one");
+        Assert(StorageCellCodec.TryReadCellData(cells[0], out var firstData), "first split cell must retain readable data");
+        Assert(StorageCellCodec.TryReadCellData(cells[1], out var secondData), "second split cell must contain readable data");
+        Assert(firstData.Items.Sum(stack => stack.Count) == 37, "first split cell must keep the original stored contents");
+        Assert(secondData.Items.Sum(stack => stack.Count) == 0, "extra split cells must become empty instead of duplicating contents");
+        Assert(firstData.CellId != secondData.CellId, "split cells must have unique cell identities");
     }
 
     private void TestDepositRouteAndExtract()
@@ -493,6 +547,116 @@ internal sealed class RuntimeSelfTestService
         }
     }
 
+    private void TestRemoteTerminalPayloadEscrow()
+    {
+        var requestType = typeof(TerminalActionRequestMessage);
+        var responseType = typeof(TerminalActionResponseMessage);
+        Assert(requestType.GetProperty(nameof(TerminalActionRequestMessage.DepositItems)) is not null, "terminal requests must carry serialized deposit payloads");
+        Assert(responseType.GetProperty(nameof(TerminalActionResponseMessage.ReturnedDepositItems)) is not null, "terminal responses must carry returned deposit payloads");
+        Assert(typeof(RemoteNetworkTerminalMenu).GetMethod("CaptureDepositSlot", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "remote terminal UI must locally escrow slot deposits");
+        Assert(typeof(RemoteNetworkTerminalMenu).GetMethod("CaptureDepositBatch", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "remote terminal UI must locally escrow batch deposits");
+        Assert(typeof(NetworkInteractionService).GetField("pendingTerminalDepositItems", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "client service must track pending terminal deposit escrow");
+        Assert(typeof(NetworkInteractionService).GetMethod("CreateTerminalFailureResponse", BindingFlags.Static | BindingFlags.NonPublic) is not null, "host terminal failure path must be able to return deposit escrow payloads");
+        Assert(typeof(NetworkInteractionService).GetMethod("TryTakeHostStructuralHeldItem", BindingFlags.Instance | BindingFlags.NonPublic) is null, "host must not consume farmhand inventory copies for structural actions");
+
+        var beforeInventory = SnapshotPlayerInventory();
+        var network = this.CreateTemporaryNetwork(out var networkId);
+        try
+        {
+            var drive = network.StorageDrives.Values.Single();
+            drive.Slots.Add(this.CreateStorageCellSlot(StorageCellTier.OneK, 0));
+
+            var woodPrototype = ItemRegistry.Create("(O)388");
+            woodPrototype.Stack = 1;
+            var depositRequest = new TerminalActionRequestMessage
+            {
+                TransactionId = Guid.NewGuid(),
+                NetworkId = networkId,
+                Action = TerminalActionKind.DepositAll,
+                DepositItems = new List<TerminalItemPayloadMessage>
+                {
+                    new()
+                    {
+                        SerializedItem = SerializedItemCodec.SerializePrototype(woodPrototype),
+                        Count = 7
+                    }
+                }
+            };
+            var depositResponse = new TerminalActionResponseMessage();
+
+            Assert(this.InvokeRemoteTerminalDepositPayloads(network, depositRequest, depositResponse, out var depositMessage), $"payload deposit must succeed: {depositMessage}");
+            Assert(depositResponse.ReturnedDepositItems.Count == 0, "successful full payload deposit must not return escrow leftovers");
+            Assert(this.ReadCell(drive.Slots.Single()).Items.Single().Count == 7, "payload deposit must move the serialized item into network storage");
+            AssertInventoryUnchanged(beforeInventory, "host-side payload deposit must not mutate Game1.player inventory");
+
+            var withdrawRequest = new TerminalActionRequestMessage
+            {
+                TransactionId = Guid.NewGuid(),
+                NetworkId = networkId,
+                Action = TerminalActionKind.Withdraw,
+                ItemKey = ItemKeyFactory.FromItem(woodPrototype),
+                Amount = 3
+            };
+            var withdrawResponse = new TerminalActionResponseMessage();
+            Assert(this.InvokeRemoteTerminalWithdraw(network, withdrawRequest, withdrawResponse, out var withdrawMessage), $"payload withdraw must succeed: {withdrawMessage}");
+            Assert(!string.IsNullOrWhiteSpace(withdrawResponse.ReturnedSerializedItem), "remote withdraw must return a serialized item payload");
+            Assert(withdrawResponse.ReturnedCount == 3, "remote withdraw response must return the extracted count");
+            Assert(this.ReadCell(drive.Slots.Single()).Items.Single().Count == 4, "remote withdraw must deduct only the host network storage");
+            AssertInventoryUnchanged(beforeInventory, "host-side withdraw must not add items to Game1.player inventory");
+
+            var badRequest = new TerminalActionRequestMessage
+            {
+                TransactionId = Guid.NewGuid(),
+                NetworkId = networkId,
+                Action = TerminalActionKind.DepositAll,
+                DepositItems = new List<TerminalItemPayloadMessage>
+                {
+                    new() { SerializedItem = string.Empty, Count = 1 }
+                }
+            };
+            var badResponse = new TerminalActionResponseMessage();
+            Assert(!this.InvokeRemoteTerminalDepositPayloads(network, badRequest, badResponse, out _), "malformed payload deposit must fail");
+            Assert(badResponse.ReturnedDepositItems.Count == 1, "malformed payload deposit must return the escrow payload for client restoration");
+            AssertInventoryUnchanged(beforeInventory, "malformed payload handling must not mutate Game1.player inventory");
+        }
+        finally
+        {
+            this.CleanupTemporaryNetwork(networkId);
+        }
+    }
+
+    private void TestRemoteSnapshotPagingContract()
+    {
+        Assert(typeof(TerminalSnapshotRequestMessage).GetProperty(nameof(TerminalSnapshotRequestMessage.EntryOffset)) is not null, "terminal snapshot requests must carry a page offset");
+        Assert(typeof(TerminalSnapshotRequestMessage).GetProperty(nameof(TerminalSnapshotRequestMessage.EntryLimit)) is not null, "terminal snapshot requests must carry a bounded page size");
+        Assert(typeof(TerminalSnapshotResponseMessage).GetProperty(nameof(TerminalSnapshotResponseMessage.TotalEntryCount)) is not null, "terminal snapshot responses must report total entries");
+        Assert(typeof(TerminalSnapshotResponseMessage).GetProperty(nameof(TerminalSnapshotResponseMessage.Truncated)) is not null, "terminal snapshot responses must report truncation");
+        Assert(NetworkInteractionService.NormalizeTerminalSnapshotEntryLimit(0) == 512, "remote terminal snapshots must default to a bounded page size");
+        Assert(NetworkInteractionService.NormalizeTerminalSnapshotEntryLimit(2000) == 1024, "remote terminal snapshots must clamp oversized page requests");
+        Assert(typeof(RemoteNetworkTerminalMenu).GetMethod("RequestPage", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "remote terminal UI must expose page navigation over bounded snapshots");
+    }
+
+    private void TestRemoteLocalizedSnapshotContract()
+    {
+        Assert(typeof(RemoteCraftingRecipeMessage).GetProperty(nameof(RemoteCraftingRecipeMessage.MissingIngredients)) is not null, "remote crafting recipes must carry structured missing ingredients for client-local rendering");
+        Assert(typeof(RemoteCraftingJobMessage).GetProperty(nameof(RemoteCraftingJobMessage.Pattern)) is not null, "remote monitor jobs must carry pattern data for client-local names");
+        Assert(typeof(RemoteProductionPipelineMessage).GetProperty(nameof(RemoteProductionPipelineMessage.Pattern)) is not null, "remote monitor pipelines must carry pattern data for client-local names");
+        Assert(typeof(RemoteCraftingTerminalMenu).GetMethod("GetRecipeDisplayName", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "remote crafting UI must derive recipe names on the client");
+        Assert(typeof(RemoteCraftingMonitorMenu).GetMethod("GetJobDisplayName", BindingFlags.Static | BindingFlags.NonPublic) is not null, "remote monitor UI must derive job names on the client");
+        Assert(typeof(RemoteCraftingMonitorMenu).GetMethod("FormatPipelineStatus", BindingFlags.Static | BindingFlags.NonPublic) is not null, "remote monitor UI must derive pipeline status on the client");
+    }
+
+    private void TestSearchTextBoxContract()
+    {
+        Assert(typeof(SVSAPMenuWidgets).GetMethod(nameof(SVSAPMenuWidgets.CreateSearchTextBox)) is not null, "search boxes must use Stardew TextBox input for IME text");
+        Assert(typeof(SVSAPMenuWidgets).GetMethod(nameof(SVSAPMenuWidgets.SyncSearchText)) is not null, "search boxes must synchronize TextBox text into menu filters");
+        Assert(typeof(NetworkTerminalMenu).GetField("searchInput", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "network terminal search must use TextBox input");
+        Assert(typeof(CraftingTerminalMenu).GetField("searchInput", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "crafting terminal search must use TextBox input");
+        Assert(typeof(PatternTerminalMenu).GetField("searchInput", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "pattern terminal search must use TextBox input");
+        Assert(typeof(RemoteNetworkTerminalMenu).GetField("searchInput", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "remote terminal search must use TextBox input");
+        Assert(typeof(RemoteCraftingTerminalMenu).GetField("searchInput", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "remote crafting search must use TextBox input");
+    }
+
     private void TestRemoteLockTargetsRequestItem()
     {
         var player = Game1.player ?? throw new InvalidOperationException("selftest requires a player");
@@ -521,6 +685,53 @@ internal sealed class RuntimeSelfTestService
         {
             player.Items[0] = originalSlot0;
             player.CurrentToolIndex = originalToolIndex;
+            this.CleanupTemporaryNetwork(networkId);
+        }
+    }
+
+    private void TestTerminalSlotLockGuard()
+    {
+        var player = Game1.player ?? throw new InvalidOperationException("selftest requires a player");
+        var originalSlot0 = player.Items[0];
+        var network = this.CreateTemporaryNetwork(out var networkId);
+        try
+        {
+            network.StorageDrives.Values.Single().Slots.Add(this.CreateStorageCellSlot(StorageCellTier.OneK, 0));
+            network.LockedQualifiedItemIds.Add("(O)388");
+            var wood = ItemRegistry.Create("(O)388");
+            wood.Stack = 3;
+            player.Items[0] = wood;
+
+            Assert(!this.transactionService.TryDepositPlayerSlot(network, player, 0, single: false, out var moved, out var message), "locked single-slot deposit must fail");
+            Assert(moved == 0, "locked single-slot deposit must not move items");
+            Assert(player.Items[0]?.Stack == 3, "locked single-slot deposit must preserve the player stack");
+            Assert(message == ModText.Get("terminal.depositBlocked.locked"), "locked single-slot deposit must report the lock reason");
+
+            network.LockedQualifiedItemIds.Clear();
+            Assert(this.transactionService.TryDepositPlayerSlot(network, player, 0, single: false, out moved, out message), $"unlocked single-slot deposit must succeed: {message}");
+            Assert(moved == 3 && player.Items[0] is null, "unlocked single-slot deposit must move the full stack");
+        }
+        finally
+        {
+            player.Items[0] = originalSlot0;
+            this.CleanupTemporaryNetwork(networkId);
+        }
+    }
+
+    private void TestPersistentStateNetworkGuard()
+    {
+        var item = ItemRegistry.Create("(O)388");
+        item.Stack = 1;
+        item.modData[ModItemCatalog.UniqueId + "/MachineGuid"] = Guid.NewGuid().ToString("N");
+        var network = this.CreateTemporaryNetwork(out var networkId);
+        try
+        {
+            network.StorageDrives.Values.Single().Slots.Add(this.CreateStorageCellSlot(StorageCellTier.OneK, 0));
+            Assert(!this.transactionService.TryDepositItem(network, item, out var moved), "persistent-state item must not enter SVSAP network storage");
+            Assert(moved == 0 && item.Stack == 1, "persistent-state rejection must preserve the source item");
+        }
+        finally
+        {
             this.CleanupTemporaryNetwork(networkId);
         }
     }
@@ -1017,6 +1228,34 @@ internal sealed class RuntimeSelfTestService
         var method = typeof(NetworkInteractionService).GetMethod("ReconcileStructuralResult", BindingFlags.Instance | BindingFlags.NonPublic);
         Assert(method is not null, "ReconcileStructuralResult reflection hook must exist");
         method!.Invoke(this.networkInteractionService, new object?[] { kind, result, location, showMessage, actingItem, consumeHeldAlreadyApplied });
+    }
+
+    private bool InvokeRemoteTerminalDepositPayloads(
+        NetworkData network,
+        TerminalActionRequestMessage request,
+        TerminalActionResponseMessage response,
+        out string message)
+    {
+        var method = typeof(NetworkInteractionService).GetMethod("TryExecuteRemoteTerminalDepositPayloads", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert(method is not null, "TryExecuteRemoteTerminalDepositPayloads reflection hook must exist");
+        object?[] parameters = { network, request, response, null };
+        var result = (bool)(method!.Invoke(this.networkInteractionService, parameters) ?? false);
+        message = parameters[3] as string ?? string.Empty;
+        return result;
+    }
+
+    private bool InvokeRemoteTerminalWithdraw(
+        NetworkData network,
+        TerminalActionRequestMessage request,
+        TerminalActionResponseMessage response,
+        out string message)
+    {
+        var method = typeof(NetworkInteractionService).GetMethod("TryExecuteRemoteTerminalWithdraw", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert(method is not null, "TryExecuteRemoteTerminalWithdraw reflection hook must exist");
+        object?[] parameters = { network, request, response, null };
+        var result = (bool)(method!.Invoke(this.networkInteractionService, parameters) ?? false);
+        message = parameters[3] as string ?? string.Empty;
+        return result;
     }
 
     private bool InvokeTryToggleHeldItemLock(NetworkData network, Farmer player, TerminalActionRequestMessage request, out string message)
