@@ -6,6 +6,7 @@ using StardewModdingAPI.Events;
 using StardewValley;
 using StardewValley.Inventories;
 using StardewValley.Objects;
+using System.Text.Json;
 using SObject = StardewValley.Object;
 
 namespace SVSAP.Services;
@@ -13,16 +14,21 @@ namespace SVSAP.Services;
 internal sealed class TransferBusService
 {
     private const string FilterKey = ModItemCatalog.UniqueId + "/TransferFilter";
+    private const string FilterListKey = ModItemCatalog.UniqueId + "/TransferFilters";
     private const string FilterBlacklistKey = ModItemCatalog.UniqueId + "/TransferFilterBlacklist";
+    private const string OreDictionaryModeKey = ModItemCatalog.UniqueId + "/TransferOreDictionary";
+    private const string FacingDirectionKey = ModItemCatalog.UniqueId + "/TransferFacingDirection";
     private const string TickIntervalKey = ModItemCatalog.UniqueId + "/TransferTickInterval";
     private const string ItemsPerOperationKey = ModItemCatalog.UniqueId + "/TransferItemsPerOperation";
     private const string QualityStrategyKey = ModItemCatalog.UniqueId + "/TransferQualityStrategy";
     private const string MinSourceKeepKey = ModItemCatalog.UniqueId + "/TransferMinSourceKeep";
     private const string TargetKeepKey = ModItemCatalog.UniqueId + "/TransferTargetKeep";
+    private const int FilterSlotCount = 9;
     private const int DefaultItemsPerOperation = 64;
     private const int MaxItemsPerOperation = 999;
     private const int DefaultTickInterval = 120;
     private const int MinTickInterval = 30;
+    private const int AllDirections = -1;
 
     private static readonly Vector2[] AdjacentOffsets =
     {
@@ -60,10 +66,7 @@ internal sealed class TransferBusService
         var held = Game1.player.CurrentItem;
         if (held is null)
         {
-            var rawFilter = bus.modData.GetValueOrDefault(FilterKey);
-            var filter = string.IsNullOrWhiteSpace(rawFilter)
-                ? ModText.Get("ui.transferBus.none")
-                : ModText.Format("ui.transferBus.filterValue", rawFilter, FormatFilterMode(this.GetBoolModData(bus, FilterBlacklistKey, false)));
+            var filter = this.FormatFilterSummary(bus);
             var quality = Enum.TryParse(bus.modData.GetValueOrDefault(QualityStrategyKey), out MaterialQualityStrategy parsedQuality)
                 ? FormatQualityStrategy(parsedQuality)
                 : FormatQualityStrategy(MaterialQualityStrategy.LowQualityFirst);
@@ -78,7 +81,7 @@ internal sealed class TransferBusService
 
         if (held.QualifiedItemId == "(O)" + ModItemCatalog.FilterCard)
         {
-            var hasFilter = !string.IsNullOrWhiteSpace(bus.modData.GetValueOrDefault(FilterKey));
+            var hasFilter = this.ReadFilterIds(bus).Count > 0;
             if (!hasFilter)
             {
                 bus.modData.Remove(FilterBlacklistKey);
@@ -97,12 +100,22 @@ internal sealed class TransferBusService
             }
 
             bus.modData.Remove(FilterKey);
+            bus.modData.Remove(FilterListKey);
             bus.modData.Remove(FilterBlacklistKey);
             bus.modData.Remove(MinSourceKeepKey);
             bus.modData.Remove(TargetKeepKey);
             this.SyncBusData(bus);
             this.ConsumeHeldOne(held);
             Game1.addHUDMessage(new HUDMessage(ModText.Get("ui.transferBus.filterCleared"), HUDMessage.newQuest_type));
+            return true;
+        }
+
+        if (held.QualifiedItemId == "(O)" + ModItemCatalog.OreDictionaryCard)
+        {
+            var enabled = this.ToggleOreDictionaryFlag(bus);
+            this.SyncBusData(bus);
+            this.ConsumeHeldOne(held);
+            Game1.addHUDMessage(new HUDMessage(enabled ? ModText.Get("ui.transferBus.oreDictionaryOn") : ModText.Get("ui.transferBus.oreDictionaryOff"), HUDMessage.newQuest_type));
             return true;
         }
 
@@ -138,7 +151,7 @@ internal sealed class TransferBusService
             return true;
         }
 
-        if (bus.modData.GetValueOrDefault(FilterKey) == held.QualifiedItemId)
+        if (this.ReadFilterIds(bus).Contains(held.QualifiedItemId, StringComparer.Ordinal))
         {
             var keep = Math.Max(0, held.Stack);
             if (bus.QualifiedItemId == "(BC)" + ModItemCatalog.Importer)
@@ -155,7 +168,7 @@ internal sealed class TransferBusService
             return true;
         }
 
-        bus.modData[FilterKey] = held.QualifiedItemId;
+        this.WriteFilterIds(bus, new[] { held.QualifiedItemId });
         bus.modData.Remove(FilterBlacklistKey);
         this.SyncBusData(bus);
         Game1.addHUDMessage(new HUDMessage(ModText.Format("ui.transferBus.filterSetWhitelist", held.DisplayName), HUDMessage.newQuest_type));
@@ -164,10 +177,7 @@ internal sealed class TransferBusService
 
     public string DescribeConfiguration(SObject bus)
     {
-        var rawFilter = bus.modData.GetValueOrDefault(FilterKey);
-        var filter = string.IsNullOrWhiteSpace(rawFilter)
-            ? ModText.Get("ui.transferBus.none")
-            : ModText.Format("ui.transferBus.filterValue", rawFilter, FormatFilterMode(this.GetBoolModData(bus, FilterBlacklistKey, false)));
+        var filter = this.FormatFilterSummary(bus);
         var quality = Enum.TryParse(bus.modData.GetValueOrDefault(QualityStrategyKey), out MaterialQualityStrategy parsedQuality)
             ? FormatQualityStrategy(parsedQuality)
             : FormatQualityStrategy(MaterialQualityStrategy.LowQualityFirst);
@@ -181,20 +191,20 @@ internal sealed class TransferBusService
         if (bus.QualifiedItemId is not ("(BC)" + ModItemCatalog.Importer) and not ("(BC)" + ModItemCatalog.Exporter))
             return new[] { ModText.Get("ui.transferBus.notBus") };
 
-        var rawFilter = bus.modData.GetValueOrDefault(FilterKey);
-        var hasFilter = !string.IsNullOrWhiteSpace(rawFilter);
-        var filter = hasFilter
-            ? ModText.Format("ui.transferBus.filterValue", rawFilter, FormatFilterMode(this.GetBoolModData(bus, FilterBlacklistKey, false)))
-            : ModText.Get("ui.transferBus.none");
+        var filter = this.FormatFilterSummary(bus);
         var quality = FormatQualityStrategy(this.GetQualityStrategy(bus, MaterialQualityStrategy.LowQualityFirst));
         var minSourceKeep = this.GetIntModData(bus, MinSourceKeepKey, 0);
         var targetKeep = this.GetIntModData(bus, TargetKeepKey, 0);
         var interval = this.GetIntModData(bus, TickIntervalKey, DefaultTickInterval);
         var amount = this.GetIntModData(bus, ItemsPerOperationKey, DefaultItemsPerOperation);
+        var direction = FormatFacingDirection(this.GetIntModData(bus, FacingDirectionKey, AllDirections));
+        var oreMode = this.GetBoolModData(bus, OreDictionaryModeKey, false) ? ModText.Get("ui.transferBus.enabled") : ModText.Get("ui.transferBus.disabled");
         return new[]
         {
             ModText.Format("ui.transferBus.type", bus.QualifiedItemId == "(BC)" + ModItemCatalog.Importer ? ModText.Get("ui.transferBus.importer") : ModText.Get("ui.transferBus.exporter")),
             ModText.Format("ui.transferBus.filter", filter),
+            ModText.Format("ui.transferBus.oreDictionary", oreMode),
+            ModText.Format("ui.transferBus.direction", direction),
             ModText.Format("ui.transferBus.quality", quality),
             ModText.Format("ui.transferBus.sourceKeep", minSourceKeep),
             ModText.Format("ui.transferBus.targetKeep", targetKeep),
@@ -213,6 +223,7 @@ internal sealed class TransferBusService
         }
 
         bus.modData.Remove(FilterKey);
+        bus.modData.Remove(FilterListKey);
         bus.modData.Remove(FilterBlacklistKey);
         bus.modData.Remove(MinSourceKeepKey);
         bus.modData.Remove(TargetKeepKey);
@@ -229,7 +240,7 @@ internal sealed class TransferBusService
             return false;
         }
 
-        if (string.IsNullOrWhiteSpace(bus.modData.GetValueOrDefault(FilterKey)))
+        if (this.ReadFilterIds(bus).Count == 0)
         {
             message = ModText.Get("ui.transferBus.noFilterToToggle");
             return false;
@@ -259,6 +270,116 @@ internal sealed class TransferBusService
         return true;
     }
 
+    public bool TryToggleOreDictionaryMode(SObject bus, out string message)
+    {
+        if (bus.QualifiedItemId is not ("(BC)" + ModItemCatalog.Importer) and not ("(BC)" + ModItemCatalog.Exporter))
+        {
+            message = ModText.Get("ui.transferBus.notBus");
+            return false;
+        }
+
+        var enabled = this.ToggleOreDictionaryFlag(bus);
+        this.SyncBusData(bus);
+        message = enabled ? ModText.Get("ui.transferBus.oreDictionaryOn") : ModText.Get("ui.transferBus.oreDictionaryOff");
+        return true;
+    }
+
+    public bool TrySetFacingDirection(SObject bus, int facingDirection, out string message)
+    {
+        if (bus.QualifiedItemId is not ("(BC)" + ModItemCatalog.Importer) and not ("(BC)" + ModItemCatalog.Exporter))
+        {
+            message = ModText.Get("ui.transferBus.notBus");
+            return false;
+        }
+
+        var normalized = NormalizeFacingDirection(facingDirection);
+        bus.modData[FacingDirectionKey] = normalized.ToString();
+        this.SyncBusData(bus);
+        message = ModText.Format("ui.transferBus.directionChanged", FormatFacingDirection(normalized));
+        return true;
+    }
+
+    public bool TrySetFilterSlot(SObject bus, int slotIndex, string qualifiedItemId, out string message)
+    {
+        if (bus.QualifiedItemId is not ("(BC)" + ModItemCatalog.Importer) and not ("(BC)" + ModItemCatalog.Exporter))
+        {
+            message = ModText.Get("ui.transferBus.notBus");
+            return false;
+        }
+
+        if (slotIndex < 0 || slotIndex >= FilterSlotCount || string.IsNullOrWhiteSpace(qualifiedItemId))
+        {
+            message = ModText.Get("ui.transferBus.invalidFilterSlot");
+            return false;
+        }
+
+        var ids = this.ReadFilterSlots(bus);
+        ids[slotIndex] = qualifiedItemId;
+        this.WriteFilterSlots(bus, ids);
+        bus.modData.Remove(FilterBlacklistKey);
+        this.SyncBusData(bus);
+        message = ModText.Format("ui.transferBus.filterSlotSet", slotIndex + 1, ItemDisplayService.GetQualifiedItemDisplayName(qualifiedItemId));
+        return true;
+    }
+
+    public bool TryClearFilterSlot(SObject bus, int slotIndex, out string message)
+    {
+        if (bus.QualifiedItemId is not ("(BC)" + ModItemCatalog.Importer) and not ("(BC)" + ModItemCatalog.Exporter))
+        {
+            message = ModText.Get("ui.transferBus.notBus");
+            return false;
+        }
+
+        var ids = this.ReadFilterSlots(bus);
+        if (slotIndex < 0 || slotIndex >= FilterSlotCount || string.IsNullOrWhiteSpace(ids[slotIndex]))
+        {
+            message = ModText.Get("ui.transferBus.slotAlreadyEmpty");
+            return false;
+        }
+
+        ids[slotIndex] = string.Empty;
+        this.WriteFilterSlots(bus, ids);
+        this.SyncBusData(bus);
+        message = ModText.Format("ui.transferBus.filterSlotCleared", slotIndex + 1);
+        return true;
+    }
+
+    public IReadOnlyList<TransferFilterSlotView> GetFilterSlotViews(SObject bus)
+    {
+        var ids = this.ReadFilterSlots(bus);
+        var result = new List<TransferFilterSlotView>();
+        for (var index = 0; index < FilterSlotCount; index++)
+        {
+            if (string.IsNullOrWhiteSpace(ids[index]))
+            {
+                result.Add(TransferFilterSlotView.Empty(index));
+                continue;
+            }
+
+            var item = CreateFilterIconItem(ids[index]);
+            result.Add(new TransferFilterSlotView
+            {
+                SlotIndex = index,
+                QualifiedItemId = ids[index],
+                Item = item,
+                DisplayName = item?.DisplayName ?? ids[index],
+                OreGroups = item is null ? Array.Empty<string>() : OreDictionaryMatcher.GetDisplayGroups(item)
+            });
+        }
+
+        return result;
+    }
+
+    public int GetFacingDirection(SObject bus)
+    {
+        return NormalizeFacingDirection(this.GetIntModData(bus, FacingDirectionKey, AllDirections));
+    }
+
+    public bool IsOreDictionaryModeEnabled(SObject bus)
+    {
+        return this.GetBoolModData(bus, OreDictionaryModeKey, false);
+    }
+
     public StructuralActionResult ApplyConfigure(
         SObject bus,
         string heldQualifiedItemId,
@@ -282,7 +403,7 @@ internal sealed class TransferBusService
 
         if (heldQualifiedItemId == "(O)" + ModItemCatalog.FilterCard)
         {
-            var hasFilter = !string.IsNullOrWhiteSpace(bus.modData.GetValueOrDefault(FilterKey));
+            var hasFilter = this.ReadFilterIds(bus).Count > 0;
             if (!hasFilter)
             {
                 bus.modData.Remove(FilterBlacklistKey);
@@ -298,11 +419,19 @@ internal sealed class TransferBusService
             }
 
             bus.modData.Remove(FilterKey);
+            bus.modData.Remove(FilterListKey);
             bus.modData.Remove(FilterBlacklistKey);
             bus.modData.Remove(MinSourceKeepKey);
             bus.modData.Remove(TargetKeepKey);
             this.SyncBusData(bus);
             return Success(ModText.Get("ui.transferBus.filterCleared"), consumeHeldOne: true);
+        }
+
+        if (heldQualifiedItemId == "(O)" + ModItemCatalog.OreDictionaryCard)
+        {
+            var enabled = this.ToggleOreDictionaryFlag(bus);
+            this.SyncBusData(bus);
+            return Success(enabled ? ModText.Get("ui.transferBus.oreDictionaryOn") : ModText.Get("ui.transferBus.oreDictionaryOff"), consumeHeldOne: true);
         }
 
         if (heldQualifiedItemId == "(O)" + ModItemCatalog.SpeedCard)
@@ -331,7 +460,7 @@ internal sealed class TransferBusService
             return Success(ModText.Format("ui.transferBus.qualityChanged", FormatQualityStrategy(strategy)), consumeHeldOne: true);
         }
 
-        if (bus.modData.GetValueOrDefault(FilterKey) == heldQualifiedItemId)
+        if (this.ReadFilterIds(bus).Contains(heldQualifiedItemId, StringComparer.Ordinal))
         {
             var keep = Math.Max(0, heldStack);
             if (bus.QualifiedItemId == "(BC)" + ModItemCatalog.Importer)
@@ -346,11 +475,60 @@ internal sealed class TransferBusService
             return Success(ModText.Format("ui.transferBus.exporterKeep", keep));
         }
 
-        bus.modData[FilterKey] = heldQualifiedItemId;
+        this.WriteFilterIds(bus, new[] { heldQualifiedItemId });
         bus.modData.Remove(FilterBlacklistKey);
         this.SyncBusData(bus);
         var displayName = string.IsNullOrWhiteSpace(heldDisplayName) ? heldQualifiedItemId : heldDisplayName;
         return Success(ModText.Format("ui.transferBus.filterSetWhitelist", displayName));
+    }
+
+    public StructuralActionResult ApplyToggleFilterMode(SObject bus)
+    {
+        return this.TryToggleFilterMode(bus, out var message)
+            ? Success(message)
+            : StructuralActionResult.Fail(message);
+    }
+
+    public StructuralActionResult ApplyToggleOreDictionaryMode(SObject bus)
+    {
+        return this.TryToggleOreDictionaryMode(bus, out var message)
+            ? Success(message)
+            : StructuralActionResult.Fail(message);
+    }
+
+    public StructuralActionResult ApplyToggleQualityStrategy(SObject bus)
+    {
+        return this.TryToggleQualityStrategy(bus, out var message)
+            ? Success(message)
+            : StructuralActionResult.Fail(message);
+    }
+
+    public StructuralActionResult ApplyClearFilter(SObject bus)
+    {
+        return this.TryClearFilter(bus, out var message)
+            ? Success(message)
+            : StructuralActionResult.Fail(message);
+    }
+
+    public StructuralActionResult ApplySetFacingDirection(SObject bus, int facingDirection)
+    {
+        return this.TrySetFacingDirection(bus, facingDirection, out var message)
+            ? Success(message)
+            : StructuralActionResult.Fail(message);
+    }
+
+    public StructuralActionResult ApplySetFilterSlot(SObject bus, int slotIndex, string qualifiedItemId)
+    {
+        return this.TrySetFilterSlot(bus, slotIndex, qualifiedItemId, out var message)
+            ? Success(message)
+            : StructuralActionResult.Fail(message);
+    }
+
+    public StructuralActionResult ApplyClearFilterSlot(SObject bus, int slotIndex)
+    {
+        return this.TryClearFilterSlot(bus, slotIndex, out var message)
+            ? Success(message)
+            : StructuralActionResult.Fail(message);
     }
 
     public void OnUpdateTicked(object? sender, UpdateTickedEventArgs e)
@@ -396,7 +574,7 @@ internal sealed class TransferBusService
         if (location is null)
             return false;
 
-        foreach (var (tile, obj) in this.GetAdjacentObjects(location, endpoint))
+        foreach (var (tile, obj) in this.GetAdjacentObjects(location, endpoint, bus))
         {
             if (obj is Chest chest && this.TryImportFromChest(network, chest, bus))
                 return true;
@@ -410,14 +588,14 @@ internal sealed class TransferBusService
 
     private bool TryRunExporter(NetworkData network, NetworkEndpoint endpoint, TransferBusData bus)
     {
-        if (string.IsNullOrWhiteSpace(bus.FilterQualifiedItemId))
+        if (bus.FilterQualifiedItemIds.Count == 0)
             return false;
 
         var location = Game1.getLocationFromName(endpoint.LocationName);
         if (location is null)
             return false;
 
-        foreach (var (tile, obj) in this.GetAdjacentObjects(location, endpoint))
+        foreach (var (tile, obj) in this.GetAdjacentObjects(location, endpoint, bus))
         {
             if (obj is Chest chest)
             {
@@ -570,39 +748,19 @@ internal sealed class TransferBusService
         {
             var targetKeep = Math.Max(0, bus.TargetKeep);
             Item? extracted;
-            if (bus.FilterBlacklist)
+            var operationLimit = Math.Max(1, bus.ItemsPerOperation);
+            if (!this.transactionService.TryExtractFirstMatchingItem(
+                    network,
+                    entry => MatchesFilter(entry.Prototype, bus)
+                        && (targetKeep <= 0 || CountMatching(chest, entry.Prototype, bus) < targetKeep),
+                    entry => targetKeep > 0
+                        ? Math.Min(operationLimit, targetKeep - CountMatching(chest, entry.Prototype, bus))
+                        : operationLimit,
+                    out extracted,
+                    out _,
+                    bus.QualityStrategy) || extracted is null)
             {
-                var operationLimit = Math.Max(1, bus.ItemsPerOperation);
-                if (!this.transactionService.TryExtractFirstMatchingItem(
-                        network,
-                        entry => MatchesFilter(entry.Prototype, bus) && (targetKeep <= 0 || CountMatching(chest, entry.Key.QualifiedItemId) < targetKeep),
-                        entry => targetKeep > 0
-                            ? Math.Min(operationLimit, targetKeep - CountMatching(chest, entry.Key.QualifiedItemId))
-                            : operationLimit,
-                        out extracted,
-                        out _,
-                        bus.QualityStrategy) || extracted is null)
-                {
-                    return false;
-                }
-            }
-            else
-            {
-                if (targetKeep > 0 && CountMatching(chest, bus.FilterQualifiedItemId!) >= targetKeep)
-                    return false;
-
-                var count = targetKeep > 0
-                    ? Math.Min(Math.Max(1, bus.ItemsPerOperation), targetKeep - CountMatching(chest, bus.FilterQualifiedItemId!))
-                    : Math.Max(1, bus.ItemsPerOperation);
-
-                var request = new NetworkItemRequest
-                {
-                    QualifiedItemId = bus.FilterQualifiedItemId,
-                    Count = count
-                };
-
-                if (!this.transactionService.TryExtractItem(network, request, count, out extracted, out _, qualityStrategy: bus.QualityStrategy) || extracted is null)
-                    return false;
+                return false;
             }
 
             var before = extracted.Stack;
@@ -624,41 +782,21 @@ internal sealed class TransferBusService
 
     private bool TryExportToMachine(NetworkData network, GameLocation location, Vector2 tile, SObject machine, TransferBusData bus)
     {
-        if (machine.heldObject.Value is not null || string.IsNullOrWhiteSpace(bus.FilterQualifiedItemId))
+        if (machine.heldObject.Value is not null || bus.FilterQualifiedItemIds.Count == 0)
             return false;
 
         var count = Math.Max(1, bus.ItemsPerOperation);
         var probeMessage = string.Empty;
         Item? extracted;
-        if (bus.FilterBlacklist)
+        if (!this.transactionService.TryExtractFirstMatchingItem(
+                network,
+                entry => MatchesFilter(entry.Prototype, bus) && CanMachineAccept(machine, entry.Prototype.QualifiedItemId, count),
+                _ => count,
+                out extracted,
+                out _,
+                bus.QualityStrategy) || extracted is null)
         {
-            if (!this.transactionService.TryExtractFirstMatchingItem(
-                    network,
-                    entry => MatchesFilter(entry.Prototype, bus) && CanMachineAccept(machine, entry.Prototype.QualifiedItemId, count),
-                    _ => count,
-                    out extracted,
-                    out _,
-                    bus.QualityStrategy) || extracted is null)
-            {
-                return false;
-            }
-        }
-        else
-        {
-            if (!TryProbeMachineInput(machine, bus.FilterQualifiedItemId!, count, out probeMessage))
-            {
-                this.monitor.Log($"Exporter skipped {machine.QualifiedItemId}: {probeMessage}", LogLevel.Trace);
-                return false;
-            }
-
-            var request = new NetworkItemRequest
-            {
-                QualifiedItemId = bus.FilterQualifiedItemId,
-                Count = count
-            };
-
-            if (!this.transactionService.TryExtractItem(network, request, count, out extracted, out _, qualityStrategy: bus.QualityStrategy) || extracted is null)
-                return false;
+            return false;
         }
 
         var scratchInventory = new Inventory();
@@ -729,7 +867,8 @@ internal sealed class TransferBusService
                 QualityStrategy = MaterialQualityStrategy.LowQualityFirst,
                 MinSourceKeep = 0,
                 TargetKeep = 0,
-                FilterBlacklist = false
+                FilterBlacklist = false,
+                FacingDirection = AllDirections
             };
             network.TransferBuses[endpoint.EndpointId] = bus;
         }
@@ -737,8 +876,11 @@ internal sealed class TransferBusService
         var placed = this.FindPlacedObject(endpoint);
         if (placed is not null)
         {
-            bus.FilterQualifiedItemId = placed.modData.GetValueOrDefault(FilterKey);
-            bus.FilterBlacklist = !string.IsNullOrWhiteSpace(bus.FilterQualifiedItemId) && this.GetBoolModData(placed, FilterBlacklistKey, false);
+            bus.FilterQualifiedItemIds = this.ReadFilterIds(placed);
+            bus.FilterQualifiedItemId = bus.FilterQualifiedItemIds.FirstOrDefault();
+            bus.FilterBlacklist = bus.FilterQualifiedItemIds.Count > 0 && this.GetBoolModData(placed, FilterBlacklistKey, false);
+            bus.OreDictionaryMode = this.GetBoolModData(placed, OreDictionaryModeKey, false);
+            bus.FacingDirection = NormalizeFacingDirection(this.GetIntModData(placed, FacingDirectionKey, bus.FacingDirection));
             bus.TickInterval = this.GetIntModData(placed, TickIntervalKey, bus.TickInterval);
             bus.ItemsPerOperation = this.GetIntModData(placed, ItemsPerOperationKey, bus.ItemsPerOperation);
             bus.QualityStrategy = this.GetQualityStrategy(placed, bus.QualityStrategy);
@@ -763,8 +905,11 @@ internal sealed class TransferBusService
             return;
 
         var data = this.GetOrCreateBusData(network, endpoint);
-        data.FilterQualifiedItemId = busObject.modData.GetValueOrDefault(FilterKey);
-        data.FilterBlacklist = !string.IsNullOrWhiteSpace(data.FilterQualifiedItemId) && this.GetBoolModData(busObject, FilterBlacklistKey, false);
+        data.FilterQualifiedItemIds = this.ReadFilterIds(busObject);
+        data.FilterQualifiedItemId = data.FilterQualifiedItemIds.FirstOrDefault();
+        data.FilterBlacklist = data.FilterQualifiedItemIds.Count > 0 && this.GetBoolModData(busObject, FilterBlacklistKey, false);
+        data.OreDictionaryMode = this.GetBoolModData(busObject, OreDictionaryModeKey, false);
+        data.FacingDirection = NormalizeFacingDirection(this.GetIntModData(busObject, FacingDirectionKey, data.FacingDirection));
         data.TickInterval = this.GetIntModData(busObject, TickIntervalKey, data.TickInterval);
         data.ItemsPerOperation = this.GetIntModData(busObject, ItemsPerOperationKey, data.ItemsPerOperation);
         data.QualityStrategy = this.GetQualityStrategy(busObject, data.QualityStrategy);
@@ -773,10 +918,13 @@ internal sealed class TransferBusService
         this.repository.Save();
     }
 
-    private IEnumerable<(Vector2 Tile, SObject Object)> GetAdjacentObjects(GameLocation location, NetworkEndpoint endpoint)
+    private IEnumerable<(Vector2 Tile, SObject Object)> GetAdjacentObjects(GameLocation location, NetworkEndpoint endpoint, TransferBusData bus)
     {
         var origin = new Vector2(endpoint.TileX, endpoint.TileY);
-        foreach (var offset in AdjacentOffsets)
+        var offsets = bus.FacingDirection >= 0 && bus.FacingDirection < AdjacentOffsets.Length
+            ? new[] { AdjacentOffsets[bus.FacingDirection] }
+            : AdjacentOffsets;
+        foreach (var offset in offsets)
         {
             var tile = origin + offset;
             if (location.objects.TryGetValue(tile, out SObject? obj))
@@ -797,18 +945,28 @@ internal sealed class TransferBusService
 
     private static bool MatchesFilter(Item item, TransferBusData bus)
     {
-        if (string.IsNullOrWhiteSpace(bus.FilterQualifiedItemId))
+        if (bus.FilterQualifiedItemIds.Count == 0)
             return true;
 
-        var matches = item.QualifiedItemId == bus.FilterQualifiedItemId;
+        var matches = bus.OreDictionaryMode
+            ? OreDictionaryMatcher.IsMatch(item, bus.FilterQualifiedItemIds)
+            : bus.FilterQualifiedItemIds.Contains(item.QualifiedItemId, StringComparer.Ordinal);
         return bus.FilterBlacklist ? !matches : matches;
     }
 
-    private static int CountMatching(Chest chest, string qualifiedItemId)
+    private static int CountMatching(Chest chest, Item prototype, TransferBusData bus)
     {
         return chest.Items
-            .Where(item => item is not null && item.QualifiedItemId == qualifiedItemId)
+            .Where(item => item is not null && MatchesTargetItem(item, prototype, bus))
             .Sum(item => item!.Stack);
+    }
+
+    private static bool MatchesTargetItem(Item item, Item prototype, TransferBusData bus)
+    {
+        if (!bus.OreDictionaryMode)
+            return item.QualifiedItemId == prototype.QualifiedItemId;
+
+        return OreDictionaryMatcher.IsMatch(item, new[] { prototype.QualifiedItemId });
     }
 
     private void ReturnScratchInventory(NetworkData network, Inventory scratchInventory, GameLocation fallbackLocation, Vector2 fallbackTile)
@@ -832,6 +990,142 @@ internal sealed class TransferBusService
     private static bool IsChestLocked(Chest chest)
     {
         return ChestMutexHelper.IsLockedByAnotherActor(chest);
+    }
+
+    private List<string> ReadFilterIds(SObject obj)
+    {
+        return this.ReadFilterSlots(obj)
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Distinct(StringComparer.Ordinal)
+            .Take(FilterSlotCount)
+            .ToList();
+    }
+
+    private List<string> ReadFilterSlots(SObject obj)
+    {
+        if (obj.modData.TryGetValue(FilterListKey, out var rawList) && !string.IsNullOrWhiteSpace(rawList))
+        {
+            try
+            {
+                var ids = JsonSerializer.Deserialize<List<string>>(rawList);
+                if (ids is not null)
+                    return NormalizeFilterSlots(ids);
+            }
+            catch (Exception ex)
+            {
+                this.monitor.Log($"Ignored unreadable SVSAP transfer filter list: {ex.Message}", LogLevel.Trace);
+            }
+        }
+
+        var legacy = obj.modData.GetValueOrDefault(FilterKey);
+        return string.IsNullOrWhiteSpace(legacy)
+            ? NormalizeFilterSlots(Array.Empty<string>())
+            : NormalizeFilterSlots(new[] { legacy });
+    }
+
+    private void WriteFilterIds(SObject obj, IEnumerable<string> ids)
+    {
+        var normalized = NormalizeFilterIds(ids);
+        if (normalized.Count == 0)
+        {
+            obj.modData.Remove(FilterKey);
+            obj.modData.Remove(FilterListKey);
+            return;
+        }
+
+        obj.modData[FilterKey] = normalized[0];
+        obj.modData[FilterListKey] = JsonSerializer.Serialize(normalized);
+    }
+
+    private void WriteFilterSlots(SObject obj, IReadOnlyList<string> ids)
+    {
+        var slots = NormalizeFilterSlots(ids);
+        var first = slots.FirstOrDefault(id => !string.IsNullOrWhiteSpace(id));
+        if (string.IsNullOrWhiteSpace(first))
+        {
+            obj.modData.Remove(FilterKey);
+            obj.modData.Remove(FilterListKey);
+            return;
+        }
+
+        obj.modData[FilterKey] = first;
+        obj.modData[FilterListKey] = JsonSerializer.Serialize(slots);
+    }
+
+    private string FormatFilterSummary(SObject bus)
+    {
+        var ids = this.ReadFilterIds(bus);
+        if (ids.Count == 0)
+            return ModText.Get("ui.transferBus.none");
+
+        var names = ids
+            .Take(3)
+            .Select(ItemDisplayService.GetQualifiedItemDisplayName)
+            .ToList();
+        var suffix = ids.Count > names.Count ? $" +{ids.Count - names.Count:N0}" : string.Empty;
+        var mode = FormatFilterMode(this.GetBoolModData(bus, FilterBlacklistKey, false));
+        var ore = this.GetBoolModData(bus, OreDictionaryModeKey, false)
+            ? ModText.Get("ui.transferBus.oreDictionaryShort")
+            : ModText.Get("ui.transferBus.exactShort");
+        return ModText.Format("ui.transferBus.filterValue", string.Join(", ", names) + suffix, mode + "/" + ore);
+    }
+
+    private bool ToggleOreDictionaryFlag(SObject bus)
+    {
+        var next = !this.GetBoolModData(bus, OreDictionaryModeKey, false);
+        bus.modData[OreDictionaryModeKey] = next.ToString();
+        return next;
+    }
+
+    private static List<string> NormalizeFilterIds(IEnumerable<string> ids)
+    {
+        return ids
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Select(id => id.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .Take(FilterSlotCount)
+            .ToList();
+    }
+
+    private static List<string> NormalizeFilterSlots(IEnumerable<string> ids)
+    {
+        var result = ids
+            .Take(FilterSlotCount)
+            .Select(id => string.IsNullOrWhiteSpace(id) ? string.Empty : id.Trim())
+            .ToList();
+        while (result.Count < FilterSlotCount)
+            result.Add(string.Empty);
+
+        return result;
+    }
+
+    private static int NormalizeFacingDirection(int facingDirection)
+    {
+        return facingDirection is >= 0 and <= 3 ? facingDirection : AllDirections;
+    }
+
+    private static string FormatFacingDirection(int facingDirection)
+    {
+        return NormalizeFacingDirection(facingDirection) switch
+        {
+            0 => ModText.Get("ui.transferBus.direction.up"),
+            1 => ModText.Get("ui.transferBus.direction.right"),
+            2 => ModText.Get("ui.transferBus.direction.down"),
+            3 => ModText.Get("ui.transferBus.direction.left"),
+            _ => ModText.Get("ui.transferBus.direction.all")
+        };
+    }
+
+    private static Item? CreateFilterIconItem(string qualifiedItemId)
+    {
+        try
+        {
+            return ItemRegistry.Create(qualifiedItemId);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private int GetIntModData(SObject obj, string key, int fallback)
@@ -893,5 +1187,20 @@ internal sealed class TransferBusService
             Message = message,
             ConsumeHeldOne = consumeHeldOne
         };
+    }
+}
+
+internal sealed class TransferFilterSlotView
+{
+    public int SlotIndex { get; set; }
+    public string QualifiedItemId { get; set; } = string.Empty;
+    public Item? Item { get; set; }
+    public string DisplayName { get; set; } = string.Empty;
+    public IReadOnlyList<string> OreGroups { get; set; } = Array.Empty<string>();
+    public bool Occupied => this.Item is not null || !string.IsNullOrWhiteSpace(this.QualifiedItemId);
+
+    public static TransferFilterSlotView Empty(int slotIndex)
+    {
+        return new TransferFilterSlotView { SlotIndex = slotIndex };
     }
 }

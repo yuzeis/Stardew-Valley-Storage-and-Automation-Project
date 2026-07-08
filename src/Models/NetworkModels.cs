@@ -2,8 +2,32 @@ namespace SVSAP.Models;
 
 internal sealed class NetworkSaveData
 {
+    public int SchemaVersion { get; set; }
     public Dictionary<Guid, NetworkData> Networks { get; set; } = new();
     public List<TxLogRecord> PendingTransactions { get; set; } = new();
+    public List<PendingRemoteDelivery> PendingRemoteDeliveries { get; set; } = new();
+}
+
+internal enum RemoteDeliveryKind
+{
+    TerminalWithdraw,
+    StructuralReturnedItem
+}
+
+internal sealed class PendingRemoteDelivery
+{
+    public Guid DeliveryId { get; set; }
+    public long PlayerId { get; set; }
+    public Guid TransactionId { get; set; }
+    public RemoteDeliveryKind Kind { get; set; }
+    public TerminalActionKind TerminalAction { get; set; }
+    public StructuralActionKind StructuralKind { get; set; }
+    public Guid NetworkId { get; set; }
+    public Guid EndpointId { get; set; }
+    public Guid ResultNetworkId { get; set; }
+    public string Message { get; set; } = string.Empty;
+    public string ReturnedSerializedItem { get; set; } = string.Empty;
+    public int ReturnedCount { get; set; }
 }
 
 internal sealed class NetworkData
@@ -59,7 +83,10 @@ internal sealed class TransferBusData
     public Guid EndpointId { get; set; }
     public TransferBusMode Mode { get; set; }
     public string? FilterQualifiedItemId { get; set; }
+    public List<string> FilterQualifiedItemIds { get; set; } = new();
     public bool FilterBlacklist { get; set; }
+    public bool OreDictionaryMode { get; set; }
+    public int FacingDirection { get; set; } = -1;
     public int MinSourceKeep { get; set; }
     public int TargetKeep { get; set; }
     public int ItemsPerOperation { get; set; } = 64;

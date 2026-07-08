@@ -118,6 +118,34 @@ internal sealed class StorageDriveService
         return ejected;
     }
 
+    public StructuralActionResult ApplyEjectCellSlot(SObject drive, int slotIndex)
+    {
+        if (drive.QualifiedItemId != "(BC)" + ModItemCatalog.StorageDrive)
+            return StructuralActionResult.Fail(ModText.Get("ui.storageDrive.notDrive"));
+
+        if (!this.TryResolveDrive(drive, create: false, out _, out var driveData, out _, out var message)
+            || driveData is null)
+        {
+            return StructuralActionResult.Fail(message);
+        }
+
+        var slot = driveData.Slots.FirstOrDefault(entry => entry.SlotIndex == slotIndex);
+        if (slot is null)
+            return StructuralActionResult.Fail(ModText.Get("ui.storageDrive.slotEmpty"));
+
+        var item = StorageCellCodec.CreateItem(slot);
+        driveData.Slots.Remove(slot);
+        driveData.InsertedCellIds = driveData.Slots.Select(entry => entry.CellId).ToList();
+        this.repository.Save();
+
+        return new StructuralActionResult
+        {
+            Success = true,
+            Message = ModText.Format("ui.storageDrive.ejectedSlot", slotIndex + 1),
+            ReturnedSerializedItem = SerializedItemCodec.SerializePrototype(item)
+        };
+    }
+
     public void ResetRemainingHeldStorageCell(Item held)
     {
         this.storageCellInitializer.ResetEmptyCellData(held);
@@ -142,6 +170,53 @@ internal sealed class StorageDriveService
         }
 
         return lines;
+    }
+
+    public IReadOnlyList<StorageDriveSlotView> GetSlotViews(SObject drive)
+    {
+        if (!this.TryResolveDrive(drive, create: false, out _, out var driveData, out _, out _)
+            || driveData is null)
+        {
+            return Enumerable.Range(0, SlotCount)
+                .Select(index => StorageDriveSlotView.Empty(index))
+                .ToList();
+        }
+
+        var result = new List<StorageDriveSlotView>();
+        for (var index = 0; index < SlotCount; index++)
+        {
+            var slot = driveData.Slots.FirstOrDefault(entry => entry.SlotIndex == index);
+            if (slot is null)
+            {
+                result.Add(StorageDriveSlotView.Empty(index));
+                continue;
+            }
+
+            var item = StorageCellCodec.CreateItem(slot);
+            var used = 0L;
+            var max = 0L;
+            var typesUsed = 0;
+            var typesMax = Math.Clamp(this.getConfig().MaxItemTypesPerStorageCell, 1, 63);
+            if (StorageCellCodec.TryReadCellData(slot, out var cellData))
+            {
+                used = Math.Max(0, cellData.CapacityUsed);
+                max = Math.Max(0, cellData.CapacityMax);
+                typesUsed = StorageCellTierInfo.CountActiveTypes(cellData.Items);
+            }
+
+            result.Add(new StorageDriveSlotView
+            {
+                SlotIndex = index,
+                Item = item,
+                DisplayName = item.DisplayName,
+                CapacityUsed = used,
+                CapacityMax = max,
+                TypesUsed = typesUsed,
+                TypesMax = typesMax
+            });
+        }
+
+        return result;
     }
 
     public IReadOnlyList<int> GetOccupiedSlotIndexes(SObject drive)
@@ -459,5 +534,22 @@ internal sealed class StorageDriveService
     private static string Quote(string? value)
     {
         return "\"" + (value ?? string.Empty).Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+    }
+}
+
+internal sealed class StorageDriveSlotView
+{
+    public int SlotIndex { get; set; }
+    public Item? Item { get; set; }
+    public string DisplayName { get; set; } = string.Empty;
+    public long CapacityUsed { get; set; }
+    public long CapacityMax { get; set; }
+    public int TypesUsed { get; set; }
+    public int TypesMax { get; set; }
+    public bool Occupied => this.Item is not null;
+
+    public static StorageDriveSlotView Empty(int slotIndex)
+    {
+        return new StorageDriveSlotView { SlotIndex = slotIndex };
     }
 }

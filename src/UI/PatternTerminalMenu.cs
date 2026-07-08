@@ -200,7 +200,7 @@ internal sealed class PatternTerminalMenu : IClickableMenu
         if (requests.Count == 0)
             return ModText.Get("common.none");
 
-        return string.Join(", ", requests.Take(4).Select(request => $"{request.DisplayKey} x{request.Count:N0}"))
+        return string.Join(", ", requests.Take(4).Select(request => $"{ItemDisplayService.GetRequestDisplayName(request)} x{request.Count:N0}"))
             + (requests.Count > 4 ? $" +{requests.Count - 4:N0}" : string.Empty);
     }
 

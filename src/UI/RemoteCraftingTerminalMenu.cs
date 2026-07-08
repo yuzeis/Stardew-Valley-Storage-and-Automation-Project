@@ -129,7 +129,7 @@ internal sealed class RemoteCraftingTerminalMenu : IClickableMenu
             b,
             visible,
             recipe => SVSAPMenuWidgets.CreateIconItem(recipe.OutputQualifiedItemId, recipe.OutputSerializedItemPrototype, recipe.OutputCount),
-            recipe => recipe.OutputCount * (long)this.batches,
+            _ => 0,
             recipe => !recipe.CanCraft,
             recipe => recipe.CanCraft ? null : "!");
 
@@ -205,17 +205,7 @@ internal sealed class RemoteCraftingTerminalMenu : IClickableMenu
             return;
         }
 
-        var sent = this.sendCraftRequest(new CraftingActionRequestMessage
-        {
-            TransactionId = Guid.NewGuid(),
-            NetworkId = this.snapshot.NetworkId,
-            EndpointId = this.snapshot.EndpointId,
-            RecipeName = recipe.Name,
-            Batches = this.batches,
-            QualityStrategy = this.qualityStrategy
-        });
-        this.requestPending = sent;
-        Game1.playSound(sent ? "smallSelect" : "cancel");
+        this.OpenCraftConfirmation(recipe);
     }
 
     public override void receiveKeyPress(Keys key)
@@ -259,7 +249,8 @@ internal sealed class RemoteCraftingTerminalMenu : IClickableMenu
         }
 
         return visible
-            .OrderBy(this.GetRecipeDisplayName, StringComparer.CurrentCultureIgnoreCase)
+            .OrderByDescending(recipe => recipe.CanCraft)
+            .ThenBy(this.GetRecipeDisplayName, StringComparer.CurrentCultureIgnoreCase)
             .ToList();
     }
 
@@ -282,6 +273,45 @@ internal sealed class RemoteCraftingTerminalMenu : IClickableMenu
     {
         if (SVSAPMenuWidgets.SyncSearchText(this.searchInput, ref this.search))
             this.ResetScroll();
+    }
+
+    private void OpenCraftConfirmation(RemoteCraftingRecipeMessage recipe)
+    {
+        var lines = new List<string>
+        {
+            ModText.Format("craftingTerminal.tooltip.output", recipe.OutputCount * this.batches),
+            recipe.CanCraft ? ModText.Get("craftingTerminal.confirm.ready") : ModText.Get("craftingTerminal.confirm.missing")
+        };
+        lines.AddRange(recipe.IngredientLines);
+
+        Game1.activeClickableMenu = new CraftingConfirmationMenu(
+            this,
+            this.GetRecipeDisplayName(recipe),
+            lines,
+            () => this.SendCraftRequest(recipe));
+        Game1.playSound("smallSelect");
+    }
+
+    private void SendCraftRequest(RemoteCraftingRecipeMessage recipe)
+    {
+        if (this.requestPending)
+        {
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteCrafting.requestPending"), HUDMessage.error_type));
+            Game1.playSound("cancel");
+            return;
+        }
+
+        var sent = this.sendCraftRequest(new CraftingActionRequestMessage
+        {
+            TransactionId = Guid.NewGuid(),
+            NetworkId = this.snapshot.NetworkId,
+            EndpointId = this.snapshot.EndpointId,
+            RecipeName = recipe.Name,
+            Batches = this.batches,
+            QualityStrategy = this.qualityStrategy
+        });
+        this.requestPending = sent;
+        Game1.playSound(sent ? "smallSelect" : "cancel");
     }
 
     private string GetRecipeDisplayName(RemoteCraftingRecipeMessage recipe)
@@ -311,8 +341,10 @@ internal sealed class RemoteCraftingTerminalMenu : IClickableMenu
             ModText.Format("craftingTerminal.tooltip.output", recipe.OutputCount * this.batches),
             recipe.CanCraft ? ModText.Get("craftingTerminal.tooltip.ready") : ModText.Get("craftingTerminal.tooltip.missing")
         };
-        if (recipe.MissingIngredients.Count > 0)
-            lines.AddRange(recipe.MissingIngredients.Take(6).Select(ingredient => ingredient.ToDisplayLine()));
+        if (recipe.IngredientLines.Count > 0)
+            lines.AddRange(recipe.IngredientLines.Take(6));
+        if (recipe.IngredientLines.Count > 6)
+            lines.Add(ModText.Format("craftingTerminal.tooltip.moreIngredients", recipe.IngredientLines.Count - 6));
 
         SVSAPMenuWidgets.DrawTooltipBox(b, mx + 28, my + 28, this.GetRecipeDisplayName(recipe), lines);
     }

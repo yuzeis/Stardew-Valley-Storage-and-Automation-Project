@@ -15,6 +15,7 @@ internal sealed class NetworkCraftingRecipe
 internal sealed class CraftingAvailability
 {
     public bool CanCraft { get; set; }
+    public List<string> IngredientLines { get; set; } = new();
     public List<string> MissingLines { get; set; } = new();
     public List<CraftingMissingIngredient> MissingIngredients { get; set; } = new();
 }

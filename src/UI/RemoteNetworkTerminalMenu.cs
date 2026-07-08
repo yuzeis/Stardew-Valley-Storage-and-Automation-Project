@@ -649,14 +649,10 @@ internal sealed class RemoteNetworkTerminalMenu : IClickableMenu
         var lines = new List<string>
         {
             ModText.Format("terminal.tooltip.count", entry.AvailableCount, entry.ReservedCount > 0 ? ModText.Format("terminal.tooltip.reserved", entry.ReservedCount) : string.Empty),
-            ModText.Format("terminal.tooltip.qualityPrice", entry.Quality, entry.SalePrice)
+            ModText.Format("terminal.tooltip.qualityPrice", ItemDisplayService.GetQualityDisplayName(entry.Quality), entry.SalePrice)
         };
-        lines.AddRange(entry.Locations
-            .OrderByDescending(location => location.Count)
-            .Take(5)
-            .Select(FormatLocationLine));
-        if (entry.StackCount > 5)
-            lines.Add(ModText.Format("terminal.tooltip.moreStacks", entry.StackCount - Math.Min(5, entry.Locations.Count)));
+        if (entry.StackCount > 1)
+            lines.Add(ModText.Format("terminal.tooltip.stackSummary", entry.StackCount));
 
         SVSAPMenuWidgets.DrawTooltipBox(b, mouseX + 28, mouseY + 28, this.GetEntryDisplayName(entry), lines);
     }

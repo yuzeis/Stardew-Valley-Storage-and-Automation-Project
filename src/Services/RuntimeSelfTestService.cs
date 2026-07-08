@@ -64,7 +64,9 @@ internal sealed class RuntimeSelfTestService
             ("farmhand-hard-block", this.TestFarmhandHardBlock),
             ("remote-action-response-cache", this.TestRemoteActionResponseCache),
             ("remote-terminal-payload-escrow", this.TestRemoteTerminalPayloadEscrow),
+            ("remote-delivery-ack-contract", this.TestRemoteDeliveryAckContract),
             ("remote-snapshot-paging-contract", this.TestRemoteSnapshotPagingContract),
+            ("remote-structural-snapshot-contract", this.TestRemoteStructuralSnapshotContract),
             ("remote-localized-snapshot-contract", this.TestRemoteLocalizedSnapshotContract),
             ("search-textbox-contract", this.TestSearchTextBoxContract),
             ("crafting-terminal-contention-no-dupe", this.TestCraftingTerminalContentionNoDupe),
@@ -76,6 +78,7 @@ internal sealed class RuntimeSelfTestService
             ("structural-host-failure-response", this.TestStructuralHostFailureResponse),
             ("structural-consume-targets-captured-item", this.TestStructuralConsumeTargetsCapturedItem),
             ("transfer-bus-kernel-parity", this.TestTransferBusKernelParity),
+            ("gui-layout-bounds", this.TestGuiLayoutBounds),
             ("debug-addon-vanilla-material-recipes-visible", this.TestDebugAddonVanillaMaterialRecipesVisible),
             ("cpu-reserve-fast-slot", this.TestCpuReserveFastSlot)
         };
@@ -110,6 +113,14 @@ internal sealed class RuntimeSelfTestService
         Assert(data.CapacityMax == StorageCellTierInfo.GetCapacity(StorageCellTier.OneK), "cell capacity must survive round-trip");
         Assert(data.Items.Count == 1 && data.Items[0].Count == 37, "stored stack count must survive round-trip");
         Assert(data.CapacityUsed == StorageCellTierInfo.CalculateUsedBytes(data.Items), "cell capacity used must be SVSAP byte usage");
+    }
+
+    private void TestGuiLayoutBounds()
+    {
+        Assert(StorageDriveMenu.LayoutFits(menuWidth: 760), "storage drive GUI must fit its full-width 10-slot layout");
+        Assert(StorageDriveMenu.LayoutFits(menuWidth: 520), "storage drive GUI must wrap storage-cell slots before the summary panel overflows compact widths");
+        Assert(TransferBusMenu.LayoutFits(menuWidth: 1040), "importer/exporter GUI must fit its 3x3 filter and controls at full width");
+        Assert(TransferBusMenu.LayoutFits(menuWidth: 720), "importer/exporter GUI controls must wrap instead of overflowing compact widths");
     }
 
     private void TestStorageCellStackGuard()
@@ -625,6 +636,22 @@ internal sealed class RuntimeSelfTestService
         }
     }
 
+    private void TestRemoteDeliveryAckContract()
+    {
+        Assert(typeof(TerminalActionResponseMessage).GetProperty(nameof(TerminalActionResponseMessage.DeliveryId))?.PropertyType == typeof(Guid), "terminal responses must carry a durable delivery id");
+        Assert(typeof(StructuralActionResponseMessage).GetProperty(nameof(StructuralActionResponseMessage.DeliveryId))?.PropertyType == typeof(Guid), "structural responses must carry a durable delivery id");
+        Assert(typeof(RemoteDeliveryAckMessage).GetProperty(nameof(RemoteDeliveryAckMessage.DeliveryId))?.PropertyType == typeof(Guid), "remote delivery ACK must name the delivered payload");
+        Assert(typeof(RemoteDeliveryAckMessage).GetProperty(nameof(RemoteDeliveryAckMessage.TransactionId))?.PropertyType == typeof(Guid), "remote delivery ACK must name the original transaction");
+        Assert(typeof(NetworkSaveData).GetProperty(nameof(NetworkSaveData.SchemaVersion))?.PropertyType == typeof(int), "network save data must carry a schema version");
+        Assert(typeof(NetworkSaveData).GetProperty(nameof(NetworkSaveData.PendingRemoteDeliveries))?.PropertyType == typeof(List<PendingRemoteDelivery>), "network save data must persist pending remote deliveries");
+        Assert(typeof(NetworkInteractionService).GetMethod(nameof(NetworkInteractionService.ResendPendingRemoteDeliveries), BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.ReturnType == typeof(void), "host must expose pending remote delivery resend on peer reconnect");
+        Assert(typeof(NetworkInteractionService).GetMethod("HandleRemoteDeliveryAck", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "host must handle remote delivery ACK messages");
+        Assert(typeof(NetworkInteractionService).GetMethod("MarkRemoteDeliveryReconciled", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "client must remember delivered payload ids before ACKing duplicates");
+        Assert(typeof(NetworkInteractionService).GetMethod("DeliverStructuralReturnedItem", BindingFlags.Instance | BindingFlags.NonPublic)?.ReturnType == typeof(bool), "structural returned-item delivery must be retryable without reapplying held-item side effects");
+        Assert(typeof(NetworkInteractionService).GetMethod("RegisterTerminalRemoteDelivery", BindingFlags.Instance | BindingFlags.NonPublic)?.ReturnType == typeof(bool), "terminal withdraw payloads must be registered in durable pending delivery storage");
+        Assert(typeof(NetworkInteractionService).GetMethod("RegisterStructuralRemoteDelivery", BindingFlags.Instance | BindingFlags.NonPublic)?.ReturnType == typeof(bool), "structural returned items must be registered in durable pending delivery storage");
+    }
+
     private void TestRemoteSnapshotPagingContract()
     {
         Assert(typeof(TerminalSnapshotRequestMessage).GetProperty(nameof(TerminalSnapshotRequestMessage.EntryOffset)) is not null, "terminal snapshot requests must carry a page offset");
@@ -636,14 +663,38 @@ internal sealed class RuntimeSelfTestService
         Assert(typeof(RemoteNetworkTerminalMenu).GetMethod("RequestPage", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "remote terminal UI must expose page navigation over bounded snapshots");
     }
 
+    private void TestRemoteStructuralSnapshotContract()
+    {
+        Assert(MultiplayerMessageTypes.StructuralSnapshotRequest == "StructuralSnapshotRequest", "storage drive / transfer bus remote menus must have a structural snapshot request message");
+        Assert(MultiplayerMessageTypes.StructuralSnapshotResponse == "StructuralSnapshotResponse", "storage drive / transfer bus remote menus must have a structural snapshot response message");
+        Assert(typeof(StructuralSnapshotRequestMessage).GetProperty(nameof(StructuralSnapshotRequestMessage.Kind))?.PropertyType == typeof(StructuralSnapshotKind), "structural snapshot requests must identify the requested menu kind");
+        Assert(typeof(StructuralSnapshotResponseMessage).GetProperty(nameof(StructuralSnapshotResponseMessage.StorageDrive))?.PropertyType == typeof(RemoteStorageDriveSnapshotMessage), "structural snapshots must carry storage drive slot state");
+        Assert(typeof(StructuralSnapshotResponseMessage).GetProperty(nameof(StructuralSnapshotResponseMessage.TransferBus))?.PropertyType == typeof(RemoteTransferBusSnapshotMessage), "structural snapshots must carry transfer bus configuration state");
+        Assert(typeof(RemoteStorageDriveMenu).GetProperty("Snapshot", BindingFlags.Instance | BindingFlags.NonPublic)?.PropertyType == typeof(StructuralSnapshotResponseMessage), "remote storage drive menu must render host-authored snapshots");
+        Assert(typeof(RemoteTransferBusMenu).GetProperty("Snapshot", BindingFlags.Instance | BindingFlags.NonPublic)?.PropertyType == typeof(StructuralSnapshotResponseMessage), "remote transfer bus menu must render host-authored snapshots");
+        Assert(typeof(NetworkInteractionService).GetMethod("CreateStructuralSnapshotResponse", BindingFlags.Instance | BindingFlags.NonPublic)?.ReturnType == typeof(StructuralSnapshotResponseMessage), "host must produce structural snapshots for farmhand empty-hand menus");
+        Assert(typeof(NetworkInteractionService).GetMethod("HandleStructuralSnapshotRequest", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "host must receive structural snapshot requests");
+        Assert(typeof(NetworkInteractionService).GetMethod("HandleStructuralSnapshotResponse", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "farmhand must receive structural snapshot responses");
+        Assert(typeof(NetworkInteractionService).GetMethod("RefreshActiveRemoteStructuralMenu", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "structural actions must refresh open remote storage/transfer menus");
+        Assert(typeof(StorageDriveService).GetMethod(nameof(StorageDriveService.ApplyEjectCellSlot))?.ReturnType == typeof(StructuralActionResult), "remote storage drive slot ejection must use a host-authoritative kernel");
+        Assert(typeof(TransferBusService).GetMethod(nameof(TransferBusService.ApplySetFilterSlot))?.ReturnType == typeof(StructuralActionResult), "remote transfer filter edits must use a host-authoritative kernel");
+        Assert(Enum.IsDefined(typeof(StructuralActionKind), StructuralActionKind.StorageDriveEjectSlot), "structural action enum must include storage drive slot ejection");
+        Assert(Enum.IsDefined(typeof(StructuralActionKind), StructuralActionKind.TransferBusSetFilterSlot), "structural action enum must include transfer bus filter slot edits");
+    }
+
     private void TestRemoteLocalizedSnapshotContract()
     {
         Assert(typeof(RemoteCraftingRecipeMessage).GetProperty(nameof(RemoteCraftingRecipeMessage.MissingIngredients)) is not null, "remote crafting recipes must carry structured missing ingredients for client-local rendering");
         Assert(typeof(RemoteCraftingJobMessage).GetProperty(nameof(RemoteCraftingJobMessage.Pattern)) is not null, "remote monitor jobs must carry pattern data for client-local names");
         Assert(typeof(RemoteProductionPipelineMessage).GetProperty(nameof(RemoteProductionPipelineMessage.Pattern)) is not null, "remote monitor pipelines must carry pattern data for client-local names");
+        Assert(Enum.IsDefined(typeof(CraftingMonitorActionKind), CraftingMonitorActionKind.PreviewQueueJob), "remote CPU monitor must request a host-side queue preview before queueing");
+        Assert(typeof(CraftingMonitorActionResponseMessage).GetProperty(nameof(CraftingMonitorActionResponseMessage.PreviewPattern)) is not null, "remote CPU preview responses must carry the previewed pattern");
+        Assert(typeof(CraftingMonitorActionResponseMessage).GetProperty(nameof(CraftingMonitorActionResponseMessage.PreviewBatches)) is not null, "remote CPU preview responses must carry the previewed batch count");
+        Assert(typeof(CraftingMonitorActionResponseMessage).GetProperty(nameof(CraftingMonitorActionResponseMessage.PreviewLines)) is not null, "remote CPU preview responses must carry confirmation lines");
         Assert(typeof(RemoteCraftingTerminalMenu).GetMethod("GetRecipeDisplayName", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "remote crafting UI must derive recipe names on the client");
         Assert(typeof(RemoteCraftingMonitorMenu).GetMethod("GetJobDisplayName", BindingFlags.Static | BindingFlags.NonPublic) is not null, "remote monitor UI must derive job names on the client");
         Assert(typeof(RemoteCraftingMonitorMenu).GetMethod("FormatPipelineStatus", BindingFlags.Static | BindingFlags.NonPublic) is not null, "remote monitor UI must derive pipeline status on the client");
+        Assert(typeof(RemoteCraftingMonitorMenu).GetMethod("QueuePreviewedPattern", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "remote monitor UI must queue only after the preview confirmation dialog");
     }
 
     private void TestSearchTextBoxContract()
@@ -904,6 +955,7 @@ internal sealed class RuntimeSelfTestService
             var directBus = CreateLinkedBigCraftable(ModItemCatalog.Importer, networkIdA, endpointIdA);
             var requestBus = CreateLinkedBigCraftable(ModItemCatalog.Importer, networkIdB, endpointIdB);
             var speedCardId = "(O)" + ModItemCatalog.SpeedCard;
+            var oreCardId = "(O)" + ModItemCatalog.OreDictionaryCard;
 
             var direct = this.transferBusService.ApplyConfigure(directBus, speedCardId, "Speed Card", 1);
             var requestEquivalent = this.InvokeApplyStructuralAction(
@@ -921,6 +973,24 @@ internal sealed class RuntimeSelfTestService
             Assert(direct.ConsumeHeldOne && requestEquivalent.ConsumeHeldOne, "speed card configuration must request one held-card consumption on both paths");
             Assert(direct.Message == requestEquivalent.Message, "transfer bus kernel messages must match");
             Assert(SameModData(directBus, requestBus), "transfer bus direct and request-equivalent kernels must write the same modData");
+            var directOre = this.transferBusService.ApplyConfigure(directBus, oreCardId, "Ore Dictionary Card", 1);
+            var requestOre = this.InvokeApplyStructuralAction(
+                StructuralActionKind.TransferBusConfigure,
+                requestBus,
+                null!,
+                Vector2.Zero,
+                Guid.Empty,
+                oreCardId,
+                "Ore Dictionary Card",
+                1,
+                string.Empty);
+            Assert(directOre.Success && requestOre.Success, "ore dictionary card configuration must succeed on both paths");
+            Assert(directOre.ConsumeHeldOne && requestOre.ConsumeHeldOne, "ore dictionary card must request one held-card consumption on both paths");
+            Assert(SameModData(directBus, requestBus), "ore dictionary direct and request-equivalent kernels must write the same modData");
+            Assert(this.transferBusService.TrySetFilterSlot(directBus, 4, "(O)378", out _), "transfer bus 3x3 filter slot must accept a filter item");
+            Assert(this.transferBusService.GetFilterSlotViews(directBus).Any(slot => slot.SlotIndex == 4 && slot.QualifiedItemId == "(O)378"), "transfer bus filter slot view must preserve the selected 3x3 slot");
+            Assert(this.transferBusService.TrySetFacingDirection(directBus, 1, out _), "transfer bus direction control must accept right-facing direction");
+            Assert(this.transferBusService.GetFacingDirection(directBus) == 1, "transfer bus direction control must persist the selected side");
             var directData = GetTransferBusData(networkA, endpointIdA);
             var requestData = GetTransferBusData(networkB, endpointIdB);
             Assert(directData.TickInterval == requestData.TickInterval, "transfer bus tick interval must match between direct and request-equivalent kernels");
@@ -1208,13 +1278,16 @@ internal sealed class RuntimeSelfTestService
         string heldQualifiedItemId,
         string heldDisplayName,
         int heldStack,
-        string heldSerializedItem)
+        string heldSerializedItem,
+        int slotIndex = -1,
+        string filterQualifiedItemId = "",
+        int facingDirection = -1)
     {
         var method = typeof(NetworkInteractionService).GetMethod("ApplyStructuralAction", BindingFlags.Instance | BindingFlags.NonPublic);
         Assert(method is not null, "ApplyStructuralAction reflection hook must exist");
         return (StructuralActionResult)(method!.Invoke(
             this.networkInteractionService,
-            new object[] { kind, target, location, tile, selectedNetworkId, heldQualifiedItemId, heldDisplayName, heldStack, heldSerializedItem }) ?? StructuralActionResult.Fail("missing result"));
+            new object[] { kind, target, location, tile, selectedNetworkId, heldQualifiedItemId, heldDisplayName, heldStack, heldSerializedItem, slotIndex, filterQualifiedItemId, facingDirection }) ?? StructuralActionResult.Fail("missing result"));
     }
 
     private void InvokeReconcileStructuralResult(

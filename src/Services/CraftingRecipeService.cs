@@ -58,6 +58,7 @@ internal sealed class CraftingRecipeService
     public CraftingAvailability GetAvailability(NetworkData network, NetworkCraftingRecipe recipe, int batches, MaterialQualityStrategy qualityStrategy = MaterialQualityStrategy.LowQualityFirst)
     {
         var requests = Scale(recipe.Ingredients, batches);
+        var ingredientLines = new List<string>();
         var missing = new List<CraftingMissingIngredient>();
         foreach (var request in requests)
         {
@@ -66,6 +67,7 @@ internal sealed class CraftingRecipeService
                 request,
                 qualityStrategy: qualityStrategy,
                 autoConsumableOnly: true);
+            ingredientLines.Add(ItemDisplayService.FormatIngredientLine(request, available, request.Count));
             if (available < request.Count)
             {
                 missing.Add(new CraftingMissingIngredient
@@ -80,8 +82,9 @@ internal sealed class CraftingRecipeService
         return new CraftingAvailability
         {
             CanCraft = missing.Count == 0,
+            IngredientLines = ingredientLines,
             MissingIngredients = missing,
-            MissingLines = missing.Select(line => line.ToDisplayLine()).ToList()
+            MissingLines = missing.Select(line => ItemDisplayService.FormatIngredientLine(line.Request, line.AvailableCount, line.RequiredCount)).ToList()
         };
     }
 

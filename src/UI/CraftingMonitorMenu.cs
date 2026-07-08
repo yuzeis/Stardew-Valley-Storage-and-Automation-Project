@@ -298,13 +298,34 @@ internal sealed class CraftingMonitorMenu : IClickableMenu
         if (!this.EnsureActionAllowed())
             return;
 
-        if (this.NeedsLongJobConfirmationForCurrentQueue(forceRefresh: true) && !this.longJobConfirmationArmed)
+        if (!this.executionService.TryPreviewQueuePatternJob(
+                this.network,
+                this.queuePattern,
+                this.queueAmount,
+                out var previewLines,
+                out _,
+                out var previewMessage))
         {
-            this.longJobConfirmationArmed = true;
-            Game1.addHUDMessage(new HUDMessage(ModText.Get("craftingMonitor.longJob.confirmHud"), HUDMessage.error_type));
+            Game1.addHUDMessage(new HUDMessage(previewMessage, HUDMessage.error_type));
             Game1.playSound("cancel");
             return;
         }
+
+        Game1.activeClickableMenu = new CraftingConfirmationMenu(
+            this,
+            PatternDisplayNames.Get(this.queuePattern),
+            previewLines,
+            this.QueuePatternAfterConfirmation);
+        Game1.playSound("smallSelect");
+    }
+
+    private void QueuePatternAfterConfirmation()
+    {
+        if (this.queuePattern is null)
+            return;
+
+        if (!this.EnsureActionAllowed())
+            return;
 
         if (this.executionService.TryQueuePatternJob(this.network, this.queuePattern, this.queueAmount, out var message))
         {

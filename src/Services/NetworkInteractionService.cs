@@ -59,6 +59,8 @@ internal sealed class NetworkInteractionService
     private readonly Queue<Guid> reconciledCraftingMonitorTxOrder = new();
     private readonly HashSet<Guid> reconciledStructuralTx = new();
     private readonly Queue<Guid> reconciledStructuralTxOrder = new();
+    private readonly HashSet<Guid> reconciledRemoteDeliveries = new();
+    private readonly Queue<Guid> reconciledRemoteDeliveryOrder = new();
     private readonly Dictionary<Guid, List<TerminalItemPayloadMessage>> pendingTerminalDepositItems = new();
     private readonly Dictionary<Guid, PendingStructuralHeldItem> pendingStructuralHeldItems = new();
     private readonly Dictionary<long, string> blockedPeerActionMessages = new();
@@ -136,7 +138,12 @@ internal sealed class NetworkInteractionService
         if (target.QualifiedItemId == "(BC)" + ModItemCatalog.StorageDrive)
         {
             if (Game1.player.CurrentItem is null)
-                this.OpenStorageDriveMenu(target, location, tile);
+            {
+                if (Context.IsMainPlayer)
+                    this.OpenStorageDriveMenu(target, location, tile);
+                else
+                    this.RequestRemoteStructuralSnapshot(StructuralSnapshotKind.StorageDrive, target, location, tile);
+            }
             else if (Context.IsMainPlayer)
                 this.RunStructuralLocally(StructuralActionKind.StorageDriveInteract, target, location, tile);
             else
@@ -150,7 +157,10 @@ internal sealed class NetworkInteractionService
         {
             if (Game1.player.CurrentItem is null)
             {
-                this.OpenTransferBusMenu(target);
+                if (Context.IsMainPlayer)
+                    this.OpenTransferBusMenu(target);
+                else
+                    this.RequestRemoteStructuralSnapshot(StructuralSnapshotKind.TransferBus, target, location, tile);
             }
             else if (Context.IsMainPlayer)
             {
@@ -298,6 +308,8 @@ internal sealed class NetworkInteractionService
         this.reconciledCraftingMonitorTxOrder.Clear();
         this.reconciledStructuralTx.Clear();
         this.reconciledStructuralTxOrder.Clear();
+        this.reconciledRemoteDeliveries.Clear();
+        this.reconciledRemoteDeliveryOrder.Clear();
         if (restorePendingItems)
         {
             this.RestorePendingTerminalDepositItems();
@@ -316,6 +328,29 @@ internal sealed class NetworkInteractionService
         ClearCachedResponsesForPlayer(this.craftingActionResponseCache, this.craftingActionResponseOrder, playerId);
         ClearCachedResponsesForPlayer(this.craftingMonitorActionResponseCache, this.craftingMonitorActionResponseOrder, playerId);
         ClearCachedResponsesForPlayer(this.structuralResponseCache, this.structuralResponseOrder, playerId);
+    }
+
+    public void ResendPendingRemoteDeliveries(long playerId)
+    {
+        if (!Context.IsMainPlayer || playerId <= 0)
+            return;
+
+        foreach (var delivery in this.repository.Data.PendingRemoteDeliveries
+                     .Where(delivery => delivery.PlayerId == playerId)
+                     .ToList())
+        {
+            try
+            {
+                if (delivery.Kind == RemoteDeliveryKind.TerminalWithdraw)
+                    this.SendTerminalActionResponse(this.CreateTerminalResponse(delivery), playerId);
+                else if (delivery.Kind == RemoteDeliveryKind.StructuralReturnedItem)
+                    this.SendStructuralResponse(this.CreateStructuralResponse(delivery), playerId);
+            }
+            catch (Exception ex)
+            {
+                this.monitor.Log($"Failed to resend pending SVSAP remote delivery {delivery.DeliveryId:N} to {playerId}: {ex.Message}", LogLevel.Trace);
+            }
+        }
     }
 
     public void SetPeerActionBlock(long playerId, string? message)
@@ -382,10 +417,16 @@ internal sealed class NetworkInteractionService
                 this.HandleCraftingMonitorActionRequest(e);
             else if (e.Type == MultiplayerMessageTypes.CraftingMonitorActionResponse)
                 this.HandleCraftingMonitorActionResponse(e);
+            else if (e.Type == MultiplayerMessageTypes.StructuralSnapshotRequest)
+                this.HandleStructuralSnapshotRequest(e);
+            else if (e.Type == MultiplayerMessageTypes.StructuralSnapshotResponse)
+                this.HandleStructuralSnapshotResponse(e);
             else if (e.Type == MultiplayerMessageTypes.StructuralActionRequest)
                 this.HandleStructuralActionRequest(e);
             else if (e.Type == MultiplayerMessageTypes.StructuralActionResponse)
                 this.HandleStructuralActionResponse(e);
+            else if (e.Type == MultiplayerMessageTypes.RemoteDeliveryAck)
+                this.HandleRemoteDeliveryAck(e);
         }
         catch (Exception ex)
         {
@@ -539,6 +580,75 @@ internal sealed class NetworkInteractionService
         this.LogGameplay($"action=structural_request result=sent player={DescribePlayer(Game1.player)} host={host.PlayerID} kind={request.Kind} location={Quote(request.LocationName)} tile=({request.TileX:0},{request.TileY:0}) tx={ShortId(request.TransactionId)}");
     }
 
+    private void RequestRemoteStructuralSnapshot(StructuralSnapshotKind kind, SObject target, GameLocation location, Vector2 tile)
+    {
+        if (Context.IsMainPlayer)
+            return;
+
+        var host = this.multiplayerHelper.GetConnectedPlayers().FirstOrDefault(peer => peer.IsHost);
+        if (host is null || !host.HasSmapi || host.GetMod(this.modManifest.UniqueID) is null)
+        {
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("multiplayer.hostNeedsSVSAP"), HUDMessage.error_type));
+            return;
+        }
+
+        var request = new StructuralSnapshotRequestMessage
+        {
+            Kind = kind,
+            LocationName = location.NameOrUniqueName,
+            TileX = (int)tile.X,
+            TileY = (int)tile.Y
+        };
+
+        try
+        {
+            this.multiplayerHelper.SendMessage(
+                request,
+                MultiplayerMessageTypes.StructuralSnapshotRequest,
+                modIDs: new[] { this.modManifest.UniqueID },
+                playerIDs: new[] { host.PlayerID });
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteTerminal.requestSent"), HUDMessage.newQuest_type));
+        }
+        catch (Exception ex)
+        {
+            this.monitor.Log($"Failed to request SVSAP structural snapshot for {target.QualifiedItemId}: {ex.Message}", LogLevel.Warn);
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteTerminal.sendFailed"), HUDMessage.error_type));
+        }
+    }
+
+    private void SendRemoteStorageDriveAction(StructuralSnapshotResponseMessage snapshot, int slotIndex)
+    {
+        this.SendStructuralRequest(new StructuralActionRequestMessage
+        {
+            TransactionId = Guid.NewGuid(),
+            Kind = StructuralActionKind.StorageDriveEjectSlot,
+            LocationName = snapshot.LocationName,
+            TileX = snapshot.TileX,
+            TileY = snapshot.TileY,
+            SlotIndex = slotIndex
+        });
+    }
+
+    private void SendRemoteTransferBusAction(
+        StructuralSnapshotResponseMessage snapshot,
+        StructuralActionKind kind,
+        int slotIndex = -1,
+        string filterQualifiedItemId = "",
+        int facingDirection = -1)
+    {
+        this.SendStructuralRequest(new StructuralActionRequestMessage
+        {
+            TransactionId = Guid.NewGuid(),
+            Kind = kind,
+            LocationName = snapshot.LocationName,
+            TileX = snapshot.TileX,
+            TileY = snapshot.TileY,
+            SlotIndex = slotIndex,
+            FilterQualifiedItemId = filterQualifiedItemId,
+            FacingDirection = facingDirection
+        });
+    }
+
     private bool TrackStructuralActingItem(StructuralActionRequestMessage request, out string message)
     {
         message = string.Empty;
@@ -604,6 +714,161 @@ internal sealed class NetworkInteractionService
         return request.TransactionId;
     }
 
+    private void HandleStructuralSnapshotRequest(ModMessageReceivedEventArgs e)
+    {
+        if (!Context.IsMainPlayer)
+            return;
+
+        var request = e.ReadAs<StructuralSnapshotRequestMessage>();
+        var response = this.CreateStructuralSnapshotResponse(request);
+        this.multiplayerHelper.SendMessage(
+            response,
+            MultiplayerMessageTypes.StructuralSnapshotResponse,
+            modIDs: new[] { this.modManifest.UniqueID },
+            playerIDs: new[] { e.FromPlayerID });
+    }
+
+    private void HandleStructuralSnapshotResponse(ModMessageReceivedEventArgs e)
+    {
+        if (Context.IsMainPlayer)
+            return;
+
+        var response = e.ReadAs<StructuralSnapshotResponseMessage>();
+        if (!response.Success)
+        {
+            Game1.addHUDMessage(new HUDMessage(
+                LocalizeRemoteResponse(false, response.Message, "network.structural.succeeded", "Structure action completed.", "network.structural.failed", "Structure action failed; please retry."),
+                HUDMessage.error_type));
+            return;
+        }
+
+        if (response.Kind == StructuralSnapshotKind.StorageDrive && response.StorageDrive is not null)
+        {
+            if (Game1.activeClickableMenu is RemoteStorageDriveMenu activeStorage)
+                activeStorage.ApplySnapshot(response);
+            else
+                Game1.activeClickableMenu = new RemoteStorageDriveMenu(
+                    response,
+                    slot => this.SendRemoteStorageDriveAction(response, slot),
+                    () => this.RequestRemoteStructuralSnapshot(response));
+            return;
+        }
+
+        if (response.Kind == StructuralSnapshotKind.TransferBus && response.TransferBus is not null)
+        {
+            if (Game1.activeClickableMenu is RemoteTransferBusMenu activeTransfer)
+                activeTransfer.ApplySnapshot(response);
+            else
+                Game1.activeClickableMenu = new RemoteTransferBusMenu(
+                    response,
+                    (kind, slotIndex, itemId, direction) => this.SendRemoteTransferBusAction(response, kind, slotIndex, itemId, direction),
+                    () => this.RequestRemoteStructuralSnapshot(response));
+        }
+    }
+
+    private void RequestRemoteStructuralSnapshot(StructuralSnapshotResponseMessage snapshot)
+    {
+        if (Context.IsMainPlayer)
+            return;
+
+        var host = this.multiplayerHelper.GetConnectedPlayers().FirstOrDefault(peer => peer.IsHost);
+        if (host is null || !host.HasSmapi || host.GetMod(this.modManifest.UniqueID) is null)
+            return;
+
+        this.multiplayerHelper.SendMessage(
+            new StructuralSnapshotRequestMessage
+            {
+                Kind = snapshot.Kind,
+                LocationName = snapshot.LocationName,
+                TileX = snapshot.TileX,
+                TileY = snapshot.TileY
+            },
+            MultiplayerMessageTypes.StructuralSnapshotRequest,
+            modIDs: new[] { this.modManifest.UniqueID },
+            playerIDs: new[] { host.PlayerID });
+    }
+
+    private StructuralSnapshotResponseMessage CreateStructuralSnapshotResponse(StructuralSnapshotRequestMessage request)
+    {
+        var response = new StructuralSnapshotResponseMessage
+        {
+            Kind = request.Kind,
+            LocationName = request.LocationName,
+            TileX = request.TileX,
+            TileY = request.TileY
+        };
+
+        var location = Game1.getLocationFromName(request.LocationName);
+        var tile = new Vector2(request.TileX, request.TileY);
+        if (location is null || !location.objects.TryGetValue(tile, out SObject? target))
+        {
+            response.Message = ModText.Get("network.structural.targetMissing");
+            return response;
+        }
+
+        response.DisplayName = target.DisplayName;
+        if (request.Kind == StructuralSnapshotKind.StorageDrive)
+        {
+            if (target.QualifiedItemId != "(BC)" + ModItemCatalog.StorageDrive)
+            {
+                response.Message = ModText.Get("ui.storageDrive.notDrive");
+                return response;
+            }
+
+            response.Success = true;
+            response.StorageDrive = new RemoteStorageDriveSnapshotMessage
+            {
+                SummaryLines = this.storageDriveService.DescribeDrive(target).ToList(),
+                Slots = this.storageDriveService.GetSlotViews(target)
+                    .Select(slot => new RemoteStorageDriveSlotMessage
+                    {
+                        SlotIndex = slot.SlotIndex,
+                        Occupied = slot.Occupied,
+                        QualifiedItemId = slot.Item?.QualifiedItemId ?? string.Empty,
+                        DisplayName = slot.DisplayName,
+                        CapacityUsed = slot.CapacityUsed,
+                        CapacityMax = slot.CapacityMax,
+                        TypesUsed = slot.TypesUsed,
+                        TypesMax = slot.TypesMax
+                    })
+                    .ToList()
+            };
+            return response;
+        }
+
+        if (request.Kind == StructuralSnapshotKind.TransferBus)
+        {
+            if (target.QualifiedItemId is not ("(BC)" + ModItemCatalog.Importer) and not ("(BC)" + ModItemCatalog.Exporter))
+            {
+                response.Message = ModText.Get("ui.transferBus.notBus");
+                return response;
+            }
+
+            response.Success = true;
+            response.TransferBus = new RemoteTransferBusSnapshotMessage
+            {
+                IsExporter = target.QualifiedItemId == "(BC)" + ModItemCatalog.Exporter,
+                OreDictionaryMode = this.transferBusService.IsOreDictionaryModeEnabled(target),
+                FacingDirection = this.transferBusService.GetFacingDirection(target),
+                ConfigurationLines = this.transferBusService.DescribeConfigurationLines(target).ToList(),
+                FilterSlots = this.transferBusService.GetFilterSlotViews(target)
+                    .Select(slot => new RemoteTransferFilterSlotMessage
+                    {
+                        SlotIndex = slot.SlotIndex,
+                        Occupied = slot.Occupied,
+                        QualifiedItemId = slot.QualifiedItemId,
+                        DisplayName = slot.DisplayName,
+                        OreGroups = slot.OreGroups.ToList()
+                    })
+                    .ToList()
+            };
+            return response;
+        }
+
+        response.Message = ModText.Get("network.structural.unknownAction");
+        return response;
+    }
+
     private void HandleStructuralActionRequest(ModMessageReceivedEventArgs e)
     {
         if (!Context.IsMainPlayer)
@@ -624,6 +889,14 @@ internal sealed class NetworkInteractionService
             if (this.TryGetCachedStructuralActionResponse(e.FromPlayerID, request.TransactionId, out var cached))
             {
                 this.SendStructuralResponse(cached, e.FromPlayerID);
+                return;
+            }
+
+            if (this.TryGetPendingRemoteDelivery(e.FromPlayerID, request.TransactionId, RemoteDeliveryKind.StructuralReturnedItem, out var pendingDelivery))
+            {
+                var pendingResponse = this.CreateStructuralResponse(pendingDelivery);
+                this.RememberStructuralActionResponse(e.FromPlayerID, request.TransactionId, pendingResponse);
+                this.SendStructuralResponse(pendingResponse, e.FromPlayerID);
                 return;
             }
 
@@ -670,11 +943,74 @@ internal sealed class NetworkInteractionService
             playerIDs: new[] { playerId });
     }
 
+    private void SendRemoteDeliveryAck(Guid deliveryId, Guid transactionId)
+    {
+        if (deliveryId == Guid.Empty || transactionId == Guid.Empty || Context.IsMainPlayer)
+            return;
+
+        var host = this.multiplayerHelper.GetConnectedPlayers().FirstOrDefault(peer => peer.IsHost);
+        if (host is null || !host.HasSmapi || host.GetMod(this.modManifest.UniqueID) is null)
+            return;
+
+        try
+        {
+            this.multiplayerHelper.SendMessage(
+                new RemoteDeliveryAckMessage
+                {
+                    DeliveryId = deliveryId,
+                    TransactionId = transactionId
+                },
+                MultiplayerMessageTypes.RemoteDeliveryAck,
+                modIDs: new[] { this.modManifest.UniqueID },
+                playerIDs: new[] { host.PlayerID });
+        }
+        catch (Exception ex)
+        {
+            this.monitor.Log($"Failed to ACK SVSAP remote delivery {deliveryId:N}: {ex.Message}", LogLevel.Trace);
+        }
+    }
+
+    private void HandleRemoteDeliveryAck(ModMessageReceivedEventArgs e)
+    {
+        if (!Context.IsMainPlayer)
+            return;
+
+        var ack = e.ReadAs<RemoteDeliveryAckMessage>();
+        if (ack.DeliveryId == Guid.Empty || ack.TransactionId == Guid.Empty)
+            return;
+
+        var removed = this.repository.Data.PendingRemoteDeliveries.RemoveAll(delivery =>
+            delivery.PlayerId == e.FromPlayerID
+            && delivery.DeliveryId == ack.DeliveryId
+            && delivery.TransactionId == ack.TransactionId);
+        if (removed <= 0)
+            return;
+
+        var key = (e.FromPlayerID, ack.TransactionId);
+        this.terminalActionResponseCache.Remove(key);
+        this.structuralResponseCache.Remove(key);
+        this.repository.Save();
+    }
+
     private bool TryGetCachedStructuralActionResponse(long playerId, Guid transactionId, out StructuralActionResponseMessage response)
     {
         response = null!;
         return transactionId != Guid.Empty
             && this.structuralResponseCache.TryGetValue((playerId, transactionId), out response!);
+    }
+
+    private StructuralActionResponseMessage CreateStructuralResponse(PendingRemoteDelivery delivery)
+    {
+        return new StructuralActionResponseMessage
+        {
+            TransactionId = delivery.TransactionId,
+            Kind = delivery.StructuralKind,
+            Success = true,
+            Message = delivery.Message,
+            DeliveryId = delivery.DeliveryId,
+            ReturnedSerializedItem = delivery.ReturnedSerializedItem,
+            ResultNetworkId = delivery.ResultNetworkId
+        };
     }
 
     private void RememberStructuralActionResponse(long playerId, Guid transactionId, StructuralActionResponseMessage response)
@@ -701,7 +1037,23 @@ internal sealed class NetworkInteractionService
         this.StructuralActionResponseReceived?.Invoke(response);
 
         if (response.TransactionId != Guid.Empty && !this.MarkClientTransactionReconciled(response.TransactionId, this.reconciledStructuralTx, this.reconciledStructuralTxOrder))
+        {
+            if (this.IsRemoteDeliveryReconciled(response.DeliveryId))
+            {
+                this.SendRemoteDeliveryAck(response.DeliveryId, response.TransactionId);
+            }
+            else if (response.Success
+                     && response.DeliveryId != Guid.Empty
+                     && !string.IsNullOrWhiteSpace(response.ReturnedSerializedItem)
+                     && this.DeliverStructuralReturnedItem(response.ReturnedSerializedItem, Game1.currentLocation))
+            {
+                this.MarkRemoteDeliveryReconciled(response.DeliveryId);
+                this.SendRemoteDeliveryAck(response.DeliveryId, response.TransactionId);
+            }
+
+            this.RefreshActiveRemoteStructuralMenu();
             return;
+        }
 
         Game1.addHUDMessage(new HUDMessage(
             LocalizeRemoteResponse(response.Success, response.Message, "network.structural.succeeded", "Structure action completed.", "network.structural.failed", "Structure action failed; please retry."),
@@ -715,6 +1067,7 @@ internal sealed class NetworkInteractionService
             if (pending is not null)
                 this.RestoreEscrowedStructuralItem(pending, Game1.currentLocation);
 
+            this.RefreshActiveRemoteStructuralMenu();
             return;
         }
 
@@ -729,13 +1082,28 @@ internal sealed class NetworkInteractionService
             ReturnedSerializedItem = response.ReturnedSerializedItem,
             ResultNetworkId = response.ResultNetworkId
         };
-        this.ReconcileStructuralResult(
+        var reconciled = this.ReconcileStructuralResult(
             response.Kind,
             result,
             Game1.currentLocation,
             showMessage: false,
             actingItem: pending?.ActingItem,
             consumeHeldAlreadyApplied: pending?.EscrowedItem is not null && response.ConsumeHeldOne);
+        if (response.DeliveryId != Guid.Empty && reconciled)
+        {
+            this.MarkRemoteDeliveryReconciled(response.DeliveryId);
+            this.SendRemoteDeliveryAck(response.DeliveryId, response.TransactionId);
+        }
+
+        this.RefreshActiveRemoteStructuralMenu();
+    }
+
+    private void RefreshActiveRemoteStructuralMenu()
+    {
+        if (Game1.activeClickableMenu is RemoteStorageDriveMenu storageMenu)
+            this.RequestRemoteStructuralSnapshot(storageMenu.Snapshot);
+        else if (Game1.activeClickableMenu is RemoteTransferBusMenu transferMenu)
+            this.RequestRemoteStructuralSnapshot(transferMenu.Snapshot);
     }
 
     private StructuralActionResponseMessage ExecuteStructuralAction(StructuralActionRequestMessage request, long fromPlayerId)
@@ -777,13 +1145,18 @@ internal sealed class NetworkInteractionService
             request.HeldQualifiedItemId,
             request.HeldDisplayName,
             request.HeldStack,
-            heldSerializedItem);
+            heldSerializedItem,
+            request.SlotIndex,
+            request.FilterQualifiedItemId,
+            request.FacingDirection);
 
         response.Success = result.Success;
         response.Message = result.Message;
         response.ConsumeHeldOne = result.ConsumeHeldOne;
         response.ReturnedSerializedItem = result.ReturnedSerializedItem;
         response.ResultNetworkId = result.ResultNetworkId;
+        if (this.RegisterStructuralRemoteDelivery(fromPlayerId, request, response))
+            this.repository.Save();
         return response;
     }
 
@@ -846,7 +1219,10 @@ internal sealed class NetworkInteractionService
         string heldQualifiedItemId,
         string heldDisplayName,
         int heldStack,
-        string heldSerializedItem)
+        string heldSerializedItem,
+        int slotIndex = -1,
+        string filterQualifiedItemId = "",
+        int facingDirection = -1)
     {
         return kind switch
         {
@@ -855,6 +1231,14 @@ internal sealed class NetworkInteractionService
             StructuralActionKind.StorageDriveInteract => this.storageDriveService.ApplyInteract(target, location, tile, heldQualifiedItemId, heldSerializedItem),
             StructuralActionKind.PatternProviderInteract => this.patternProviderService.ApplyInteract(target, heldQualifiedItemId, heldSerializedItem),
             StructuralActionKind.TransferBusConfigure => this.transferBusService.ApplyConfigure(target, heldQualifiedItemId, heldDisplayName, heldStack),
+            StructuralActionKind.StorageDriveEjectSlot => this.storageDriveService.ApplyEjectCellSlot(target, slotIndex),
+            StructuralActionKind.TransferBusToggleFilterMode => this.transferBusService.ApplyToggleFilterMode(target),
+            StructuralActionKind.TransferBusToggleOreDictionary => this.transferBusService.ApplyToggleOreDictionaryMode(target),
+            StructuralActionKind.TransferBusToggleQuality => this.transferBusService.ApplyToggleQualityStrategy(target),
+            StructuralActionKind.TransferBusClearFilter => this.transferBusService.ApplyClearFilter(target),
+            StructuralActionKind.TransferBusSetFacing => this.transferBusService.ApplySetFacingDirection(target, facingDirection),
+            StructuralActionKind.TransferBusSetFilterSlot => this.transferBusService.ApplySetFilterSlot(target, slotIndex, filterQualifiedItemId),
+            StructuralActionKind.TransferBusClearFilterSlot => this.transferBusService.ApplyClearFilterSlot(target, slotIndex),
             _ => StructuralActionResult.Fail(ModText.Get("network.structural.unknownAction"))
         };
     }
@@ -919,7 +1303,7 @@ internal sealed class NetworkInteractionService
         };
     }
 
-    private void ReconcileStructuralResult(
+    private bool ReconcileStructuralResult(
         StructuralActionKind kind,
         StructuralActionResult result,
         GameLocation? location,
@@ -931,7 +1315,7 @@ internal sealed class NetworkInteractionService
             Game1.addHUDMessage(new HUDMessage(result.Message, result.Success ? HUDMessage.newQuest_type : HUDMessage.error_type));
 
         if (!result.Success)
-            return;
+            return false;
 
         if (kind == StructuralActionKind.LinkSelectCore && result.ResultNetworkId != Guid.Empty)
         {
@@ -972,17 +1356,24 @@ internal sealed class NetworkInteractionService
         }
 
         if (string.IsNullOrWhiteSpace(result.ReturnedSerializedItem))
-            return;
+            return true;
 
+        return this.DeliverStructuralReturnedItem(result.ReturnedSerializedItem, location);
+    }
+
+    private bool DeliverStructuralReturnedItem(string serializedItem, GameLocation? location)
+    {
         try
         {
-            var item = SerializedItemCodec.CreateItem(result.ReturnedSerializedItem, 1);
+            var item = SerializedItemCodec.CreateItem(serializedItem, 1);
             if (!Game1.player.addItemToInventoryBool(item))
                 Game1.createItemDebris(item, Game1.player.getStandingPosition(), -1, location ?? Game1.currentLocation);
+            return true;
         }
         catch (Exception ex)
         {
             this.monitor.Log($"Could not reconcile structural returned item: {ex.Message}", LogLevel.Warn);
+            return false;
         }
     }
 
@@ -1037,19 +1428,21 @@ internal sealed class NetworkInteractionService
         this.RestoreItemsToPlayer(new[] { item }, location);
     }
 
-    private void DeliverRemoteTerminalWithdrawal(TerminalActionResponseMessage response)
+    private bool DeliverRemoteTerminalWithdrawal(TerminalActionResponseMessage response)
     {
         if (string.IsNullOrWhiteSpace(response.ReturnedSerializedItem) || response.ReturnedCount <= 0)
-            return;
+            return true;
 
         try
         {
             var item = SerializedItemCodec.CreateItem(response.ReturnedSerializedItem, response.ReturnedCount);
             this.RestoreItemsToPlayer(new[] { item }, Game1.currentLocation);
+            return true;
         }
         catch (Exception ex)
         {
             this.monitor.Log($"Could not deliver remote terminal withdrawal item: {ex.Message}", LogLevel.Warn);
+            return false;
         }
     }
 
@@ -1155,6 +1548,21 @@ internal sealed class NetworkInteractionService
         return true;
     }
 
+    private bool IsRemoteDeliveryReconciled(Guid deliveryId)
+    {
+        return deliveryId != Guid.Empty && this.reconciledRemoteDeliveries.Contains(deliveryId);
+    }
+
+    private void MarkRemoteDeliveryReconciled(Guid deliveryId)
+    {
+        if (deliveryId == Guid.Empty || !this.reconciledRemoteDeliveries.Add(deliveryId))
+            return;
+
+        this.reconciledRemoteDeliveryOrder.Enqueue(deliveryId);
+        while (this.reconciledRemoteDeliveryOrder.Count > ClientReconcileCacheLimit)
+            this.reconciledRemoteDeliveries.Remove(this.reconciledRemoteDeliveryOrder.Dequeue());
+    }
+
     private void MoveEndpointStateToNetwork(Guid? previousNetworkId, Guid selectedNetworkId, Guid endpointId)
     {
         if (!previousNetworkId.HasValue || previousNetworkId.Value == selectedNetworkId)
@@ -1222,22 +1630,7 @@ internal sealed class NetworkInteractionService
 
     private void OpenStorageDriveMenu(SObject drive, GameLocation location, Vector2 tile)
     {
-        var actions = this.storageDriveService.GetOccupiedSlotIndexes(drive)
-            .Select(slotIndex => new SVSAPMenuAction(
-                ModText.Format("ui.status.action.ejectSlot", slotIndex + 1),
-                () =>
-                {
-                    return this.storageDriveService.TryEjectCellSlot(drive, location, tile, slotIndex, out var message)
-                        ? message
-                        : message;
-                },
-                () => this.storageDriveService.HasCellSlot(drive, slotIndex)))
-            .ToList();
-
-        Game1.activeClickableMenu = new SVSAPStatusMenu(
-            drive.DisplayName,
-            () => this.storageDriveService.DescribeDrive(drive),
-            actions);
+        Game1.activeClickableMenu = new StorageDriveMenu(drive, location, tile, this.storageDriveService);
     }
 
     private void OpenPatternProviderMenu(SObject provider)
@@ -1262,23 +1655,7 @@ internal sealed class NetworkInteractionService
 
     private void OpenTransferBusMenu(SObject bus)
     {
-        var actions = new[]
-        {
-            new SVSAPMenuAction(
-                ModText.Get("ui.transferBus.action.clearFilter"),
-                () => this.transferBusService.TryClearFilter(bus, out var message) ? message : message),
-            new SVSAPMenuAction(
-                ModText.Get("ui.transferBus.action.toggleFilterMode"),
-                () => this.transferBusService.TryToggleFilterMode(bus, out var message) ? message : message),
-            new SVSAPMenuAction(
-                ModText.Get("ui.transferBus.action.toggleQuality"),
-                () => this.transferBusService.TryToggleQualityStrategy(bus, out var message) ? message : message)
-        };
-
-        Game1.activeClickableMenu = new SVSAPStatusMenu(
-            bus.DisplayName,
-            () => this.transferBusService.DescribeConfigurationLines(bus),
-            actions);
+        Game1.activeClickableMenu = new TransferBusMenu(bus, this.transferBusService);
     }
 
     private void OpenCraftingMonitor(SObject monitorObject)
@@ -1476,6 +1853,14 @@ internal sealed class NetworkInteractionService
             return;
         }
 
+        if (response.PushUpdate)
+        {
+            if (Game1.activeClickableMenu is RemoteNetworkTerminalMenu pushMenu && pushMenu.MatchesNetwork(response.NetworkId))
+                pushMenu.ApplySnapshot(response);
+
+            return;
+        }
+
         if (Game1.activeClickableMenu is RemoteNetworkTerminalMenu remoteMenu && remoteMenu.MatchesNetwork(response.NetworkId))
             remoteMenu.ApplySnapshot(response);
         else
@@ -1552,10 +1937,20 @@ internal sealed class NetworkInteractionService
                 return;
             }
 
+            if (this.TryGetPendingRemoteDelivery(e.FromPlayerID, request.TransactionId, RemoteDeliveryKind.TerminalWithdraw, out var pendingDelivery))
+            {
+                var pendingResponse = this.CreateTerminalResponse(pendingDelivery);
+                this.RememberTerminalActionResponse(e.FromPlayerID, request.TransactionId, pendingResponse);
+                this.SendTerminalActionResponse(pendingResponse, e.FromPlayerID);
+                return;
+            }
+
             var response = this.ExecuteTerminalActionRequest(request, e.FromPlayerID);
             this.RememberTerminalActionResponse(e.FromPlayerID, request.TransactionId, response);
 
             this.SendTerminalActionResponse(response, e.FromPlayerID);
+            if (response.Success && response.Snapshot is not null && response.Snapshot.Success)
+                this.BroadcastTerminalSnapshotUpdate(response.Snapshot, e.FromPlayerID);
         }
         catch (Exception ex)
         {
@@ -1597,11 +1992,146 @@ internal sealed class NetworkInteractionService
             playerIDs: new[] { playerId });
     }
 
+    private void BroadcastTerminalSnapshotUpdate(TerminalSnapshotResponseMessage snapshot, long exceptPlayerId)
+    {
+        var playerIds = this.GetRemotePlayerIdsForPush(exceptPlayerId);
+        if (playerIds.Length == 0)
+            return;
+
+        var push = new TerminalSnapshotResponseMessage
+        {
+            NetworkId = snapshot.NetworkId,
+            EndpointId = snapshot.EndpointId,
+            Crafting = snapshot.Crafting,
+            PushUpdate = true,
+            Success = snapshot.Success,
+            Message = snapshot.Message,
+            NetworkName = snapshot.NetworkName,
+            SourceCount = snapshot.SourceCount,
+            TotalEntryCount = snapshot.TotalEntryCount,
+            EntryOffset = snapshot.EntryOffset,
+            EntryLimit = snapshot.EntryLimit,
+            Truncated = snapshot.Truncated,
+            StorageSummary = snapshot.StorageSummary,
+            LockedQualifiedItemIds = snapshot.LockedQualifiedItemIds,
+            Entries = snapshot.Entries
+        };
+
+        try
+        {
+            this.multiplayerHelper.SendMessage(
+                push,
+                MultiplayerMessageTypes.TerminalSnapshotResponse,
+                modIDs: new[] { this.modManifest.UniqueID },
+                playerIDs: playerIds);
+        }
+        catch (Exception ex)
+        {
+            this.monitor.Log($"Failed to broadcast SVSAP terminal snapshot update: {ex.Message}", LogLevel.Warn);
+        }
+    }
+
     private bool TryGetCachedTerminalActionResponse(long playerId, Guid transactionId, out TerminalActionResponseMessage response)
     {
         response = null!;
         return transactionId != Guid.Empty
             && this.terminalActionResponseCache.TryGetValue((playerId, transactionId), out response!);
+    }
+
+    private TerminalActionResponseMessage CreateTerminalResponse(PendingRemoteDelivery delivery)
+    {
+        var response = new TerminalActionResponseMessage
+        {
+            TransactionId = delivery.TransactionId,
+            NetworkId = delivery.NetworkId,
+            Success = true,
+            Message = delivery.Message,
+            DeliveryId = delivery.DeliveryId,
+            ReturnedSerializedItem = delivery.ReturnedSerializedItem,
+            ReturnedCount = delivery.ReturnedCount
+        };
+
+        if (this.repository.TryGetNetwork(delivery.NetworkId, out _))
+        {
+            response.Snapshot = this.CreateTerminalSnapshotResponse(new TerminalSnapshotRequestMessage
+            {
+                NetworkId = delivery.NetworkId,
+                EndpointId = delivery.EndpointId
+            });
+        }
+
+        return response;
+    }
+
+    private bool TryGetPendingRemoteDelivery(long playerId, Guid transactionId, RemoteDeliveryKind kind, out PendingRemoteDelivery delivery)
+    {
+        delivery = null!;
+        if (playerId <= 0 || transactionId == Guid.Empty)
+            return false;
+
+        delivery = this.repository.Data.PendingRemoteDeliveries.FirstOrDefault(pending =>
+            pending.PlayerId == playerId
+            && pending.TransactionId == transactionId
+            && pending.Kind == kind)!;
+        return delivery is not null;
+    }
+
+    private bool RegisterTerminalRemoteDelivery(long playerId, TerminalActionRequestMessage request, TerminalActionResponseMessage response)
+    {
+        if (!response.Success
+            || string.IsNullOrWhiteSpace(response.ReturnedSerializedItem)
+            || response.ReturnedCount <= 0
+            || playerId <= 0
+            || request.TransactionId == Guid.Empty)
+        {
+            return false;
+        }
+
+        var delivery = this.GetOrCreatePendingRemoteDelivery(playerId, request.TransactionId, RemoteDeliveryKind.TerminalWithdraw);
+        delivery.TerminalAction = request.Action;
+        delivery.NetworkId = request.NetworkId;
+        delivery.EndpointId = request.EndpointId;
+        delivery.Message = response.Message;
+        delivery.ReturnedSerializedItem = response.ReturnedSerializedItem;
+        delivery.ReturnedCount = response.ReturnedCount;
+        response.DeliveryId = delivery.DeliveryId;
+        return true;
+    }
+
+    private bool RegisterStructuralRemoteDelivery(long playerId, StructuralActionRequestMessage request, StructuralActionResponseMessage response)
+    {
+        if (!response.Success
+            || string.IsNullOrWhiteSpace(response.ReturnedSerializedItem)
+            || playerId <= 0
+            || request.TransactionId == Guid.Empty)
+        {
+            return false;
+        }
+
+        var delivery = this.GetOrCreatePendingRemoteDelivery(playerId, request.TransactionId, RemoteDeliveryKind.StructuralReturnedItem);
+        delivery.StructuralKind = request.Kind;
+        delivery.ResultNetworkId = response.ResultNetworkId;
+        delivery.Message = response.Message;
+        delivery.ReturnedSerializedItem = response.ReturnedSerializedItem;
+        delivery.ReturnedCount = 1;
+        response.DeliveryId = delivery.DeliveryId;
+        return true;
+    }
+
+    private PendingRemoteDelivery GetOrCreatePendingRemoteDelivery(long playerId, Guid transactionId, RemoteDeliveryKind kind)
+    {
+        if (this.TryGetPendingRemoteDelivery(playerId, transactionId, kind, out var existing))
+            return existing;
+
+        var delivery = new PendingRemoteDelivery
+        {
+            DeliveryId = Guid.NewGuid(),
+            PlayerId = playerId,
+            TransactionId = transactionId,
+            Kind = kind
+        };
+        this.repository.Data.PendingRemoteDeliveries.Add(delivery);
+        return delivery;
     }
 
     private void RememberTerminalActionResponse(long playerId, Guid transactionId, TerminalActionResponseMessage response)
@@ -1626,14 +2156,31 @@ internal sealed class NetworkInteractionService
 
         var response = e.ReadAs<TerminalActionResponseMessage>();
         if (response.TransactionId != Guid.Empty && !this.MarkClientTransactionReconciled(response.TransactionId, this.reconciledTerminalTx, this.reconciledTerminalTxOrder))
+        {
+            if (this.IsRemoteDeliveryReconciled(response.DeliveryId))
+            {
+                this.SendRemoteDeliveryAck(response.DeliveryId, response.TransactionId);
+            }
+            else if (response.Success && response.DeliveryId != Guid.Empty && this.DeliverRemoteTerminalWithdrawal(response))
+            {
+                this.MarkRemoteDeliveryReconciled(response.DeliveryId);
+                this.SendRemoteDeliveryAck(response.DeliveryId, response.TransactionId);
+            }
+
             return;
+        }
 
         this.pendingTerminalDepositItems.TryGetValue(response.TransactionId, out var pendingDepositItems);
         this.pendingTerminalDepositItems.Remove(response.TransactionId);
 
         if (response.Success)
         {
-            this.DeliverRemoteTerminalWithdrawal(response);
+            var delivered = this.DeliverRemoteTerminalWithdrawal(response);
+            if (response.DeliveryId != Guid.Empty && delivered)
+            {
+                this.MarkRemoteDeliveryReconciled(response.DeliveryId);
+                this.SendRemoteDeliveryAck(response.DeliveryId, response.TransactionId);
+            }
             this.RestoreTerminalDepositPayloads(response.ReturnedDepositItems, Game1.currentLocation);
         }
         else if (response.ReturnedDepositItems.Count > 0)
@@ -1679,6 +2226,14 @@ internal sealed class NetworkInteractionService
         if (!response.Success)
         {
             Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteCrafting.snapshotFailed", "SVSAP crafting snapshot failed; please retry."), HUDMessage.error_type));
+            return;
+        }
+
+        if (response.PushUpdate)
+        {
+            if (Game1.activeClickableMenu is RemoteCraftingTerminalMenu pushMenu && pushMenu.MatchesNetwork(response.NetworkId))
+                pushMenu.ApplySnapshot(response);
+
             return;
         }
 
@@ -1751,6 +2306,8 @@ internal sealed class NetworkInteractionService
         this.RememberCraftingActionResponse(e.FromPlayerID, request.TransactionId, response);
 
         this.SendCraftingActionResponse(response, e.FromPlayerID);
+        if (response.Snapshot is not null && response.Snapshot.Success)
+            this.BroadcastCraftingSnapshotUpdate(response.Snapshot, e.FromPlayerID);
     }
 
     private void SendCraftingActionResponse(CraftingActionResponseMessage response, long playerId)
@@ -1760,6 +2317,55 @@ internal sealed class NetworkInteractionService
             MultiplayerMessageTypes.CraftingActionResponse,
             modIDs: new[] { this.modManifest.UniqueID },
             playerIDs: new[] { playerId });
+    }
+
+    private void BroadcastCraftingSnapshotUpdate(CraftingSnapshotResponseMessage snapshot, long exceptPlayerId)
+    {
+        var playerIds = this.GetRemotePlayerIdsForPush(exceptPlayerId);
+        if (playerIds.Length == 0)
+            return;
+
+        var push = new CraftingSnapshotResponseMessage
+        {
+            NetworkId = snapshot.NetworkId,
+            EndpointId = snapshot.EndpointId,
+            PushUpdate = true,
+            Success = snapshot.Success,
+            Message = snapshot.Message,
+            NetworkName = snapshot.NetworkName,
+            NetworkItemTypes = snapshot.NetworkItemTypes,
+            Batches = snapshot.Batches,
+            QualityStrategy = snapshot.QualityStrategy,
+            Recipes = snapshot.Recipes
+        };
+
+        try
+        {
+            this.multiplayerHelper.SendMessage(
+                push,
+                MultiplayerMessageTypes.CraftingSnapshotResponse,
+                modIDs: new[] { this.modManifest.UniqueID },
+                playerIDs: playerIds);
+        }
+        catch (Exception ex)
+        {
+            this.monitor.Log($"Failed to broadcast SVSAP crafting snapshot update: {ex.Message}", LogLevel.Warn);
+        }
+    }
+
+    private long[] GetRemotePlayerIdsForPush(long exceptPlayerId)
+    {
+        if (!Context.IsMainPlayer)
+            return Array.Empty<long>();
+
+        return this.multiplayerHelper.GetConnectedPlayers()
+            .Where(peer => !peer.IsHost
+                && peer.PlayerID != exceptPlayerId
+                && peer.HasSmapi
+                && peer.GetMod(this.modManifest.UniqueID) is not null)
+            .Select(peer => peer.PlayerID)
+            .Distinct()
+            .ToArray();
     }
 
     private bool TryGetCachedCraftingActionResponse(long playerId, Guid transactionId, out CraftingActionResponseMessage response)
@@ -2030,12 +2636,15 @@ internal sealed class NetworkInteractionService
                 break;
         }
 
+        response.Success = success;
+        response.Message = actionMessage;
+        if (success)
+            this.RegisterTerminalRemoteDelivery(fromPlayerId, request, response);
+
         if (success)
             this.transactionService.SaveNetworkState();
 
         this.LogGameplay($"action=terminal_action result={(success ? "success" : "fail")} player={DescribePlayer(player)} network={ShortId(request.NetworkId)} endpoint={ShortId(request.EndpointId)} requestAction={request.Action} amount={request.Amount:N0} tx={ShortId(request.TransactionId)} message={Quote(actionMessage)}");
-        response.Success = success;
-        response.Message = actionMessage;
         response.Snapshot = this.CreateTerminalSnapshotResponse(new TerminalSnapshotRequestMessage { NetworkId = request.NetworkId, EndpointId = request.EndpointId });
         return response;
     }
@@ -2269,6 +2878,20 @@ internal sealed class NetworkInteractionService
                 success = this.patternExecutionService.TryUpdatePipeline(network, request.PipelineId.Value, request.PipelineAction, out actionMessage);
                 break;
 
+            case CraftingMonitorActionKind.PreviewQueueJob when request.QueuePattern is not null:
+                success = this.patternExecutionService.TryPreviewQueuePatternJob(
+                    network,
+                    request.QueuePattern,
+                    Math.Max(1, request.Batches),
+                    out var previewLines,
+                    out var requiresConfirmation,
+                    out actionMessage);
+                response.RequiresConfirmation = success && requiresConfirmation;
+                response.PreviewPattern = request.QueuePattern;
+                response.PreviewBatches = Math.Max(1, request.Batches);
+                response.PreviewLines = previewLines;
+                break;
+
             case CraftingMonitorActionKind.QueueJob when request.QueuePattern is not null:
                 var batches = Math.Max(1, request.Batches);
                 if (this.patternExecutionService.NeedsLongJobConfirmation(network, request.QueuePattern, batches)
@@ -2445,6 +3068,7 @@ internal sealed class NetworkInteractionService
                     OutputSerializedItemPrototype = SerializedItemCodec.SerializePrototype(recipe.OutputPrototype.getOne()),
                     OutputCount = recipe.OutputCount,
                     CanCraft = availability.CanCraft,
+                    IngredientLines = availability.IngredientLines,
                     MissingLines = availability.MissingLines,
                     MissingIngredients = availability.MissingIngredients
                 };
@@ -2853,8 +3477,8 @@ internal sealed class NetworkInteractionService
 
     private EndpointType? GetEndpointType(SObject target)
     {
-        if (target is Chest)
-            return EndpointType.Chest;
+        if (target is Chest chest)
+            return IsSupportedNetworkChest(chest) ? EndpointType.Chest : null;
 
         return target.QualifiedItemId switch
         {
@@ -2878,6 +3502,11 @@ internal sealed class NetworkInteractionService
             "(BC)" + ModItemCatalog.CraftingMonitor => EndpointType.CraftingMonitor,
             _ => target.bigCraftable.Value ? EndpointType.Machine : null
         };
+    }
+
+    private static bool IsSupportedNetworkChest(Chest chest)
+    {
+        return chest.SpecialChestType == Chest.SpecialChestTypes.None;
     }
 
     private NetworkEndpoint CreateEndpoint(Guid endpointId, GameLocation location, Vector2 tile, EndpointType type)

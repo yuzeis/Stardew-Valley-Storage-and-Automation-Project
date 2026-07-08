@@ -247,6 +247,82 @@ internal sealed class PatternExecutionService
         return true;
     }
 
+    public bool TryPreviewQueuePatternJob(NetworkData network, PatternData pattern, int batches, out List<string> lines, out bool requiresLongConfirmation, out string message)
+    {
+        lines = new List<string>();
+        requiresLongConfirmation = false;
+        var clampedBatches = Math.Max(1, batches);
+
+        if (!this.getConfig().EnableAutocrafting)
+        {
+            message = ModText.Get("cpu.queue.autocraftingDisabled");
+            return false;
+        }
+
+        if (pattern.Kind == PatternKind.Processing && !this.getConfig().EnableProcessingPatterns)
+        {
+            message = ModText.Get("cpu.processing.disabled");
+            return false;
+        }
+
+        var targetOutput = pattern.Outputs.FirstOrDefault(output => !string.IsNullOrWhiteSpace(output.QualifiedItemId));
+        if (targetOutput?.QualifiedItemId is null)
+        {
+            message = ModText.Get("cpu.pattern.noOutput");
+            return false;
+        }
+
+        if (pattern.MachineQualifiedItemId == CaskMachineQualifiedItemId)
+        {
+            message = ModText.Get("cpu.queue.caskUsesPipeline");
+            return false;
+        }
+
+        var matrixNodeLimit = this.GetMatrixNodeLimit(network);
+        if (matrixNodeLimit <= 0)
+        {
+            message = ModText.Get("cpu.queue.noMatrix");
+            return false;
+        }
+
+        if (!this.TryCreatePlan(network, Guid.Empty, pattern, clampedBatches, out var steps, out var reservations, out var nodeCount, out message))
+            return false;
+
+        if (nodeCount > matrixNodeLimit)
+        {
+            message = ModText.Format("cpu.queue.matrixTooSmall", nodeCount, matrixNodeLimit);
+            return false;
+        }
+
+        requiresLongConfirmation = steps.Any(step => IsLongRunning(step.Pattern, this.getConfig()));
+        lines.Add(ModText.Format("cpu.preview.output", PatternDisplayNames.Get(pattern), Math.Max(1, targetOutput.Count) * clampedBatches));
+        lines.Add(ModText.Format("cpu.preview.plan", steps.Count, nodeCount, matrixNodeLimit));
+        if (steps.Count == 0)
+            lines.Add(ModText.Format("cpu.queue.alreadyEnough", PatternDisplayNames.Get(pattern)));
+        if (requiresLongConfirmation)
+            lines.Add(ModText.Format("cpu.preview.longJob", FormatProcessingDuration(GetMaxProcessingMinutes(steps))));
+
+        if (reservations.Count > 0)
+        {
+            lines.Add(ModText.Get("cpu.preview.materials"));
+            foreach (var reservation in reservations.Take(8))
+                lines.Add(ModText.Format("cpu.preview.materialLine", ItemDisplayService.GetRequestDisplayName(reservation.Request), reservation.Count));
+            if (reservations.Count > 8)
+                lines.Add(ModText.Format("cpu.preview.moreMaterials", reservations.Count - 8));
+        }
+
+        var stepNames = steps
+            .Select(step => PatternDisplayNames.Get(step.Pattern))
+            .Distinct(StringComparer.CurrentCulture)
+            .Take(5)
+            .ToList();
+        if (stepNames.Count > 0)
+            lines.Add(ModText.Format("cpu.preview.steps", string.Join(", ", stepNames)));
+
+        message = ModText.Get("cpu.preview.ready");
+        return true;
+    }
+
     public bool NeedsLongJobConfirmation(PatternData pattern)
     {
         return this.getConfig().RequireConfirmForLongCpuJobs
@@ -1508,7 +1584,7 @@ internal sealed class PatternExecutionService
 
     private IEnumerable<PatternData> GetStoredPatterns(NetworkData network)
     {
-        foreach (var provider in network.PatternProviders.Values)
+        foreach (var provider in this.GetOrderedPatternProviders(network))
         {
             foreach (var slot in provider.Slots.OrderBy(slot => slot.SlotIndex))
             {
@@ -1522,6 +1598,22 @@ internal sealed class PatternExecutionService
                 }
             }
         }
+    }
+
+    private IEnumerable<PatternProviderData> GetOrderedPatternProviders(NetworkData network)
+    {
+        return network.PatternProviders.Values
+            .Select(provider => new
+            {
+                Provider = provider,
+                Endpoint = network.Endpoints.FirstOrDefault(endpoint => endpoint.EndpointId == provider.EndpointId && endpoint.Type == EndpointType.PatternProvider)
+            })
+            .OrderBy(entry => entry.Endpoint?.Priority ?? int.MaxValue)
+            .ThenBy(entry => entry.Endpoint?.LocationName ?? string.Empty, StringComparer.Ordinal)
+            .ThenBy(entry => entry.Endpoint?.TileY ?? float.MaxValue)
+            .ThenBy(entry => entry.Endpoint?.TileX ?? float.MaxValue)
+            .ThenBy(entry => entry.Provider.EndpointId)
+            .Select(entry => entry.Provider);
     }
 
     private IEnumerable<NetworkEndpoint> GetActiveEndpoints(NetworkData network, EndpointType type)
@@ -1590,11 +1682,8 @@ internal sealed class PatternExecutionService
             .Where(pattern => pattern.Outputs.Any(output => !string.IsNullOrWhiteSpace(output.QualifiedItemId)))
             .Select(ClonePattern)
             .ToList();
-        var patternsByOutput = patterns
-            .GroupBy(pattern => pattern.Outputs.First(output => !string.IsNullOrWhiteSpace(output.QualifiedItemId)).QualifiedItemId!)
-            .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
 
-        var context = new PlanContext(network, patterns, patternsByOutput, planningJobId);
+        var context = new PlanContext(network, patterns, planningJobId);
         var requestedCount = Math.Max(1, targetBatches) * Math.Max(1, targetOutput.Count);
         if (!this.PlanPatternOutputNeed(context, targetPattern, targetOutput, requestedCount, 0))
         {
@@ -1704,7 +1793,7 @@ internal sealed class PatternExecutionService
         if (available > 0)
             this.AddReservation(context, new NetworkItemRequest { QualifiedItemId = qualifiedItemId, Count = available }, available);
 
-        if (!context.PatternsByOutput.TryGetValue(qualifiedItemId, out var pattern))
+        if (!TryFindPatternForConcreteOutput(context, qualifiedItemId, out var pattern))
         {
             context.MissingLines.Add(ModText.Format("cpu.plan.missingItem", qualifiedItemId, deficit));
             return false;
@@ -1827,6 +1916,21 @@ internal sealed class PatternExecutionService
 
         pattern = new PatternData();
         output = new NetworkItemRequest();
+        return false;
+    }
+
+    private static bool TryFindPatternForConcreteOutput(PlanContext context, string qualifiedItemId, out PatternData pattern)
+    {
+        foreach (var candidate in context.Patterns)
+        {
+            if (candidate.Outputs.Any(output => string.Equals(output.QualifiedItemId, qualifiedItemId, StringComparison.Ordinal)))
+            {
+                pattern = candidate;
+                return true;
+            }
+        }
+
+        pattern = new PatternData();
         return false;
     }
 
@@ -2505,17 +2609,15 @@ internal sealed class PatternExecutionService
 
     private sealed class PlanContext
     {
-        public PlanContext(NetworkData network, IReadOnlyList<PatternData> patterns, Dictionary<string, PatternData> patternsByOutput, Guid planningJobId)
+        public PlanContext(NetworkData network, IReadOnlyList<PatternData> patterns, Guid planningJobId)
         {
             this.Network = network;
             this.Patterns = patterns;
-            this.PatternsByOutput = patternsByOutput;
             this.PlanningJobId = planningJobId;
         }
 
         public NetworkData Network { get; }
         public IReadOnlyList<PatternData> Patterns { get; }
-        public Dictionary<string, PatternData> PatternsByOutput { get; }
         public Guid PlanningJobId { get; }
         public Dictionary<string, int> RequestAvailable { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, int> ConcreteAvailable { get; } = new(StringComparer.Ordinal);

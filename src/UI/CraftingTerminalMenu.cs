@@ -10,6 +10,8 @@ namespace SVSAP.UI;
 
 internal sealed class CraftingTerminalMenu : IClickableMenu
 {
+    private const int ViewRefreshTicks = 5;
+
     private readonly NetworkData network;
     private readonly InventoryScanner scanner;
     private readonly CraftingRecipeService craftingRecipeService;
@@ -26,6 +28,10 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
     private int batches = 1;
     private bool showCraftableOnly;
     private MaterialQualityStrategy qualityStrategy = MaterialQualityStrategy.LowQualityFirst;
+    private NetworkInventorySnapshot cachedSnapshot = new();
+    private IReadOnlyList<NetworkCraftingRecipe> cachedVisibleRecipes = Array.Empty<NetworkCraftingRecipe>();
+    private Dictionary<NetworkCraftingRecipe, CraftingAvailability> cachedAvailability = new();
+    private int cachedAtTick = -1;
 
     public CraftingTerminalMenu(
         NetworkData network,
@@ -91,7 +97,7 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
 
         var visible = this.GetVisibleRecipes();
         this.recipeGrid.ClampScroll(visible.Count);
-        var snapshot = this.scanner.Scan(this.network);
+        var snapshot = this.GetCachedSnapshot();
         var innerX = this.xPositionOnScreen + SVSAPMenuWidgets.Pad;
         var top = this.yPositionOnScreen + 24;
         var title = ModText.Format("craftingTerminal.title", this.network.Name, visible.Count, snapshot.Entries.Count);
@@ -108,7 +114,7 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
             b,
             visible,
             recipe => recipe.OutputPrototype,
-            recipe => recipe.OutputCount * (long)this.batches,
+            _ => 0,
             recipe => !this.GetAvailability(recipe).CanCraft,
             recipe => this.GetAvailability(recipe).CanCraft ? null : "!");
 
@@ -184,16 +190,7 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
         if (!this.EnsureActionAllowed())
             return;
 
-        if (this.craftingRecipeService.TryCraft(this.network, recipe, this.batches, this.qualityStrategy, out var message))
-        {
-            Game1.addHUDMessage(new HUDMessage(message, HUDMessage.newQuest_type));
-            Game1.playSound("coin");
-        }
-        else
-        {
-            Game1.addHUDMessage(new HUDMessage(message, HUDMessage.error_type));
-            Game1.playSound("cancel");
-        }
+        this.OpenCraftConfirmation(recipe);
     }
 
     public override void receiveKeyPress(Keys key)
@@ -221,15 +218,44 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
         this.recipeGrid.ClampScroll(this.GetVisibleRecipes().Count);
     }
 
-    private List<NetworkCraftingRecipe> GetVisibleRecipes()
+    private IReadOnlyList<NetworkCraftingRecipe> GetVisibleRecipes()
+    {
+        this.RefreshCacheIfNeeded();
+        return this.cachedVisibleRecipes;
+    }
+
+    private NetworkInventorySnapshot GetCachedSnapshot()
+    {
+        this.RefreshCacheIfNeeded();
+        return this.cachedSnapshot;
+    }
+
+    private void RefreshCacheIfNeeded()
     {
         this.SyncSearchFromInput();
+        var tick = Game1.ticks;
+        if (this.cachedAtTick >= 0 && tick >= this.cachedAtTick && tick - this.cachedAtTick < ViewRefreshTicks)
+            return;
+
+        this.cachedSnapshot = this.scanner.Scan(this.network);
+        var availability = new Dictionary<NetworkCraftingRecipe, CraftingAvailability>();
+        CraftingAvailability getAvailability(NetworkCraftingRecipe recipe)
+        {
+            if (!availability.TryGetValue(recipe, out var value))
+            {
+                value = this.craftingRecipeService.GetAvailability(this.network, recipe, this.batches, this.qualityStrategy);
+                availability[recipe] = value;
+            }
+
+            return value;
+        }
+
         var visible = this.recipes.AsEnumerable();
 
         if (this.showCraftableOnly)
         {
             visible = visible.Where(recipe =>
-                this.GetAvailability(recipe).CanCraft);
+                getAvailability(recipe).CanCraft);
         }
 
         if (!string.IsNullOrWhiteSpace(this.search))
@@ -239,12 +265,23 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
                 || recipe.OutputPrototype.QualifiedItemId.Contains(this.search, StringComparison.OrdinalIgnoreCase));
         }
 
-        return visible.ToList();
+        this.cachedAvailability = availability;
+        this.cachedVisibleRecipes = visible
+            .OrderByDescending(recipe => getAvailability(recipe).CanCraft)
+            .ThenBy(recipe => recipe.DisplayName, StringComparer.CurrentCultureIgnoreCase)
+            .ToList();
+        this.cachedAtTick = tick;
     }
 
     private CraftingAvailability GetAvailability(NetworkCraftingRecipe recipe)
     {
-        return this.craftingRecipeService.GetAvailability(this.network, recipe, this.batches, this.qualityStrategy);
+        this.RefreshCacheIfNeeded();
+        if (this.cachedAvailability.TryGetValue(recipe, out var availability))
+            return availability;
+
+        availability = this.craftingRecipeService.GetAvailability(this.network, recipe, this.batches, this.qualityStrategy);
+        this.cachedAvailability[recipe] = availability;
+        return availability;
     }
 
     private string GetQualityStrategyLabel()
@@ -268,15 +305,58 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
         return false;
     }
 
+    private void OpenCraftConfirmation(NetworkCraftingRecipe recipe)
+    {
+        var availability = this.GetAvailability(recipe);
+        var lines = new List<string>
+        {
+            ModText.Format("craftingTerminal.tooltip.output", recipe.OutputCount * this.batches),
+            availability.CanCraft ? ModText.Get("craftingTerminal.confirm.ready") : ModText.Get("craftingTerminal.confirm.missing")
+        };
+        lines.AddRange(availability.IngredientLines);
+
+        Game1.activeClickableMenu = new CraftingConfirmationMenu(
+            this,
+            recipe.DisplayName,
+            lines,
+            () => this.ExecuteCraft(recipe));
+        Game1.playSound("smallSelect");
+    }
+
+    private void ExecuteCraft(NetworkCraftingRecipe recipe)
+    {
+        if (!this.EnsureActionAllowed())
+            return;
+
+        if (this.craftingRecipeService.TryCraft(this.network, recipe, this.batches, this.qualityStrategy, out var message))
+        {
+            Game1.addHUDMessage(new HUDMessage(message, HUDMessage.newQuest_type));
+            Game1.playSound("coin");
+            this.InvalidateCache();
+        }
+        else
+        {
+            Game1.addHUDMessage(new HUDMessage(message, HUDMessage.error_type));
+            Game1.playSound("cancel");
+            this.InvalidateCache();
+        }
+    }
+
     private void ResetScroll()
     {
         this.recipeGrid.ResetScroll();
+        this.InvalidateCache();
     }
 
     private void SyncSearchFromInput()
     {
         if (SVSAPMenuWidgets.SyncSearchText(this.searchInput, ref this.search))
             this.ResetScroll();
+    }
+
+    private void InvalidateCache()
+    {
+        this.cachedAtTick = -1;
     }
 
     private void DrawHoverTooltip(SpriteBatch b, IReadOnlyList<NetworkCraftingRecipe> visible)
@@ -293,10 +373,8 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
             ModText.Format("craftingTerminal.tooltip.output", recipe.OutputCount * this.batches),
             availability.CanCraft ? ModText.Get("craftingTerminal.tooltip.ready") : ModText.Get("craftingTerminal.tooltip.missing")
         };
-        if (availability.MissingLines.Count > 0)
-            lines.AddRange(availability.MissingLines.Take(6));
-        else
-            lines.AddRange(recipe.Ingredients.Take(6).Select(input => $"{input.DisplayKey} x{input.Count * this.batches:N0}"));
+        if (availability.IngredientLines.Count > 0)
+            lines.AddRange(availability.IngredientLines.Take(6));
 
         if (recipe.Ingredients.Count > 6)
             lines.Add(ModText.Format("craftingTerminal.tooltip.moreIngredients", recipe.Ingredients.Count - 6));

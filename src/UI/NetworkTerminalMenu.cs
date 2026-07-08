@@ -519,14 +519,10 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
             var lines = new List<string>
             {
                 ModText.Format("terminal.tooltip.count", entry.AvailableCount, entry.ReservedCount > 0 ? ModText.Format("terminal.tooltip.reserved", entry.ReservedCount) : string.Empty),
-                ModText.Format("terminal.tooltip.qualityPrice", entry.Key.Quality, TerminalInventoryFilters.GetSalePrice(entry.Prototype))
+                ModText.Format("terminal.tooltip.qualityPrice", ItemDisplayService.GetQualityDisplayName(entry.Key.Quality), TerminalInventoryFilters.GetSalePrice(entry.Prototype))
             };
-            lines.AddRange(entry.Locations
-                .OrderByDescending(location => location.Count)
-                .Take(5)
-                .Select(FormatLocationLine));
-            if (entry.Locations.Count > 5)
-                lines.Add(ModText.Format("terminal.tooltip.moreStacks", entry.Locations.Count - 5));
+            if (entry.Locations.Count > 1)
+                lines.Add(ModText.Format("terminal.tooltip.stackSummary", entry.Locations.Count));
 
             SVSAPMenuWidgets.DrawTooltipBox(b, mx + 28, my + 28, entry.Prototype.DisplayName, lines);
             return;

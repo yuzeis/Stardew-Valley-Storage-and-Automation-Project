@@ -341,6 +341,8 @@ public sealed class ModEntry : Mod
     {
         this.WarnIfPeerMissingRequiredMod(e.Peer);
         this.UpdatePeerActionCompatibility(e.Peer);
+        if (Context.IsMainPlayer && !e.Peer.IsHost && this.PeerHasThisMod(e.Peer))
+            this.networkInteractionService.ResendPendingRemoteDeliveries(e.Peer.PlayerID);
     }
 
     private void OnPeerDisconnected(object? sender, PeerDisconnectedEventArgs e)
@@ -606,7 +608,7 @@ public sealed class ModEntry : Mod
 
         try
         {
-            Require(api.ApiVersion == 1, $"ApiVersion should be 1, actual {api.ApiVersion}.");
+            Require(api.ApiVersion == 2, $"ApiVersion should be 2, actual {api.ApiVersion}.");
             Require(!string.IsNullOrWhiteSpace(api.NetworkIdModDataKey), "NetworkIdModDataKey must not be empty.");
             Require(!string.IsNullOrWhiteSpace(api.EndpointIdModDataKey), "EndpointIdModDataKey must not be empty.");
             passed.Add("api-shape");

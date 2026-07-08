@@ -949,7 +949,8 @@ internal sealed class InventoryTransactionService
 
     private static bool IsSupportedNetworkChest(Chest chest)
     {
-        return chest.SpecialChestType == Chest.SpecialChestTypes.None;
+        return chest.SpecialChestType == Chest.SpecialChestTypes.None
+            || chest.SpecialChestType.ToString().Contains("Big", StringComparison.OrdinalIgnoreCase);
     }
 
     private static IEnumerable<(Vector2 Tile, Chest Chest)> GetAdjacentWritableChests(GameLocation location, Vector2 origin)

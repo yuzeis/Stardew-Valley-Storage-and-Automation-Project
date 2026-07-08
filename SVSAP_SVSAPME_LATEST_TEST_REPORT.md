@@ -1,191 +1,80 @@
-# SVSAP / SVSAPME 最新完整测试报告
+# SVSAP / SVSAPME 最新测试报告
 
-生成时间：2026-07-06 14:31 +08:00  
-适用仓库：当前 SVSAP / SVSAPME 发布 checkout  
-版本口径：`1.3.0`，版本代号 `Mühenlohn`（文件名使用 `Muehenlohn`）  
-判定规则：`NEED REPAIR` 只表示已通过测试发现 mod 本体代码漏洞。缺样本、缺旧存档、无法在当前环境复现，不再写作 `NEED REPAIR`。
+更新时间：2026-07-08 15:10 CST
 
-## 一、总览结论
+版本口径：`1.4.0-alpha.1`  
+展示名：`Ver1.4.0Alpha1`
 
-| 项目 | 状态 | 证据 |
-|---|---:|---|
-| SVSAP 自测 | PASS | `e2e-runs\full-1.3.0-muehenlohn-20260706T1427\SMAPI-latest.txt`：`SVSAP_SELFTEST_OK 28/28` |
-| SVSAPME 自测 | PASS | `e2e-runs\full-1.3.0-muehenlohn-20260706T1427\SMAPI-latest.txt`：`SVSAPME selftest completed: 35 implemented case(s) passed.` |
-| FullMatrix 单人 E2E | PASS | `e2e-runs\full-1.3.0-muehenlohn-20260706T1427\full-matrix-complete.json`：`pass=true`、`passed=45`、`total=45` |
-| P0P1 单人 E2E | PASS | `e2e-runs\p0p1-single-1.3.0-muehenlohn-20260706T1428\single-complete.json`：R1-R6 全 PASS |
-| P0P1 多人 E2E | PASS | `e2e-runs\p0p1-multi-1.3.0-muehenlohn-20260706T1429\host-complete.json`：M1-M5 全 PASS |
-| host 断连降级 | PASS | `e2e-runs\p0p1-multi-1.3.0-muehenlohn-20260706T1429\client-host-offline.json`：`hostConnected=false`、`reportSent=false` |
-| SVSAP RouteA 多人结构事务 | PASS | `e2e-runs\svsap-routea-1.3.0-muehenlohn-20260706T1430\client-complete.json`：结构请求、托管返还、hand-switch 干扰 4/4 通过 |
-| 依赖缺失降级 | PASS | `e2e-runs\missing-svsap-20260704T150012\SMAPI-latest.txt`：缺 `Koizumi.SVSAP` 时 SVSAPME 被 SMAPI 跳过且进程不崩 |
-| Debug/Release 构建 | PASS | `SVSAP`、`SVSAPME` Debug 与 Release 均 0 warning / 0 error |
-| 当前 NEED REPAIR | PASS | 0 项。当前没有测试证明 mod 本体存在待修漏洞 |
-| 唯一未判 PASS 项 | NEED SAMPLE | ID 82 旧版本升级存档，需真实旧存档样本或固定迁移夹具 |
+## 总结
 
-## 二、E2E 实测明细
+当前为 Ver1.4.0 Alpha1 版本审查整改结果，不是发布动作。第三轮审阅后的风险清理已完成，且已在当前源码/Debug 部署上重跑 Debug/Release 构建、i18n、SMAPI 自测、FullMatrix、P0/P1 单人、P0/P1 多人与 SVSAP RouteA 多人门禁。代码层面当前结论为 GO WITH RISKS；剩余风险主要是人工截图审美、modded chest 扩容兼容和长期 pending delivery 清理策略。
 
-| 套件 | 覆盖 | 状态 | 证据文件 |
-|---|---|---:|---|
-| FullMatrix | 36-71、81、83、84、88-93 | PASS 45/45 | `e2e-runs\full-1.3.0-muehenlohn-20260706T1427\full-matrix-complete.json` |
-| P0P1 single | R1-R6：单机防复制、回收、网络插入、L7 断电/有电 | PASS | `e2e-runs\p0p1-single-1.3.0-muehenlohn-20260706T1428\single-complete.json` |
-| P0P1 multi | M1-M5：farmhand 移动/持有/消耗、host-authoritative、读数同步 | PASS | `e2e-runs\p0p1-multi-1.3.0-muehenlohn-20260706T1429\host-complete.json` |
-| P0P1 offline | host 断连后 farmhand 上报静默失败 | PASS | `e2e-runs\p0p1-multi-1.3.0-muehenlohn-20260706T1429\client-host-offline.json` |
-| SVSAP RouteA multi | SVSAP 结构请求、client escrow/response、hand-switch 干扰 | PASS | `e2e-runs\svsap-routea-1.3.0-muehenlohn-20260706T1430\client-complete.json` |
-| 缺依赖启动 | 仅装 SVSAPME、缺 SVSAP | PASS | `e2e-runs\missing-svsap-20260704T150012\SMAPI-latest.txt` |
+## 当前验证
 
-关键新增断言：
+| 项目 | 结果 | 证据 |
+|---|---|---|
+| SVSAP Debug build | PASS | `dotnet build SVSAP/SVSAP.csproj -c Debug`，0 warning / 0 error |
+| SVSAP Release build | PASS | `dotnet build SVSAP/SVSAP.csproj -c Release`，0 warning / 0 error |
+| SVSAPME Debug build | PASS | `dotnet build SVSAPME/SVSAPME.csproj -c Debug`，0 warning / 0 error |
+| SVSAPME Release build | PASS | `dotnet build SVSAPME/SVSAPME.csproj -c Release`，0 warning / 0 error |
+| i18n parity | PASS | SVSAP `570/570`，SVSAPME `371/371`，本轮静态 literal missing 为 0 |
+| Release zip structure | PASS | `SVSAP 1.4.0-alpha.1.zip` 与 `SVSAPME 1.4.0-alpha.1.zip` 均为单 root、无 `config.json`、无 `bin/obj/.git/e2e/backups` |
+| manifest version | PASS | zip 内 manifest 均为 `1.4.0-alpha.1`；SVSAPME 依赖 SVSAP `1.4.0-alpha.1+` |
+| SVSAP selftest | PASS | SMAPI log：`SVSAP_SELFTEST_OK 31/31`，包含 `remote-structural-snapshot-contract` 与 `gui-layout-bounds` |
+| SVSAPME selftest | PASS | SMAPI log：`SVSAPME selftest completed: 37 implemented case(s) passed.`，包含 `PASS gui-layout-bounds` |
+| GUI bounds selftest | PASS | `StorageDriveMenu`、`TransferBusMenu`、`PoweredTransferMenu`、`SingleBlockFarmMenu`、`SingleBlockProcessorMenu` 覆盖 1280x720 与 800x720 等紧凑布局边界 |
+| FullMatrix single-player E2E | PASS | `e2e-runs/full-1.4.0-alpha1-20260708-150141/full-matrix-complete.json`：`pass=true`，`passed=45`，`total=45` |
+| FullMatrix machine roundtrip | PASS | FullMatrix 81：`types=37 repositoryRoundTrip=true networkModData=true` |
+| FullMatrix debug recipes | PASS | FullMatrix 83：`freeRecipes=48/48 debugUnlocks=True nonSvsapUntouched=True` |
+| P0/P1 single-player E2E | PASS | `e2e-runs/p0p1-single-1.4.0-alpha1-20260708-150210/single-complete.json`：`pass=true` |
+| P0/P1 multiplayer E2E | PASS | `e2e-runs/p0p1-multi-1.4.0-alpha1-20260708-150412/host-complete.json`：`pass=true`，M1-M5 全 PASS；`client-complete.json`：`ok=true` |
+| SVSAP RouteA multiplayer E2E | PASS | `e2e-runs/svsap-routea-1.4.0-alpha1-20260708-150613/client-complete.json`：`verifiedHandSwitches=4`，`stage=100`；`host-complete.json` 已生成 |
 
-```json
-{
-  "FullMatrix": "pass=true, passed=45, total=45",
-  "P0P1Multi": ["M1 PASS", "M2 PASS", "M3 PASS", "M4 PASS", "M5 PASS"],
-  "HostOffline": {
-    "hostConnected": false,
-    "reportSent": false
-  }
-}
-```
+## Alpha1 修复确认
 
-## 三、最新修补后的覆盖变化
+- 版本字段已统一为 `1.4.0-alpha.1`：`SVSAP/manifest.json`、`SVSAP/SVSAP.csproj`、`SVSAPME/manifest.json`、`SVSAPME/SVSAPME.csproj`。
+- 新增单方块酒桶/陈酿桶只归属 `SVSAPME`。
+- 单方块酒桶/陈酿桶未完成槽位回收改为返还投入物，完成后才返还产物。
+- `single-block-processor-rules` 自测覆盖了未完成回收、防提前兑现、完成回收、容量、咖啡豆数量、酒桶果酒 parent preserve、陈酿到铱星等规则。
 
-| 原风险项 | 最新判定 | 覆盖方式 |
-|---|---:|---|
-| 72 host-authoritative | PASS | P0P1 M4：host 可写入 1000 Wh，farmhand 写入返回 `NotHost` |
-| 77 host 离线/无 mod 降级 | PASS | P0P1 offline：host 断连后 farmhand movement report `reportSent=false`；缺 SVSAP 依赖启动也已实测跳过不崩 |
-| 78 多人 Crafting Terminal 并发 | PASS | SVSAP selftest 新增 `crafting-terminal-contention-no-dupe`，验证精确材料只产出一次、二次竞争失败、无复制 |
-| 远程 GUI/协议修复 | PASS | SVSAP selftest 新增 `remote-snapshot-paging-contract`、`remote-localized-snapshot-contract`、`search-textbox-contract`；实机构建与 i18n parity 通过 |
-| 79 日结/host 结算同步 | PASS | P0P1 M5：host 写入后的能源读数经 host debug response 同步到 farmhand，`4210/10000 Wh` 一致 |
-| 81 全机器存档往返 | PASS | FullMatrix 81：29 个 SVSAPME BigCraftable 全类型 repository save/load、网络 modData 保持 |
-| 83 Debug 模式 | PASS | FullMatrix 83：40/40 本 mod 配方 Debug 0 成本、全解锁、非 SVSAPME 配方不污染 |
-| 84 Casual vs Normal | PASS | FullMatrix 84：Normal→Casual→Normal 切换后材料正确且无缓存残留 |
-| 82 旧存档升级 | NEED SAMPLE | 需要旧版真实存档；当前没有证据显示代码漏洞，因此不列为 NEED REPAIR |
+## 2026-07-08 增量修复确认
 
-## 四、已过时口径
+- SVSAPME/SVSAP 物品序列化补充 preserve type、价格、名称、颜色等保真字段。
+- 单方块酒桶果酒/蔬菜汁产物写入 vanilla preserve type，避免只有 parent id 而缺少风味身份。
+- 单方块酒桶修复跨日分钟推进，ETA 日换算改为 1200 分钟/日。
+- 单方块酒桶/陈酿桶新增网络自动输入/输出，空槽按过滤规则自动拉取，完成槽和 overflow buffer 自动回写网络。
+- 单方块酒桶/陈酿桶新增输入缓冲：手持原料交互会进入 left input buffer，再按空槽自动填入；咖啡豆这类多件配方允许先缓存不足数量，补齐后启动。
+- 单方块农场改为每 plot 保存 seed/harvest/farming level，支持同一台机器内不同作物、不同进度、不同成熟时间。
+- 单方块农场新增专用 GUI：左输入/过滤，中间 plot 进度格，右输出/经济估算。
+- 单方块酒桶/陈酿桶 GUI 扩展为左输入/过滤，中间工作槽，右输出/经济估算。
+- 单方块农场、单方块酒桶/陈酿桶、存储驱动器、导入/导出器 GUI 补充响应式布局，紧凑宽度下控制区换行或缩列，不再让右侧栏越出菜单。
+- farmhand 收取处理机产物改为 host 返回 serialized item payload，client 本地落物/进包，避免 host 直接写远程 Farmer 副本。
+- 供电导入/导出器的过滤模式、矿典模式、品质模式切换不再消耗卡片。
+- 矿典匹配去掉裸 `category:*` 泛匹配，保留 `ore:fish`、矿物、材料、加工品和显式金属/煤/电池组，降低误匹配。
 
-| 旧口径 | 最新口径 |
-|---|---|
-| 两 mod 版本均为 `1.2.0-alpha.2` | 当前为 `1.3.0` |
-| `NEED REPAIR` 可表示 E2E 未覆盖 | 已废止。`NEED REPAIR` 只表示已证实的 mod 本体漏洞 |
-| FullMatrix 只覆盖 42 项 | 已扩展为 45 项，新增 81/83/84 |
-| SVSAP selftest 18/18、19/19 | 已扩展为 28/28，新增存储元件守卫、远程终端 payload escrow、snapshot 分页、本地化 snapshot、TextBox 搜索等契约 |
-| P0P1 multi 只覆盖 M1-M3 | 已扩展为 M1-M5，并补 host offline 降级证据 |
-| Debug 下不能出现 `(O)388 0` | 已改为：Debug 仅本 mod 配方 0 成本，Normal 与非 SVSAPME 配方不得被污染 |
+## 2026-07-08 13:08 二轮审计整改确认
 
-## 五、完整测试矩阵 1-101
+- 单方块酒桶果酒/蔬菜汁改用 Stardew vanilla flavored output API 创建产物，风味名称与售价不再只靠 parent/preserve 字段推断。
+- 农场 `InputBuffer` 已纳入 reclaim/retire 判断；处理机 `InputBuffer` 已纳入 retire 阻断，避免机器消失时吞输入缓冲。
+- 处理机默认关闭网络自动输入，并通过 schema 3 迁移关闭旧存档中“全量可用物品自动拉取”的无过滤默认值。
+- Farmhand 收取处理机产物改为 host 持久化 `PendingRemoteDeliveries`，client 成功交付后回 ACK；断线重连会重发未确认 payload。
+- 处理机 farmhand 投料改为进入 host-side input buffer，不再要求一次交互就满足完整配方。
+- 单方块酒桶在 `DayStarted` 结算上一日剩余分钟，避免夜间/跨日时间债丢失。
+- 供电导出器对 Chest/Big Chest 追加缺失槽位容量计算，压缩 `Items` 列表时也能向空箱写入。
+- SVSAP/SVSAPME 物品 codec 不再持久化本地化 `DisplayName`，避免跨语言/版本存档显示名漂移。
+- `svsapme_selftest` 已补协议 ACK、默认自动输入关闭、vanilla 风味产物、输入缓冲 retire 阻断等静态契约覆盖。
 
-| ID | 测试项 | 状态 | 最新证据 |
-|---:|---|---:|---|
-| 1 | `svsap_selftest` 全绿 | PASS | `SVSAP_SELFTEST_OK 28/28` |
-| 2 | `svsapme_selftest` 全绿 | PASS | `SVSAPME selftest completed: 35 implemented case(s) passed.` |
-| 3 | `svsapme_claim` force 门控 | PASS | `claim-force-gate`、FullMatrix 69、P0P1 R2/R3/R5/M2/M3 |
-| 4 | 版本与默认配置 | PASS | `1.3.0`；默认 Normal / false |
-| 5 | wh-roundtrip | PASS | `wh-roundtrip` |
-| 6 | cell-stack-guard | PASS | `cell-stack-guard`、FullMatrix 67 |
-| 7 | machine-guid-reconcile | PASS | `machine-guid-reconcile` |
-| 8 | content-table / tier-table | PASS | `content-table`、`tier-table` |
-| 9 | config-surface | PASS | `config-surface` |
-| 10 | orphan-reclaim | PASS | `orphan-reclaim` |
-| 11 | missing-machine-reclaim | PASS | `missing-machine-reclaim` |
-| 12 | building-demolish-reclaim | PASS | `building-demolish-reclaim` |
-| 13 | location-cache-full-enum | PASS | 背包/箱子/冰箱/迷你冰箱枚举自测 |
-| 14 | no-arbitrage-audit | PASS | `no-arbitrage-audit` |
-| 15 | b10-parity | PASS | `b10-parity` + FullMatrix 93 |
-| 16 | multiplayer-protocol | PASS | `multiplayer-protocol` |
-| 17 | action-idempotent | PASS | `action-idempotent` |
-| 18 | escrow-restore | PASS | `escrow-restore` |
-| 19 | host-action-dispatch | PASS | `host-action-dispatch` |
-| 20 | energy-production-rules | PASS | `energy-production-rules`、FullMatrix 37/38 |
-| 21 | synth-atomic | PASS | `synth-atomic`、FullMatrix 40 |
-| 22 | daily-order-storage-gate | PASS | `daily-order-storage-gate` |
-| 23 | farm-crop-set / farm-single-crop-budget | PASS | 两项自测 |
-| 24 | farm-daily-progress | PASS | `farm-daily-progress`、FullMatrix 48 |
-| 25 | farm-power-freeze | PASS | `farm-power-freeze` |
-| 26 | farm-module-economy / farm-fertilizer-quality | PASS | 两项自测 |
-| 27 | farm-locked-output | PASS | `farm-locked-output` |
-| 28 | powered-prescan-refund | PASS | `powered-prescan-refund`、FullMatrix 55 |
-| 29 | powered-degrade-parity | PASS | `powered-degrade-parity`、FullMatrix 89 |
-| 30 | powered-interface-range | PASS | `powered-interface-range`、FullMatrix 51 |
-| 31 | battery-discharge-gate | PASS | `battery-discharge-gate`、FullMatrix 41 |
-| 32 | electric-machine-rules | PASS | `electric-machine-rules`、FullMatrix 52/53 |
-| 33 | consumed-charged 退役 | PASS | `consumed-charged-retire`、FullMatrix 65 |
-| 34 | demolish held 排除 | PASS | FullMatrix 70 |
-| 35 | Debug 配方可见 | PASS | `debug-addon-vanilla-material-recipes-visible` |
-| 36 | Carbon Generator | PASS | FullMatrix 36：投煤 +350 Wh |
-| 37 | Solar Network Panel | PASS | FullMatrix 37：sunny=1500、rainy=200、winter=1000、indoor=0 |
-| 38 | Lightning Capacitor | PASS | FullMatrix 38：storm=6000 |
-| 39 | 四级 Energy Cell | PASS | FullMatrix 39：10/40/160/640 kWh |
-| 40 | Battery Synthesizer | PASS | FullMatrix 40 |
-| 41 | Battery Discharger | PASS | FullMatrix 41 |
-| 42 | Energy Monitor Terminal | PASS | FullMatrix 42 |
-| 43 | 四级 Farm | PASS | FullMatrix 43：16/64/144/256 |
-| 44 | Farm Chamber 升级链 | PASS | FullMatrix 44 |
-| 45 | Growth Light 三级 | PASS | FullMatrix 45 |
-| 46 | Thermostat 三级 | PASS | FullMatrix 46 |
-| 47 | Slow Release 三级 | PASS | FullMatrix 47 |
-| 48 | 模块热插拔 | PASS | FullMatrix 48 |
-| 49 | Powered Importer 四级 | PASS | FullMatrix 49 |
-| 50 | Powered Exporter 四级 | PASS | FullMatrix 50 |
-| 51 | Powered Machine Interface 四级 | PASS | FullMatrix 51 |
-| 52 | Electric Furnace | PASS | FullMatrix 52 |
-| 53 | Electric Geode Crusher | PASS | FullMatrix 53 |
-| 54 | L7 核心判据 | PASS | FullMatrix 54 |
-| 55 | 扣电原子性 | PASS | FullMatrix 55 |
-| 56 | 网络连接 | PASS | FullMatrix 56 |
-| 57 | Crafting Terminal | PASS | FullMatrix 57 |
-| 58 | PatternProvider 编解码 | PASS | FullMatrix 58 |
-| 59 | 品质/低质优先取料策略 | PASS | FullMatrix 59 |
-| 60 | 跨位置网络 | PASS | FullMatrix 60 |
-| 61 | MachineGuid 唯一 | PASS | FullMatrix 61 |
-| 62 | 带电 Cell 拾取/重放 | PASS | FullMatrix 62 |
-| 63 | 背包与普通容器复制链 | PASS | FullMatrix 63 |
-| 64 | Junimo/global inventory | PASS | FullMatrix 64 |
-| 65 | 合成消耗带电机器 | PASS | FullMatrix 65：`retired=True pending=False hudUnchanged=True` |
-| 66 | digitize 守卫 | PASS | FullMatrix 66 |
-| 67 | 堆叠守卫 | PASS | FullMatrix 67 |
-| 68 | PendingReclaim 生命周期 | PASS | FullMatrix 68 |
-| 69 | `svsapme_claim` 判活门控 | PASS | FullMatrix 69 |
-| 70 | demolish + 持有态 | PASS | FullMatrix 70：`claim=False machines=0` |
-| 71 | 存读复制向量 | PASS | FullMatrix 71 |
-| 72 | 多人 host-authoritative | PASS | P0P1 M4：hostDeposit=True/1000，clientCode=NotHost |
-| 73 | farmhand 放置/拾取 | PASS | P0P1 M1 |
-| 74 | farmhand 消耗带状态机器 | PASS | P0P1 M3：retired=True、noNaturalPending=True |
-| 75 | farmhand observe 不误回收 | PASS | P0P1 M1 `noPending=True`，M2 held 无自然 pending |
-| 76 | 多人动作幂等 | PASS | `action-idempotent` + P0P1 M1/M2/M3 |
-| 77 | host 离线/无 mod 降级 | PASS | `client-host-offline.json`：hostConnected=false、reportSent=false；缺 SVSAP 启动跳过不崩 |
-| 78 | 多人 Crafting Terminal 并发 | PASS | SVSAP selftest `crafting-terminal-contention-no-dupe` |
-| 79 | 日结同步 / host 结算读数同步 | PASS | P0P1 M5：host 与 farmhand debug 读数均 4210/10000 Wh |
-| 80 | M1/M2 场景 | PASS | P0P1 multi M1/M2/M3/M4/M5 |
-| 81 | 存档往返全机器 | PASS | FullMatrix 81：types=29，repositoryRoundTrip=true，networkModData=true |
-| 82 | 版本升级存档 | NEED SAMPLE | 缺旧版真实存档样本；未发现代码漏洞，不标 NEED REPAIR |
-| 83 | Debug 模式行为 | PASS | FullMatrix 83：freeRecipes=40/40、debugUnlocks=True、nonSvsapUntouched=True |
-| 84 | Casual vs Normal | PASS | FullMatrix 84：Normal/Casual/Normal 无缓存残留 |
-| 85 | 依赖缺失降级 | PASS | 缺 SVSAP 时 SMAPI 跳过 SVSAPME 且不崩 |
-| 86 | 跨 mod API 契约 | PASS | `api-shape`、FullMatrix 57/66/93 |
-| 87 | 构建产物 | PASS | Debug/Release 四个 build 全绿 |
-| 88 | 满网压力 | PASS | FullMatrix 88 |
-| 89 | 零电/负载饱和 | PASS | FullMatrix 89 |
-| 90 | 电量边界 | PASS | FullMatrix 90 |
-| 91 | 快速拾放循环 | PASS | FullMatrix 91 |
-| 92 | 异常中断/半态复制 | PASS | FullMatrix 92 |
-| 93 | SVSAP 配方运行时 parity | PASS | FullMatrix 93：330/2410/9820/20 |
-| 94 | FullMatrix 自动建档 E2E | PASS | `full-20260706T001637` 自动建档并 complete |
-| 95 | SVSAP structural failure 反射回归 | PASS | SVSAP selftest 28/28 |
-| 96 | live config 生成默认值 | PASS | 实机 config Normal / false |
-| 97 | Debug/Release build parity | PASS | 四个 build 全绿 |
-| 98 | live mod manifest 启用状态 | PASS | SMAPI 已加载 `Koizumi.SVSAP` 与 `Koizumi.SVSAPME` |
-| 99 | B10 表与当前 SVSAP 源配方同步 | PASS | `b10-parity` + FullMatrix 93 |
-| 100 | E2E version label | PASS | FullMatrix/P0P1 1.3.0 正式 label 为 `ver1.3.0-Muehenlohn` |
-| 101 | P0P1 M3 farmhand consumed reclaim | PASS | `host-complete.json` M3 PASS；`client-consumed.json` reportSent=True |
+## 2026-07-08 15:10 三轮风险清理确认
 
-## 六、发布门槛
+- Farmhand 空手打开 Storage Drive 或 Importer/Exporter 时不再进入本地空菜单，改为向 host 请求结构快照并打开远程只读/操作 GUI；取出元件、3x3 过滤、矿典、品质和方向切换均走 host-authoritative action。
+- SVSAP 新增 `StructuralSnapshotRequest/Response`、远程存储驱动器/传输总线 snapshot DTO 与 `RemoteStorageDriveMenu`、`RemoteTransferBusMenu`，并由 `remote-structural-snapshot-contract` 自测覆盖。
+- SVSAPME farmhand 发送会消费手持物的机器动作前，会把 escrow 写入玩家 `modData`；发送失败、存档重载或断线清理时可恢复，避免“先扣物再没发出去”的丢失窗口。
+- Pending delivery 过期处理改为只清理 host 可确认 client 已持久化 reconciled transaction 的记录；不再盲目把 7 天未确认产物回灌机器输出，降低 ACK 在途崩溃后的复制窗口。
+- 远程状态菜单的 `Collect All` 发送失败不再显示已发送成功，并会关闭/刷新旧快照菜单，避免玩家看到假成功。
+- 本轮改动代码包已通过本地检查：14 个 `.cs` 文件，ForbiddenCount=0，SHA256 `406C3248E2BA4FEF94CF0B92AD5D12477F3B97C4889A613C3B9BA44558B04D85`。
 
-| 门槛 | 状态 |
-|---|---:|
-| 本地自测全绿 | PASS |
-| 构建全绿 | PASS |
-| FullMatrix E2E | PASS |
-| P0P1 single E2E | PASS |
-| P0P1 multi E2E | PASS |
-| 本轮直接修复实证 65/70/74 | PASS |
-| NEED REPAIR 清单 | 0 项 |
+## 非阻断建议
 
-结论：除 ID 82 缺旧存档样本外，矩阵其余项目均已补测试并通过。当前没有测试结果指向 mod 本体漏洞。
+- 功能性 GUI 边界已由 SMAPI `gui-layout-bounds` 自测覆盖；后续仍可做一次人工截图抽查，用于纯审美微调。
+- `GetChestSlotCapacity` 当前优先尝试真实容量，仍建议后续用更多 modded chest 实测确认非原版扩容箱兼容。
+- Pending delivery 对永久不回归玩家仍可能长期留档；当前策略偏向“不复制、不丢失”，后续可设计 host 邮件或过期回收箱。

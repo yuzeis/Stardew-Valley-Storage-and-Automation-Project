@@ -14,8 +14,11 @@ internal static class MultiplayerMessageTypes
     public const string CraftingMonitorSnapshotResponse = "CraftingMonitorSnapshotResponse";
     public const string CraftingMonitorActionRequest = "CraftingMonitorActionRequest";
     public const string CraftingMonitorActionResponse = "CraftingMonitorActionResponse";
+    public const string StructuralSnapshotRequest = "StructuralSnapshotRequest";
+    public const string StructuralSnapshotResponse = "StructuralSnapshotResponse";
     public const string StructuralActionRequest = "StructuralActionRequest";
     public const string StructuralActionResponse = "StructuralActionResponse";
+    public const string RemoteDeliveryAck = "RemoteDeliveryAck";
 }
 
 internal enum TerminalActionKind
@@ -31,6 +34,7 @@ internal enum CraftingMonitorActionKind
 {
     CancelJob,
     UpdatePipeline,
+    PreviewQueueJob,
     QueueJob,
     TogglePipeline,
     ToggleCaskPipeline
@@ -42,7 +46,21 @@ internal enum StructuralActionKind
     LinkBindEndpoint,
     StorageDriveInteract,
     PatternProviderInteract,
-    TransferBusConfigure
+    TransferBusConfigure,
+    StorageDriveEjectSlot,
+    TransferBusToggleFilterMode,
+    TransferBusToggleOreDictionary,
+    TransferBusToggleQuality,
+    TransferBusClearFilter,
+    TransferBusSetFacing,
+    TransferBusSetFilterSlot,
+    TransferBusClearFilterSlot
+}
+
+internal enum StructuralSnapshotKind
+{
+    StorageDrive,
+    TransferBus
 }
 
 internal sealed class TerminalSnapshotRequestMessage
@@ -59,6 +77,7 @@ internal sealed class TerminalSnapshotResponseMessage
     public Guid NetworkId { get; set; }
     public Guid EndpointId { get; set; }
     public bool Crafting { get; set; }
+    public bool PushUpdate { get; set; }
     public bool Success { get; set; }
     public string Message { get; set; } = string.Empty;
     public string NetworkName { get; set; } = string.Empty;
@@ -121,6 +140,7 @@ internal sealed class TerminalActionResponseMessage
     public Guid NetworkId { get; set; }
     public bool Success { get; set; }
     public string Message { get; set; } = string.Empty;
+    public Guid DeliveryId { get; set; }
     public string ReturnedSerializedItem { get; set; } = string.Empty;
     public int ReturnedCount { get; set; }
     public List<TerminalItemPayloadMessage> ReturnedDepositItems { get; set; } = new();
@@ -145,6 +165,7 @@ internal sealed class CraftingSnapshotResponseMessage
 {
     public Guid NetworkId { get; set; }
     public Guid EndpointId { get; set; }
+    public bool PushUpdate { get; set; }
     public bool Success { get; set; }
     public string Message { get; set; } = string.Empty;
     public string NetworkName { get; set; } = string.Empty;
@@ -162,6 +183,7 @@ internal sealed class RemoteCraftingRecipeMessage
     public string OutputSerializedItemPrototype { get; set; } = string.Empty;
     public int OutputCount { get; set; }
     public bool CanCraft { get; set; }
+    public List<string> IngredientLines { get; set; } = new();
     public List<string> MissingLines { get; set; } = new();
     public List<CraftingMissingIngredient> MissingIngredients { get; set; } = new();
 }
@@ -258,6 +280,9 @@ internal sealed class CraftingMonitorActionResponseMessage
     public bool Success { get; set; }
     public bool RequiresConfirmation { get; set; }
     public string Message { get; set; } = string.Empty;
+    public PatternData? PreviewPattern { get; set; }
+    public int PreviewBatches { get; set; } = 1;
+    public List<string> PreviewLines { get; set; } = new();
     public CraftingMonitorSnapshotResponseMessage? Snapshot { get; set; }
 }
 
@@ -273,6 +298,9 @@ internal sealed class StructuralActionRequestMessage
     public string HeldDisplayName { get; set; } = string.Empty;
     public int HeldStack { get; set; }
     public string HeldSerializedItem { get; set; } = string.Empty;
+    public int SlotIndex { get; set; } = -1;
+    public string FilterQualifiedItemId { get; set; } = string.Empty;
+    public int FacingDirection { get; set; } = -1;
 }
 
 internal sealed class StructuralActionResponseMessage
@@ -282,6 +310,70 @@ internal sealed class StructuralActionResponseMessage
     public bool Success { get; set; }
     public string Message { get; set; } = string.Empty;
     public bool ConsumeHeldOne { get; set; }
+    public Guid DeliveryId { get; set; }
     public string ReturnedSerializedItem { get; set; } = string.Empty;
     public Guid ResultNetworkId { get; set; }
+}
+
+internal sealed class StructuralSnapshotRequestMessage
+{
+    public StructuralSnapshotKind Kind { get; set; }
+    public string LocationName { get; set; } = string.Empty;
+    public int TileX { get; set; }
+    public int TileY { get; set; }
+}
+
+internal sealed class StructuralSnapshotResponseMessage
+{
+    public StructuralSnapshotKind Kind { get; set; }
+    public bool Success { get; set; }
+    public string Message { get; set; } = string.Empty;
+    public string DisplayName { get; set; } = string.Empty;
+    public string LocationName { get; set; } = string.Empty;
+    public int TileX { get; set; }
+    public int TileY { get; set; }
+    public RemoteStorageDriveSnapshotMessage? StorageDrive { get; set; }
+    public RemoteTransferBusSnapshotMessage? TransferBus { get; set; }
+}
+
+internal sealed class RemoteStorageDriveSnapshotMessage
+{
+    public List<RemoteStorageDriveSlotMessage> Slots { get; set; } = new();
+    public List<string> SummaryLines { get; set; } = new();
+}
+
+internal sealed class RemoteStorageDriveSlotMessage
+{
+    public int SlotIndex { get; set; }
+    public bool Occupied { get; set; }
+    public string QualifiedItemId { get; set; } = string.Empty;
+    public string DisplayName { get; set; } = string.Empty;
+    public long CapacityUsed { get; set; }
+    public long CapacityMax { get; set; }
+    public int TypesUsed { get; set; }
+    public int TypesMax { get; set; }
+}
+
+internal sealed class RemoteTransferBusSnapshotMessage
+{
+    public bool IsExporter { get; set; }
+    public bool OreDictionaryMode { get; set; }
+    public int FacingDirection { get; set; } = -1;
+    public List<RemoteTransferFilterSlotMessage> FilterSlots { get; set; } = new();
+    public List<string> ConfigurationLines { get; set; } = new();
+}
+
+internal sealed class RemoteTransferFilterSlotMessage
+{
+    public int SlotIndex { get; set; }
+    public bool Occupied { get; set; }
+    public string QualifiedItemId { get; set; } = string.Empty;
+    public string DisplayName { get; set; } = string.Empty;
+    public List<string> OreGroups { get; set; } = new();
+}
+
+internal sealed class RemoteDeliveryAckMessage
+{
+    public Guid DeliveryId { get; set; }
+    public Guid TransactionId { get; set; }
 }

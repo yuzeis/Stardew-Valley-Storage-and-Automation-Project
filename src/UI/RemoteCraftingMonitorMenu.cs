@@ -25,6 +25,8 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
     private int pipelineScrollOffset;
     private bool longJobConfirmationArmed;
     private bool requestPending;
+    private PatternData? previewQueuePattern;
+    private int previewQueueBatches = 1;
 
     public RemoteCraftingMonitorMenu(
         CraftingMonitorSnapshotResponseMessage snapshot,
@@ -97,7 +99,18 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
 
     public void ApplyActionResult(CraftingMonitorActionResponseMessage response)
     {
-        this.longJobConfirmationArmed = response.RequiresConfirmation;
+        this.longJobConfirmationArmed = response.RequiresConfirmation && response.PreviewLines.Count == 0;
+        if (response.PreviewLines.Count == 0 || response.PreviewPattern is null)
+            return;
+
+        this.previewQueuePattern = response.PreviewPattern;
+        this.previewQueueBatches = Math.Max(1, response.PreviewBatches);
+        Game1.activeClickableMenu = new CraftingConfirmationMenu(
+            this,
+            PatternDisplayNames.Get(response.PreviewPattern),
+            response.PreviewLines,
+            this.QueuePreviewedPattern);
+        Game1.playSound("smallSelect");
     }
 
     public override void draw(SpriteBatch b)
@@ -289,11 +302,10 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
                     TransactionId = Guid.NewGuid(),
                     NetworkId = this.snapshot.NetworkId,
                     EndpointId = this.snapshot.EndpointId,
-                    Action = CraftingMonitorActionKind.QueueJob,
+                    Action = CraftingMonitorActionKind.PreviewQueueJob,
                     QueuePattern = this.snapshot.QueuePattern,
                     CaskPipelineItemPrototype = this.snapshot.CaskPipelineItemPrototype,
-                    Batches = Math.Max(1, this.queueAmount),
-                    ConfirmLongJob = this.longJobConfirmationArmed
+                    Batches = Math.Max(1, this.queueAmount)
                 });
                 return;
             }
@@ -355,6 +367,30 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
             }
             return;
         }
+    }
+
+    private void QueuePreviewedPattern()
+    {
+        if (this.previewQueuePattern is null)
+            return;
+
+        var pattern = this.previewQueuePattern;
+        var batches = Math.Max(1, this.previewQueueBatches);
+        this.previewQueuePattern = null;
+        this.previewQueueBatches = 1;
+        this.longJobConfirmationArmed = false;
+
+        this.SendMutation(new CraftingMonitorActionRequestMessage
+        {
+            TransactionId = Guid.NewGuid(),
+            NetworkId = this.snapshot.NetworkId,
+            EndpointId = this.snapshot.EndpointId,
+            Action = CraftingMonitorActionKind.QueueJob,
+            QueuePattern = pattern,
+            CaskPipelineItemPrototype = this.snapshot.CaskPipelineItemPrototype,
+            Batches = batches,
+            ConfirmLongJob = true
+        });
     }
 
     private bool SendMutation(CraftingMonitorActionRequestMessage request)

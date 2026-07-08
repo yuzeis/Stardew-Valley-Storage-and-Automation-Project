@@ -25,6 +25,7 @@ internal static class ModItemCatalog
     public const string CapacityCard = Prefix + "CapacityCard";
     public const string SpeedCard = Prefix + "SpeedCard";
     public const string QualityCard = Prefix + "QualityCard";
+    public const string OreDictionaryCard = Prefix + "OreDictionaryCard";
 
     public const string NetworkCore = Prefix + "NetworkCore";
     public const string NetworkTerminal = Prefix + "NetworkTerminal";
@@ -64,7 +65,8 @@ internal static class ModItemCatalog
         new(FilterCard, "Filter Card", "物品过滤卡", "导入器和导出器的白名单/黑名单升级。", 150, 771, -15, new[] { "item_material", "upgrade_card" }),
         new(CapacityCard, "Capacity Card", "容量升级卡", "提高导入/导出每次处理数量。", 800, 336, -15, new[] { "item_material", "upgrade_card" }),
         new(SpeedCard, "Speed Card", "速度升级卡", "提高导入/导出频率。", 1200, 787, -15, new[] { "item_material", "upgrade_card" }),
-        new(QualityCard, "Quality Card", "品质控制卡", "控制普通、银、金、铱品质优先级。", 1200, 72, -15, new[] { "item_material", "upgrade_card" })
+        new(QualityCard, "Quality Card", "品质控制卡", "控制普通、银、金、铱品质优先级。", 1200, 72, -15, new[] { "item_material", "upgrade_card" }),
+        new(OreDictionaryCard, "Ore Dictionary Card", "矿典卡", "让导入器和导出器按矿典/标签等价规则匹配过滤物品。", 1600, 771, -15, new[] { "item_material", "upgrade_card", "ore_dictionary_card" })
     };
 
     public static readonly IReadOnlyList<BigCraftableDefinition> BigCraftables = new List<BigCraftableDefinition>
@@ -107,6 +109,7 @@ internal static class ModItemCatalog
         [CapacityCard] = "(O)336 2 (O)338 5/Home/(O)" + CapacityCard + " 1/false/null",
         [SpeedCard] = "(O)787 1 (O)338 5/Home/(O)" + SpeedCard + " 1/false/null",
         [QualityCard] = "(O)72 1 (O)338 5/Home/(O)" + QualityCard + " 1/false/null",
+        [OreDictionaryCard] = "(O)" + FilterCard + " 1 (O)337 1 (O)" + AdvancedCircuit + " 1/Home/(O)" + OreDictionaryCard + " 1/false/null",
         [NetworkCore] = "(O)390 60 (O)388 30 (O)378 20 (O)380 10 (O)335 2 (O)" + BasicCircuit + " 1/Home/(BC)" + NetworkCore + " 1/true/null",
         [NetworkTerminal] = "(O)390 30 (O)388 15 (O)334 1 (O)338 2 (O)" + BasicCircuit + " 1/Home/(BC)" + NetworkTerminal + " 1/true/null",
         [CraftingTerminal] = "(BC)" + NetworkTerminal + " 1 (BC)208 1 (O)787 1 (O)336 3 (O)338 10/Home/(BC)" + CraftingTerminal + " 1/true/null",
@@ -148,6 +151,7 @@ internal static class ModItemCatalog
         [CapacityCard] = 3,
         [SpeedCard] = 3,
         [QualityCard] = 3,
+        [OreDictionaryCard] = 5,
         [CraftingTerminal] = 3,
         [CraftingCpuCore] = 3,
         [CraftingMatrix1K] = 3,

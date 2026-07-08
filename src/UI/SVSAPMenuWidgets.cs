@@ -235,18 +235,18 @@ internal static class SVSAPMenuWidgets
             return;
 
         var text = FormatCount(count);
-        var scale = text.Length <= 3 ? 0.98f : 0.9f;
+        var scale = text.Length <= 3 ? 0.78f : 0.68f;
         var size = Game1.smallFont.MeasureString(text) * scale;
-        var width = Math.Min(cell.Width - 4, (int)Math.Ceiling(size.X + 14));
-        var height = (int)Math.Ceiling(size.Y + 7);
-        var box = new Rectangle(cell.Right - width - 2, cell.Bottom - height - 2, width, height);
-        b.Draw(Game1.staminaRect, new Rectangle(box.X - 1, box.Y - 1, box.Width + 2, box.Height + 2), Color.Black * 0.95f);
-        b.Draw(Game1.staminaRect, box, new Color(35, 31, 24) * 0.96f);
+        var width = Math.Min(cell.Width - 8, (int)Math.Ceiling(size.X + 10));
+        var height = Math.Max(16, (int)Math.Ceiling(size.Y + 3));
+        var box = new Rectangle(cell.Right - width - 4, cell.Bottom - height - 4, width, height);
+        b.Draw(Game1.staminaRect, new Rectangle(box.X - 1, box.Y - 1, box.Width + 2, box.Height + 2), Color.Black * 0.42f);
+        b.Draw(Game1.staminaRect, box, new Color(24, 22, 18) * 0.58f);
         Utility.drawTextWithShadow(
             b,
             text,
             Game1.smallFont,
-            new Vector2(box.Right - 7 - size.X, box.Y + 1),
+            new Vector2(box.Right - 5 - size.X, box.Y),
             new Color(255, 245, 168),
             scale);
     }
