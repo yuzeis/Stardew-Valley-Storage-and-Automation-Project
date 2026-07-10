@@ -47,20 +47,28 @@ internal enum StructuralActionKind
     StorageDriveInteract,
     PatternProviderInteract,
     TransferBusConfigure,
+    StorageDriveInsertSlot,
     StorageDriveEjectSlot,
+    PatternProviderInsertSlot,
+    PatternProviderEjectSlot,
+    PatternProviderMoveSlot,
+    PatternProviderAdjustPriority,
     TransferBusToggleFilterMode,
     TransferBusToggleOreDictionary,
     TransferBusToggleQuality,
     TransferBusClearFilter,
     TransferBusSetFacing,
     TransferBusSetFilterSlot,
-    TransferBusClearFilterSlot
+    TransferBusClearFilterSlot,
+    TransferBusInsertUpgradeSlot,
+    TransferBusEjectUpgradeSlot
 }
 
 internal enum StructuralSnapshotKind
 {
     StorageDrive,
-    TransferBus
+    TransferBus,
+    PatternProvider
 }
 
 internal sealed class TerminalSnapshotRequestMessage
@@ -183,6 +191,7 @@ internal sealed class RemoteCraftingRecipeMessage
     public string OutputSerializedItemPrototype { get; set; } = string.Empty;
     public int OutputCount { get; set; }
     public bool CanCraft { get; set; }
+    public List<CraftingIngredientAvailability> Ingredients { get; set; } = new();
     public List<string> IngredientLines { get; set; } = new();
     public List<string> MissingLines { get; set; } = new();
     public List<CraftingMissingIngredient> MissingIngredients { get; set; } = new();
@@ -301,6 +310,7 @@ internal sealed class StructuralActionRequestMessage
     public int SlotIndex { get; set; } = -1;
     public string FilterQualifiedItemId { get; set; } = string.Empty;
     public int FacingDirection { get; set; } = -1;
+    public int ActionValue { get; set; }
 }
 
 internal sealed class StructuralActionResponseMessage
@@ -334,6 +344,7 @@ internal sealed class StructuralSnapshotResponseMessage
     public int TileY { get; set; }
     public RemoteStorageDriveSnapshotMessage? StorageDrive { get; set; }
     public RemoteTransferBusSnapshotMessage? TransferBus { get; set; }
+    public RemotePatternProviderSnapshotMessage? PatternProvider { get; set; }
 }
 
 internal sealed class RemoteStorageDriveSnapshotMessage
@@ -357,9 +368,13 @@ internal sealed class RemoteStorageDriveSlotMessage
 internal sealed class RemoteTransferBusSnapshotMessage
 {
     public bool IsExporter { get; set; }
+    public bool FilterBlacklist { get; set; }
     public bool OreDictionaryMode { get; set; }
+    public MaterialQualityStrategy QualityStrategy { get; set; }
     public int FacingDirection { get; set; } = -1;
     public List<RemoteTransferFilterSlotMessage> FilterSlots { get; set; } = new();
+    public int UpgradeSlotCapacity { get; set; }
+    public List<RemoteTransferUpgradeSlotMessage> UpgradeSlots { get; set; } = new();
     public List<string> ConfigurationLines { get; set; } = new();
 }
 
@@ -370,6 +385,27 @@ internal sealed class RemoteTransferFilterSlotMessage
     public string QualifiedItemId { get; set; } = string.Empty;
     public string DisplayName { get; set; } = string.Empty;
     public List<string> OreGroups { get; set; } = new();
+}
+
+internal sealed class RemoteTransferUpgradeSlotMessage
+{
+    public int SlotIndex { get; set; }
+    public bool Occupied { get; set; }
+    public string QualifiedItemId { get; set; } = string.Empty;
+    public string DisplayName { get; set; } = string.Empty;
+}
+
+internal sealed class RemotePatternProviderSnapshotMessage
+{
+    public int Priority { get; set; }
+    public List<RemotePatternProviderSlotMessage> Slots { get; set; } = new();
+}
+
+internal sealed class RemotePatternProviderSlotMessage
+{
+    public int SlotIndex { get; set; }
+    public string SerializedItem { get; set; } = string.Empty;
+    public string DisplayName { get; set; } = string.Empty;
 }
 
 internal sealed class RemoteDeliveryAckMessage

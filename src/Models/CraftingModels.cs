@@ -1,4 +1,5 @@
 using StardewValley;
+using SVSAP.Services;
 
 namespace SVSAP.Models;
 
@@ -15,9 +16,23 @@ internal sealed class NetworkCraftingRecipe
 internal sealed class CraftingAvailability
 {
     public bool CanCraft { get; set; }
+    public List<CraftingIngredientAvailability> Ingredients { get; set; } = new();
     public List<string> IngredientLines { get; set; } = new();
     public List<string> MissingLines { get; set; } = new();
     public List<CraftingMissingIngredient> MissingIngredients { get; set; } = new();
+}
+
+internal sealed class CraftingIngredientAvailability
+{
+    public NetworkItemRequest Request { get; set; } = new();
+    public int AvailableCount { get; set; }
+    public int RequiredCount { get; set; }
+    public bool IsSufficient => this.AvailableCount >= this.RequiredCount;
+
+    public string ToDisplayLine()
+    {
+        return ItemDisplayService.FormatIngredientLine(this.Request, this.AvailableCount, this.RequiredCount);
+    }
 }
 
 internal sealed class CraftingMissingIngredient

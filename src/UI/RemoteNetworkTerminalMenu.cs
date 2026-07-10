@@ -12,6 +12,9 @@ namespace SVSAP.UI;
 
 internal sealed class RemoteNetworkTerminalMenu : IClickableMenu
 {
+    private const int CompactCell = 52;
+    private const int SnapshotRefreshTicks = 30;
+
     private readonly Func<TerminalActionRequestMessage, TerminalSnapshotResponseMessage, bool> sendRequest;
     private readonly Action<Guid, Guid, int, int> requestSnapshot;
     private TerminalSnapshotResponseMessage snapshot;
@@ -22,8 +25,8 @@ internal sealed class RemoteNetworkTerminalMenu : IClickableMenu
     private ClickableComponent toggleLockButton = null!;
     private ClickableComponent previousPageButton = null!;
     private ClickableComponent nextPageButton = null!;
-    private readonly SVSAPIconGrid<RemoteInventoryEntryMessage> itemGrid = new();
-    private readonly SVSAPBackpackGrid backpackGrid = new();
+    private readonly SVSAPIconGrid<RemoteInventoryEntryMessage> itemGrid = new(CompactCell);
+    private readonly SVSAPBackpackGrid backpackGrid = new(CompactCell);
     private Rectangle searchBox;
     private Rectangle gridArea;
     private Rectangle invArea;
@@ -35,6 +38,7 @@ internal sealed class RemoteNetworkTerminalMenu : IClickableMenu
     private readonly TextBox searchInput;
     private readonly Dictionary<string, string> displayNameCache = new();
     private readonly Dictionary<string, string> itemNameCache = new();
+    private int snapshotAtTick;
 
     public RemoteNetworkTerminalMenu(
         TerminalSnapshotResponseMessage snapshot,
@@ -48,6 +52,7 @@ internal sealed class RemoteNetworkTerminalMenu : IClickableMenu
             showUpperRightCloseButton: true)
     {
         this.snapshot = snapshot;
+        this.snapshotAtTick = Game1.ticks;
         this.sendRequest = sendRequest;
         this.requestSnapshot = requestSnapshot;
         this.BuildLayout();
@@ -64,7 +69,7 @@ internal sealed class RemoteNetworkTerminalMenu : IClickableMenu
         var innerX = this.xPositionOnScreen + SVSAPMenuWidgets.Pad;
         var innerW = this.width - SVSAPMenuWidgets.Pad * 2;
         var top = this.yPositionOnScreen + 24;
-        this.searchBox = new Rectangle(innerX, top + 44, 380, 40);
+        this.searchBox = new Rectangle(innerX, top + 44, Math.Min(380, innerW - 20), 40);
 
         var bx = innerX;
         var catY = top + 96;
@@ -119,16 +124,16 @@ internal sealed class RemoteNetworkTerminalMenu : IClickableMenu
         this.depositButtons.Add(new ClickableComponent(new Rectangle(this.xPositionOnScreen + this.width - SVSAPMenuWidgets.Pad - 288, bottomY, 150, 42), "same", ModText.Get("terminal.depositSame")));
         this.toggleLockButton = new ClickableComponent(new Rectangle(this.xPositionOnScreen + this.width - SVSAPMenuWidgets.Pad - 396, bottomY, 100, 42), "lock", ModText.Get("terminal.lock"));
 
-        var backpackColumns = SVSAPBackpackGrid.GetColumnCount(innerW);
-        var invH = SVSAPBackpackGrid.GetHeight(backpackColumns);
+        var backpackColumns = SVSAPBackpackGrid.GetColumnCount(innerW, CompactCell);
+        var invH = SVSAPBackpackGrid.GetHeight(backpackColumns, CompactCell);
         var invTop = bottomY - 18 - invH;
-        var invW = backpackColumns * SVSAPMenuWidgets.Cell;
+        var invW = backpackColumns * CompactCell;
         this.invArea = new Rectangle(innerX + Math.Max(0, (innerW - invW) / 2), invTop, invW, invH);
         this.backpackGrid.SetBounds(this.invArea);
 
         var gridTop = filterY + 50;
         var gridBottom = invTop - 16;
-        this.gridArea = new Rectangle(innerX, gridTop, innerW, Math.Max(SVSAPMenuWidgets.Cell, gridBottom - gridTop));
+        this.gridArea = new Rectangle(innerX, gridTop, innerW, Math.Max(CompactCell, gridBottom - gridTop));
         this.itemGrid.SetBounds(this.gridArea);
     }
 
@@ -140,10 +145,42 @@ internal sealed class RemoteNetworkTerminalMenu : IClickableMenu
     public void ApplySnapshot(TerminalSnapshotResponseMessage updatedSnapshot)
     {
         this.snapshot = updatedSnapshot;
+        this.snapshotAtTick = Game1.ticks;
         this.requestPending = false;
         this.displayNameCache.Clear();
         this.itemNameCache.Clear();
         this.itemGrid.ClampScroll(this.GetVisibleEntries().Count);
+    }
+
+    public void ApplyPushUpdate(TerminalSnapshotResponseMessage pushSnapshot)
+    {
+        this.snapshot.NetworkName = pushSnapshot.NetworkName;
+        this.snapshot.SourceCount = pushSnapshot.SourceCount;
+        this.snapshot.TotalEntryCount = pushSnapshot.TotalEntryCount;
+        this.snapshot.StorageSummary = pushSnapshot.StorageSummary;
+        this.snapshot.LockedQualifiedItemIds = pushSnapshot.LockedQualifiedItemIds;
+        this.snapshotAtTick = Game1.ticks;
+
+        if (this.requestPending)
+            return;
+
+        var limit = this.GetEntryLimit();
+        var maxOffset = pushSnapshot.TotalEntryCount <= 0
+            ? 0
+            : ((pushSnapshot.TotalEntryCount - 1) / limit) * limit;
+        var requestedOffset = Math.Min(this.snapshot.EntryOffset, maxOffset);
+        this.requestSnapshot(this.snapshot.NetworkId, this.snapshot.EndpointId, requestedOffset, limit);
+    }
+
+    public override void update(GameTime time)
+    {
+        base.update(time);
+        var tick = Game1.ticks;
+        if (this.requestPending || (tick >= this.snapshotAtTick && tick - this.snapshotAtTick < SnapshotRefreshTicks))
+            return;
+
+        this.snapshotAtTick = tick;
+        this.requestSnapshot(this.snapshot.NetworkId, this.snapshot.EndpointId, this.snapshot.EntryOffset, this.GetEntryLimit());
     }
 
     public void MarkActionComplete(TerminalSnapshotResponseMessage? updatedSnapshot)
@@ -156,7 +193,7 @@ internal sealed class RemoteNetworkTerminalMenu : IClickableMenu
     public override void draw(SpriteBatch b)
     {
         this.SyncSearchFromInput();
-        SVSAPMenuWidgets.DrawPanel(b, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
+        SVSAPMenuWidgets.DrawStardewAE2Frame(b, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
 
         var visibleEntries = this.GetVisibleEntries();
         this.itemGrid.ClampScroll(visibleEntries.Count);
@@ -164,23 +201,44 @@ internal sealed class RemoteNetworkTerminalMenu : IClickableMenu
         var top = this.yPositionOnScreen + 24;
         var totalEntries = this.GetTotalEntryCount();
         var title = ModText.Format("remoteTerminal.title", this.snapshot.NetworkName, visibleEntries.Count, totalEntries, this.snapshot.SourceCount);
-        b.DrawString(Game1.dialogueFont, title, new Vector2(innerX, top), Game1.textColor);
+        var titleSize = Game1.dialogueFont.MeasureString(title);
+        var scale = this.width < 900 ? Math.Max(0.5f, (this.width - 80) / titleSize.X) : 1f;
+        b.DrawString(Game1.dialogueFont, title, new Vector2(innerX, top), Game1.textColor, 0f, Vector2.Zero, scale, SpriteEffects.None, 1f);
         SVSAPMenuWidgets.DrawSearchBox(b, this.searchBox, this.search);
-        b.DrawString(
-            Game1.smallFont,
-            TerminalInventoryFilters.FormatStorageSummary(this.snapshot.StorageSummary),
-            new Vector2(this.searchBox.Right + 24, this.searchBox.Y + 10),
-            Game1.textColor);
+
+        var summaryText = TerminalInventoryFilters.FormatStorageSummary(this.snapshot.StorageSummary);
+        var summarySize = Game1.smallFont.MeasureString(summaryText);
+        var showSummary = this.searchBox.Right + 24 + summarySize.X <= this.xPositionOnScreen + this.width - SVSAPMenuWidgets.Pad;
+        if (this.HasMultiplePages())
+        {
+            var limitRight = this.previousPageButton.bounds.X - 12;
+            showSummary = showSummary && (this.searchBox.Right + 24 + summarySize.X < limitRight - 120);
+        }
+        if (showSummary)
+        {
+            b.DrawString(
+                Game1.smallFont,
+                summaryText,
+                new Vector2(this.searchBox.Right + 24, this.searchBox.Y + 10),
+                Game1.textColor);
+        }
 
         if (this.HasMultiplePages())
         {
             SVSAPMenuWidgets.DrawButton(b, this.previousPageButton, tint: this.CanPagePrevious() ? Color.White : Color.LightGray);
             SVSAPMenuWidgets.DrawButton(b, this.nextPageButton, tint: this.CanPageNext() ? Color.White : Color.LightGray);
-            b.DrawString(
-                Game1.smallFont,
-                ModText.Format("remoteTerminal.pageStatus", this.GetCurrentPageNumber(), this.GetPageCount(), totalEntries),
-                new Vector2(this.previousPageButton.bounds.X - 230, this.previousPageButton.bounds.Y + 10),
-                Color.DimGray);
+
+            var pageStatusText = ModText.Format("remoteTerminal.pageStatus", this.GetCurrentPageNumber(), this.GetPageCount(), totalEntries);
+            var pageStatusSize = Game1.smallFont.MeasureString(pageStatusText);
+            var pageStatusX = this.previousPageButton.bounds.X - pageStatusSize.X - 16;
+            if (pageStatusX > this.searchBox.Right + (showSummary ? summarySize.X + 32 : 16))
+            {
+                b.DrawString(
+                    Game1.smallFont,
+                    pageStatusText,
+                    new Vector2(pageStatusX, this.previousPageButton.bounds.Y + 10),
+                    Color.DimGray);
+            }
         }
 
         if (this.requestPending)
@@ -743,6 +801,7 @@ internal sealed class RemoteNetworkTerminalMenu : IClickableMenu
     private void RequestPage(int entryOffset)
     {
         this.ResetScroll();
+        this.snapshotAtTick = Game1.ticks;
         this.requestSnapshot(this.snapshot.NetworkId, this.snapshot.EndpointId, Math.Max(0, entryOffset), this.GetEntryLimit());
     }
 

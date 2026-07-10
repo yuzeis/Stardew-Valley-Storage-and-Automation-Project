@@ -16,6 +16,52 @@ internal static class SVSAPMenuWidgets
 
     private static readonly Rectangle PanelSource = new(0, 256, 60, 60);
 
+    public static void DrawPixelStatusLight(SpriteBatch b, int x, int y, PixelStatus status)
+    {
+        var lightColor = GetStatusColor(status);
+
+        // Draw 8x8 round status light
+        // Draw shadow/outline first
+        b.Draw(Game1.staminaRect, new Rectangle(x - 1, y - 1, 10, 10), Color.Black * 0.45f);
+        // Draw base color
+        b.Draw(Game1.staminaRect, new Rectangle(x, y, 8, 8), lightColor);
+        // Draw inner glow/specular dot
+        b.Draw(Game1.staminaRect, new Rectangle(x + 1, y + 1, 2, 2), Color.White * 0.7f);
+    }
+
+    public static void DrawSlotStatusLine(SpriteBatch b, Rectangle slotBounds, PixelStatus status)
+    {
+        var lightColor = GetStatusColor(status);
+        b.Draw(Game1.staminaRect, new Rectangle(slotBounds.X + 2, slotBounds.Bottom - 4, slotBounds.Width - 4, 2), lightColor * 0.85f);
+    }
+
+    public static void DrawStardewAE2Frame(SpriteBatch b, Rectangle panel)
+    {
+        // 1. Draw outer stardew wood panel
+        DrawPanel(b, panel);
+        // 2. Draw inner metal tech frame (cool grey background with bevel)
+        var inner = new Rectangle(panel.X + Pad, panel.Y + Pad + 40, panel.Width - Pad * 2, panel.Height - Pad * 2 - 40);
+        if (inner.Width > 0 && inner.Height > 0)
+        {
+            DrawInsetBox(b, inner, new Color(42, 45, 52));
+        }
+    }
+
+    private static Color GetStatusColor(PixelStatus status)
+    {
+        return status switch
+        {
+            PixelStatus.Idle => Color.Gray * 0.6f,
+            PixelStatus.Ready => Color.LimeGreen,
+            PixelStatus.Processing => Color.Yellow,
+            PixelStatus.Warning => Color.Orange,
+            PixelStatus.Error => Color.Crimson,
+            PixelStatus.Offline => Color.Red * 0.6f,
+            PixelStatus.Disabled => Color.DarkGray * 0.4f,
+            _ => Color.Gray
+        };
+    }
+
     public static void DrawPanel(SpriteBatch b, Rectangle panel)
     {
         IClickableMenu.drawTextureBox(
@@ -110,6 +156,22 @@ internal static class SVSAPMenuWidgets
     {
         DrawInsetBox(b, button.bounds, tint ?? Color.White);
         DrawTextFit(b, label ?? button.label, button.bounds, Game1.textColor, 10);
+    }
+
+    public static void DrawFittedLine(SpriteBatch b, string text, Rectangle bounds, Color color, int horizontalPadding = 4)
+    {
+        DrawTextFit(b, text, bounds, color, horizontalPadding);
+    }
+
+    public static void DrawFittedLines(SpriteBatch b, IEnumerable<string> lines, Rectangle bounds, Color color)
+    {
+        var values = lines.Where(line => !string.IsNullOrWhiteSpace(line)).ToList();
+        if (values.Count == 0 || bounds.Height <= 0)
+            return;
+
+        var lineHeight = Math.Max(20, Math.Min(28, bounds.Height / values.Count));
+        for (var i = 0; i < values.Count && i * lineHeight < bounds.Height; i++)
+            DrawFittedLine(b, values[i], new Rectangle(bounds.X, bounds.Y + i * lineHeight, bounds.Width, lineHeight), color);
     }
 
     public static void DrawSeparator(SpriteBatch b, Rectangle bounds, Color? color = null)
@@ -239,7 +301,7 @@ internal static class SVSAPMenuWidgets
         var size = Game1.smallFont.MeasureString(text) * scale;
         var width = Math.Min(cell.Width - 8, (int)Math.Ceiling(size.X + 10));
         var height = Math.Max(16, (int)Math.Ceiling(size.Y + 3));
-        var box = new Rectangle(cell.Right - width - 4, cell.Bottom - height - 4, width, height);
+        var box = new Rectangle(cell.Right - width - 4, cell.Bottom - height - 8, width, height);
         b.Draw(Game1.staminaRect, new Rectangle(box.X - 1, box.Y - 1, box.Width + 2, box.Height + 2), Color.Black * 0.42f);
         b.Draw(Game1.staminaRect, box, new Color(24, 22, 18) * 0.58f);
         Utility.drawTextWithShadow(
@@ -258,6 +320,35 @@ internal static class SVSAPMenuWidgets
         b.Draw(Game1.staminaRect, inner, disabled ? Color.Black * 0.18f : Color.White * 0.30f);
         b.Draw(Game1.staminaRect, new Rectangle(inner.X, inner.Y, inner.Width, 2), Color.White * 0.28f);
         b.Draw(Game1.staminaRect, new Rectangle(inner.X, inner.Y, 2, inner.Height), Color.White * 0.18f);
+    }
+
+    public static void DrawGhostUpgradeSlot(SpriteBatch b, Rectangle slot, string ghostType)
+    {
+        DrawSlotBackground(b, slot, true);
+        var center = new Vector2(slot.Center.X, slot.Center.Y);
+        // Draw very faint placeholder indicators
+        if (ghostType == "speed")
+        {
+            // Faint lightning bolt
+            b.Draw(Game1.staminaRect, new Rectangle(slot.X + slot.Width / 2 - 2, slot.Y + 8, 4, 16), Color.Yellow * 0.15f);
+            b.Draw(Game1.staminaRect, new Rectangle(slot.X + slot.Width / 2 - 6, slot.Y + 14, 12, 4), Color.Yellow * 0.15f);
+        }
+        else if (ghostType == "capacity")
+        {
+            // Faint up arrow
+            b.Draw(Game1.staminaRect, new Rectangle(slot.X + slot.Width / 2 - 2, slot.Y + 10, 4, 14), Color.DeepSkyBlue * 0.15f);
+            b.Draw(Game1.staminaRect, new Rectangle(slot.X + slot.Width / 2 - 6, slot.Y + 10, 12, 4), Color.DeepSkyBlue * 0.15f);
+        }
+        else if (ghostType == "cell")
+        {
+            // Faint memory chip/card outlines
+            b.Draw(Game1.staminaRect, new Rectangle(slot.X + 8, slot.Y + 8, slot.Width - 16, slot.Height - 16), Color.LimeGreen * 0.12f);
+        }
+        else if (ghostType == "module")
+        {
+            // Faint module circle
+            b.Draw(Game1.staminaRect, new Rectangle(slot.X + 12, slot.Y + 12, slot.Width - 24, slot.Height - 24), Color.Orchid * 0.15f);
+        }
     }
 
     public static string FormatCount(long n)
@@ -326,6 +417,13 @@ internal static class SVSAPMenuWidgets
 
 internal sealed class SVSAPIconGrid<T> where T : class
 {
+    private readonly int cellSize;
+
+    public SVSAPIconGrid(int cellSize = SVSAPMenuWidgets.Cell)
+    {
+        this.cellSize = Math.Max(40, cellSize);
+    }
+
     public Rectangle Bounds { get; private set; }
     public int Columns { get; private set; } = 1;
     public int Rows { get; private set; } = 1;
@@ -334,8 +432,8 @@ internal sealed class SVSAPIconGrid<T> where T : class
     public void SetBounds(Rectangle bounds)
     {
         this.Bounds = bounds;
-        this.Columns = Math.Max(1, bounds.Width / SVSAPMenuWidgets.Cell);
-        this.Rows = Math.Max(1, bounds.Height / SVSAPMenuWidgets.Cell);
+        this.Columns = Math.Max(1, bounds.Width / this.cellSize);
+        this.Rows = Math.Max(1, bounds.Height / this.cellSize);
     }
 
     public void ResetScroll() => this.ScrollOffset = 0;
@@ -352,8 +450,8 @@ internal sealed class SVSAPIconGrid<T> where T : class
         if (!this.Bounds.Contains(x, y))
             return null;
 
-        var c = (x - this.Bounds.X) / SVSAPMenuWidgets.Cell;
-        var r = (y - this.Bounds.Y) / SVSAPMenuWidgets.Cell;
+        var c = (x - this.Bounds.X) / this.cellSize;
+        var r = (y - this.Bounds.Y) / this.cellSize;
         if (c < 0 || c >= this.Columns || r < 0 || r >= this.Rows)
             return null;
 
@@ -379,18 +477,20 @@ internal sealed class SVSAPIconGrid<T> where T : class
                     break;
 
                 var cell = new Rectangle(
-                    this.Bounds.X + c * SVSAPMenuWidgets.Cell,
-                    this.Bounds.Y + r * SVSAPMenuWidgets.Cell,
-                    SVSAPMenuWidgets.Cell - 4,
-                    SVSAPMenuWidgets.Cell - 4);
+                    this.Bounds.X + c * this.cellSize,
+                    this.Bounds.Y + r * this.cellSize,
+                    this.cellSize - 4,
+                    this.cellSize - 4);
                 var entry = entries[idx];
                 var disabled = isDisabled?.Invoke(entry) == true;
                 SVSAPMenuWidgets.DrawSlotBackground(b, cell, disabled);
                 var item = getItem(entry);
+                var iconScale = Math.Min(1f, Math.Max(0.5f, (cell.Width - 8) / 64f));
+                var iconSize = 64f * iconScale;
                 item?.drawInMenu(
                     b,
-                    new Vector2(cell.X + SVSAPMenuWidgets.IconInset, cell.Y + SVSAPMenuWidgets.IconInset),
-                    1f,
+                    new Vector2(cell.X + (cell.Width - iconSize) / 2f, cell.Y + (cell.Height - iconSize) / 2f),
+                    iconScale,
                     1f,
                     0.86f,
                     StackDrawType.Hide,
@@ -406,6 +506,9 @@ internal sealed class SVSAPIconGrid<T> where T : class
                     b.DrawString(Game1.smallFont, badge, new Vector2(badgeBounds.X + 6, badgeBounds.Y + 1), Color.White, 0f, Vector2.Zero, 0.68f, SpriteEffects.None, 1f);
                 }
 
+                if (isDisabled is not null)
+                    SVSAPMenuWidgets.DrawSlotStatusLine(b, cell, disabled ? PixelStatus.Error : PixelStatus.Ready);
+
                 SVSAPMenuWidgets.DrawItemCount(b, cell, getCount(entry));
             }
         }
@@ -414,6 +517,13 @@ internal sealed class SVSAPIconGrid<T> where T : class
 
 internal sealed class SVSAPBackpackGrid
 {
+    private readonly int cellSize;
+
+    public SVSAPBackpackGrid(int cellSize = SVSAPMenuWidgets.Cell)
+    {
+        this.cellSize = Math.Max(40, cellSize);
+    }
+
     public Rectangle Bounds { get; private set; }
     public int Columns { get; private set; } = SVSAPMenuWidgets.BackpackColumns;
     public int Rows { get; private set; } = 1;
@@ -421,19 +531,19 @@ internal sealed class SVSAPBackpackGrid
     public void SetBounds(Rectangle bounds)
     {
         this.Bounds = bounds;
-        this.Columns = GetColumnCount(bounds.Width);
+        this.Columns = GetColumnCount(bounds.Width, this.cellSize);
         this.Rows = Math.Max(1, (int)Math.Ceiling(Game1.player.Items.Count / (double)this.Columns));
     }
 
-    public static int GetColumnCount(int availableWidth)
+    public static int GetColumnCount(int availableWidth, int cellSize = SVSAPMenuWidgets.Cell)
     {
-        return Math.Clamp(Math.Max(1, availableWidth / SVSAPMenuWidgets.Cell), 1, SVSAPMenuWidgets.BackpackColumns);
+        return Math.Clamp(Math.Max(1, availableWidth / Math.Max(40, cellSize)), 1, SVSAPMenuWidgets.BackpackColumns);
     }
 
-    public static int GetHeight(int columns)
+    public static int GetHeight(int columns, int cellSize = SVSAPMenuWidgets.Cell)
     {
         return Math.Max(1, (int)Math.Ceiling(Game1.player.Items.Count / (double)Math.Max(1, columns)))
-            * SVSAPMenuWidgets.Cell;
+            * Math.Max(40, cellSize);
     }
 
     public int HitTest(int x, int y)
@@ -441,8 +551,8 @@ internal sealed class SVSAPBackpackGrid
         if (!this.Bounds.Contains(x, y))
             return -1;
 
-        var c = (x - this.Bounds.X) / SVSAPMenuWidgets.Cell;
-        var r = (y - this.Bounds.Y) / SVSAPMenuWidgets.Cell;
+        var c = (x - this.Bounds.X) / this.cellSize;
+        var r = (y - this.Bounds.Y) / this.cellSize;
         if (c < 0 || c >= this.Columns || r < 0 || r >= this.Rows)
             return -1;
 
@@ -457,17 +567,17 @@ internal sealed class SVSAPBackpackGrid
             var r = i / this.Columns;
             var c = i % this.Columns;
             var cell = new Rectangle(
-                this.Bounds.X + c * SVSAPMenuWidgets.Cell,
-                this.Bounds.Y + r * SVSAPMenuWidgets.Cell,
-                SVSAPMenuWidgets.Cell - 4,
-                SVSAPMenuWidgets.Cell - 4);
+                this.Bounds.X + c * this.cellSize,
+                this.Bounds.Y + r * this.cellSize,
+                this.cellSize - 4,
+                this.cellSize - 4);
             SVSAPMenuWidgets.DrawSlotBackground(b, cell);
 
             var item = Game1.player.Items[i];
             item?.drawInMenu(
                 b,
-                new Vector2(cell.X + SVSAPMenuWidgets.IconInset, cell.Y + SVSAPMenuWidgets.IconInset),
-                1f,
+                new Vector2(cell.X + (this.cellSize <= 52 ? 4 : SVSAPMenuWidgets.IconInset), cell.Y + (this.cellSize <= 52 ? 4 : SVSAPMenuWidgets.IconInset)),
+                this.cellSize <= 52 ? 0.68f : 1f,
                 1f,
                 0.86f,
                 StackDrawType.Draw,

@@ -146,6 +146,47 @@ internal sealed class StorageDriveService
         };
     }
 
+    public StructuralActionResult ApplyInsertCellSlot(
+        SObject drive,
+        int slotIndex,
+        string heldQualifiedItemId,
+        string heldSerializedItem)
+    {
+        if (drive.QualifiedItemId != "(BC)" + ModItemCatalog.StorageDrive)
+            return StructuralActionResult.Fail(ModText.Get("ui.storageDrive.notDrive"));
+        if (!ModItemCatalog.TryGetStorageCellTier(heldQualifiedItemId, out _)
+            || string.IsNullOrWhiteSpace(heldSerializedItem))
+        {
+            return StructuralActionResult.Fail(ModText.Get("ui.storageDrive.holdCell"));
+        }
+        if (!this.TryResolveDrive(drive, create: true, out var network, out var driveData, out _, out var message)
+            || driveData is null)
+        {
+            return StructuralActionResult.Fail(message);
+        }
+        if (this.GetInsertedCellCount(network) >= Math.Max(1, this.getConfig().MaxStorageCellsPerNetwork))
+            return StructuralActionResult.Fail(ModText.Get("ui.storageDrive.networkCellLimit"));
+
+        Item heldCell;
+        try
+        {
+            heldCell = SerializedItemCodec.CreateItem(heldSerializedItem, 1);
+        }
+        catch (Exception ex)
+        {
+            this.monitor.Log($"Could not read storage cell payload: {ex.Message}", LogLevel.Trace);
+            return StructuralActionResult.Fail(ModText.Get("ui.storageDrive.readFailed"));
+        }
+
+        if (!ModItemCatalog.TryGetStorageCellTier(heldCell.QualifiedItemId, out _))
+            return StructuralActionResult.Fail(ModText.Get("ui.storageDrive.readFailed"));
+
+        var inserted = this.InsertCellIntoNetwork(network, driveData, heldCell, slotIndex);
+        if (inserted.Success)
+            this.repository.Save();
+        return inserted;
+    }
+
     public void ResetRemainingHeldStorageCell(Item held)
     {
         this.storageCellInitializer.ResetEmptyCellData(held);
@@ -259,6 +300,42 @@ internal sealed class StorageDriveService
         return true;
     }
 
+    public bool TryInsertCellSlot(
+        SObject drive,
+        int slotIndex,
+        Item held,
+        out string message)
+    {
+        if (!ModItemCatalog.TryGetStorageCellTier(held.QualifiedItemId, out _))
+        {
+            message = ModText.Get("ui.storageDrive.holdCell");
+            return false;
+        }
+        if (!this.TryResolveDrive(drive, create: true, out var network, out var driveData, out _, out message)
+            || driveData is null)
+        {
+            return false;
+        }
+        if (this.GetInsertedCellCount(network) >= Math.Max(1, this.getConfig().MaxStorageCellsPerNetwork))
+        {
+            message = ModText.Get("ui.storageDrive.networkCellLimit");
+            return false;
+        }
+
+        var result = this.InsertCellIntoNetwork(network, driveData, held, slotIndex);
+        message = result.Message;
+        if (!result.Success)
+            return false;
+
+        held.Stack--;
+        if (held.Stack <= 0)
+            Game1.player.removeItemFromInventory(held);
+        else
+            this.storageCellInitializer.ResetEmptyCellData(held);
+        this.repository.Save();
+        return true;
+    }
+
     public void HandleStorageDriveRemoved(SObject drive, GameLocation location, Vector2 tile)
     {
         if (drive.QualifiedItemId != "(BC)" + ModItemCatalog.StorageDrive)
@@ -338,14 +415,20 @@ internal sealed class StorageDriveService
         return network.StorageDrives.Values.Sum(drive => drive.Slots.Count);
     }
 
-    private StructuralActionResult InsertCellIntoNetwork(NetworkData network, StorageDriveData driveData, Item held)
+    private StructuralActionResult InsertCellIntoNetwork(NetworkData network, StorageDriveData driveData, Item held, int preferredSlotIndex = -1)
     {
         if (driveData.Slots.Count >= SlotCount)
             return StructuralActionResult.Fail(ModText.Get("ui.storageDrive.full"));
 
         this.storageCellInitializer.EnsureCellData(held);
-        var slotIndex = Enumerable.Range(0, SlotCount)
-            .First(index => driveData.Slots.All(slot => slot.SlotIndex != index));
+        if (preferredSlotIndex >= SlotCount
+            || (preferredSlotIndex >= 0 && driveData.Slots.Any(slot => slot.SlotIndex == preferredSlotIndex)))
+        {
+            return StructuralActionResult.Fail(ModText.Get("ui.storageDrive.slotOccupied"));
+        }
+        var slotIndex = preferredSlotIndex >= 0
+            ? preferredSlotIndex
+            : Enumerable.Range(0, SlotCount).First(index => driveData.Slots.All(slot => slot.SlotIndex != index));
 
         var cellItem = held.getOne();
         cellItem.Stack = 1;

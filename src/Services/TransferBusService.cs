@@ -23,7 +23,9 @@ internal sealed class TransferBusService
     private const string QualityStrategyKey = ModItemCatalog.UniqueId + "/TransferQualityStrategy";
     private const string MinSourceKeepKey = ModItemCatalog.UniqueId + "/TransferMinSourceKeep";
     private const string TargetKeepKey = ModItemCatalog.UniqueId + "/TransferTargetKeep";
+    private const string UpgradeSlotsKey = ModItemCatalog.UniqueId + "/TransferUpgradeSlots";
     private const int FilterSlotCount = 9;
+    internal const int UpgradeSlotCount = 8;
     private const int DefaultItemsPerOperation = 64;
     private const int MaxItemsPerOperation = 999;
     private const int DefaultTickInterval = 120;
@@ -78,6 +80,14 @@ internal sealed class TransferBusService
 
         if (held.QualifiedItemId == "(O)" + ModItemCatalog.LinkTool)
             return false;
+
+        if (IsUpgradeCard(held.QualifiedItemId))
+        {
+            var targetSlot = this.FindFirstEmptyUpgradeSlot(bus);
+            var installed = this.TryInsertUpgradeSlot(bus, targetSlot, held, out var installMessage);
+            Game1.addHUDMessage(new HUDMessage(installMessage, installed ? HUDMessage.newQuest_type : HUDMessage.error_type));
+            return true;
+        }
 
         if (held.QualifiedItemId == "(O)" + ModItemCatalog.FilterCard)
         {
@@ -260,6 +270,11 @@ internal sealed class TransferBusService
             message = ModText.Get("ui.transferBus.notBus");
             return false;
         }
+        if (!this.HasInstalledUpgrade(bus, "(O)" + ModItemCatalog.QualityCard))
+        {
+            message = ModText.Get("ui.transferBus.qualityCardRequired");
+            return false;
+        }
 
         var strategy = this.GetQualityStrategy(bus, MaterialQualityStrategy.LowQualityFirst) == MaterialQualityStrategy.LowQualityFirst
             ? MaterialQualityStrategy.HighQualityFirst
@@ -275,6 +290,11 @@ internal sealed class TransferBusService
         if (bus.QualifiedItemId is not ("(BC)" + ModItemCatalog.Importer) and not ("(BC)" + ModItemCatalog.Exporter))
         {
             message = ModText.Get("ui.transferBus.notBus");
+            return false;
+        }
+        if (!this.HasInstalledUpgrade(bus, "(O)" + ModItemCatalog.OreDictionaryCard))
+        {
+            message = ModText.Get("ui.transferBus.oreCardRequired");
             return false;
         }
 
@@ -370,6 +390,135 @@ internal sealed class TransferBusService
         return result;
     }
 
+    public IReadOnlyList<TransferUpgradeSlotView> GetUpgradeSlotViews(SObject bus)
+    {
+        var ids = this.ReadUpgradeSlots(bus);
+        var result = new List<TransferUpgradeSlotView>(UpgradeSlotCount);
+        for (var index = 0; index < UpgradeSlotCount; index++)
+        {
+            var qualifiedItemId = ids[index];
+            var item = string.IsNullOrWhiteSpace(qualifiedItemId) ? null : CreateFilterIconItem(qualifiedItemId);
+            result.Add(new TransferUpgradeSlotView
+            {
+                SlotIndex = index,
+                QualifiedItemId = qualifiedItemId,
+                Item = item,
+                DisplayName = item?.DisplayName ?? qualifiedItemId
+            });
+        }
+        return result;
+    }
+
+    public bool HasInstalledUpgrade(SObject bus, string qualifiedItemId)
+    {
+        return this.ReadUpgradeSlots(bus).Contains(qualifiedItemId, StringComparer.Ordinal);
+    }
+
+    public bool TryInsertUpgradeSlot(SObject bus, int slotIndex, Item item, out string message)
+    {
+        var result = this.ApplyInsertUpgradeSlot(bus, slotIndex, item.QualifiedItemId, SerializedItemCodec.SerializePrototype(item));
+        message = result.Message;
+        if (!result.Success)
+            return false;
+
+        item.Stack--;
+        if (item.Stack <= 0)
+            Game1.player.removeItemFromInventory(item);
+        return true;
+    }
+
+    public bool TryEjectUpgradeSlot(SObject bus, int slotIndex, out string message)
+    {
+        var ids = this.ReadUpgradeSlots(bus);
+        if (slotIndex < 0 || slotIndex >= UpgradeSlotCount || string.IsNullOrWhiteSpace(ids[slotIndex]))
+        {
+            message = ModText.Get("ui.transferBus.upgradeSlotEmpty");
+            return false;
+        }
+
+        var item = ItemRegistry.Create(ids[slotIndex]);
+        if (!Game1.player.couldInventoryAcceptThisItem(item) || !Game1.player.addItemToInventoryBool(item))
+        {
+            message = ModText.Get("ui.transferBus.inventoryFull");
+            return false;
+        }
+
+        ids[slotIndex] = string.Empty;
+        this.WriteUpgradeSlots(bus, ids);
+        this.RecalculateUpgradeEffects(bus, ids);
+        this.SyncBusData(bus);
+        message = ModText.Format("ui.transferBus.upgradeEjected", slotIndex + 1);
+        return true;
+    }
+
+    public StructuralActionResult ApplyInsertUpgradeSlot(
+        SObject bus,
+        int slotIndex,
+        string heldQualifiedItemId,
+        string heldSerializedItem)
+    {
+        if (bus.QualifiedItemId is not ("(BC)" + ModItemCatalog.Importer) and not ("(BC)" + ModItemCatalog.Exporter))
+            return StructuralActionResult.Fail(ModText.Get("ui.transferBus.notBus"));
+        if (!IsUpgradeCard(heldQualifiedItemId))
+            return StructuralActionResult.Fail(ModText.Get("ui.transferBus.invalidUpgrade"));
+        if (!string.IsNullOrWhiteSpace(heldSerializedItem))
+        {
+            try
+            {
+                var held = SerializedItemCodec.CreateItem(heldSerializedItem, 1);
+                if (!string.Equals(held.QualifiedItemId, heldQualifiedItemId, StringComparison.Ordinal))
+                    return StructuralActionResult.Fail(ModText.Get("network.structural.heldChanged"));
+            }
+            catch
+            {
+                return StructuralActionResult.Fail(ModText.Get("network.structural.heldChanged"));
+            }
+        }
+
+        var ids = this.ReadUpgradeSlots(bus);
+        if (slotIndex < 0 || slotIndex >= UpgradeSlotCount)
+            return StructuralActionResult.Fail(ModText.Get("ui.transferBus.upgradeSlotsFull"));
+        if (!string.IsNullOrWhiteSpace(ids[slotIndex]))
+            return StructuralActionResult.Fail(ModText.Get("ui.transferBus.upgradeSlotOccupied"));
+        if (heldQualifiedItemId is ("(O)" + ModItemCatalog.OreDictionaryCard) or ("(O)" + ModItemCatalog.QualityCard)
+            && ids.Contains(heldQualifiedItemId, StringComparer.Ordinal))
+        {
+            return StructuralActionResult.Fail(ModText.Get("ui.transferBus.upgradeDuplicate"));
+        }
+
+        ids[slotIndex] = heldQualifiedItemId;
+        this.WriteUpgradeSlots(bus, ids);
+        if (heldQualifiedItemId == "(O)" + ModItemCatalog.OreDictionaryCard)
+            bus.modData[OreDictionaryModeKey] = true.ToString();
+        if (heldQualifiedItemId == "(O)" + ModItemCatalog.QualityCard
+            && !bus.modData.ContainsKey(QualityStrategyKey))
+        {
+            bus.modData[QualityStrategyKey] = MaterialQualityStrategy.HighQualityFirst.ToString();
+        }
+        this.RecalculateUpgradeEffects(bus, ids);
+        this.SyncBusData(bus);
+        return Success(ModText.Format("ui.transferBus.upgradeInstalled", slotIndex + 1), consumeHeldOne: true);
+    }
+
+    public StructuralActionResult ApplyEjectUpgradeSlot(SObject bus, int slotIndex)
+    {
+        var ids = this.ReadUpgradeSlots(bus);
+        if (slotIndex < 0 || slotIndex >= UpgradeSlotCount || string.IsNullOrWhiteSpace(ids[slotIndex]))
+            return StructuralActionResult.Fail(ModText.Get("ui.transferBus.upgradeSlotEmpty"));
+
+        var item = ItemRegistry.Create(ids[slotIndex]);
+        ids[slotIndex] = string.Empty;
+        this.WriteUpgradeSlots(bus, ids);
+        this.RecalculateUpgradeEffects(bus, ids);
+        this.SyncBusData(bus);
+        return new StructuralActionResult
+        {
+            Success = true,
+            Message = ModText.Format("ui.transferBus.upgradeEjected", slotIndex + 1),
+            ReturnedSerializedItem = SerializedItemCodec.SerializePrototype(item)
+        };
+    }
+
     public int GetFacingDirection(SObject bus)
     {
         return NormalizeFacingDirection(this.GetIntModData(bus, FacingDirectionKey, AllDirections));
@@ -378,6 +527,50 @@ internal sealed class TransferBusService
     public bool IsOreDictionaryModeEnabled(SObject bus)
     {
         return this.GetBoolModData(bus, OreDictionaryModeKey, false);
+    }
+
+    public bool IsFilterBlacklistModeEnabled(SObject bus)
+    {
+        return this.GetBoolModData(bus, FilterBlacklistKey, false);
+    }
+
+    public MaterialQualityStrategy GetConfiguredQualityStrategy(SObject bus)
+    {
+        return this.GetQualityStrategy(bus, MaterialQualityStrategy.LowQualityFirst);
+    }
+
+    public static bool IsConfigurationCard(string qualifiedItemId)
+    {
+        return qualifiedItemId is "(O)" + ModItemCatalog.FilterCard
+            or "(O)" + ModItemCatalog.OreDictionaryCard
+            or "(O)" + ModItemCatalog.SpeedCard
+            or "(O)" + ModItemCatalog.CapacityCard
+            or "(O)" + ModItemCatalog.QualityCard;
+    }
+
+    public static bool IsUpgradeCard(string qualifiedItemId)
+    {
+        return qualifiedItemId is "(O)" + ModItemCatalog.OreDictionaryCard
+            or "(O)" + ModItemCatalog.SpeedCard
+            or "(O)" + ModItemCatalog.CapacityCard
+            or "(O)" + ModItemCatalog.QualityCard;
+    }
+
+    public bool TryApplyConfigurationItem(SObject bus, Item item, out string message)
+    {
+        var result = this.ApplyConfigure(bus, item.QualifiedItemId, item.DisplayName, item.Stack);
+        message = result.Message;
+        if (!result.Success)
+            return false;
+
+        if (result.ConsumeHeldOne)
+        {
+            item.Stack--;
+            if (item.Stack <= 0)
+                Game1.player.removeItemFromInventory(item);
+        }
+
+        return true;
     }
 
     public StructuralActionResult ApplyConfigure(
@@ -400,6 +593,9 @@ internal sealed class TransferBusService
 
         if (heldQualifiedItemId == "(O)" + ModItemCatalog.LinkTool)
             return StructuralActionResult.Fail(ModText.Get("ui.transferBus.linkToolNotUsed"));
+
+        if (IsUpgradeCard(heldQualifiedItemId))
+            return this.ApplyInsertUpgradeSlot(bus, this.FindFirstEmptyUpgradeSlot(bus), heldQualifiedItemId, string.Empty);
 
         if (heldQualifiedItemId == "(O)" + ModItemCatalog.FilterCard)
         {
@@ -1116,6 +1312,86 @@ internal sealed class TransferBusService
         };
     }
 
+    private int FindFirstEmptyUpgradeSlot(SObject bus)
+    {
+        return this.ReadUpgradeSlots(bus).FindIndex(string.IsNullOrWhiteSpace);
+    }
+
+    private List<string> ReadUpgradeSlots(SObject bus)
+    {
+        if (bus.modData.TryGetValue(UpgradeSlotsKey, out var raw) && !string.IsNullOrWhiteSpace(raw))
+        {
+            try
+            {
+                return NormalizeUpgradeSlots(JsonSerializer.Deserialize<List<string>>(raw) ?? new List<string>());
+            }
+            catch
+            {
+                // Fall back to the legacy scalar settings below.
+            }
+        }
+
+        var inferred = new List<string>();
+        var interval = Math.Clamp(this.GetIntModData(bus, TickIntervalKey, DefaultTickInterval), MinTickInterval, DefaultTickInterval);
+        for (var current = DefaultTickInterval; current > interval && inferred.Count < UpgradeSlotCount; current = Math.Max(MinTickInterval, current / 2))
+            inferred.Add("(O)" + ModItemCatalog.SpeedCard);
+
+        var amount = Math.Clamp(this.GetIntModData(bus, ItemsPerOperationKey, DefaultItemsPerOperation), DefaultItemsPerOperation, MaxItemsPerOperation);
+        for (var current = DefaultItemsPerOperation; current < amount && inferred.Count < UpgradeSlotCount; current = Math.Min(MaxItemsPerOperation, current * 2))
+            inferred.Add("(O)" + ModItemCatalog.CapacityCard);
+
+        if (this.GetQualityStrategy(bus, MaterialQualityStrategy.LowQualityFirst) != MaterialQualityStrategy.LowQualityFirst
+            && inferred.Count < UpgradeSlotCount)
+        {
+            inferred.Add("(O)" + ModItemCatalog.QualityCard);
+        }
+        if (this.GetBoolModData(bus, OreDictionaryModeKey, false) && inferred.Count < UpgradeSlotCount)
+            inferred.Add("(O)" + ModItemCatalog.OreDictionaryCard);
+        return NormalizeUpgradeSlots(inferred);
+    }
+
+    private static List<string> NormalizeUpgradeSlots(IEnumerable<string> ids)
+    {
+        var normalized = ids
+            .Take(UpgradeSlotCount)
+            .Select(id => IsUpgradeCard(id) ? id : string.Empty)
+            .ToList();
+        while (normalized.Count < UpgradeSlotCount)
+            normalized.Add(string.Empty);
+        return normalized;
+    }
+
+    private void WriteUpgradeSlots(SObject bus, IReadOnlyList<string> ids)
+    {
+        bus.modData[UpgradeSlotsKey] = JsonSerializer.Serialize(NormalizeUpgradeSlots(ids));
+    }
+
+    private void RecalculateUpgradeEffects(SObject bus, IReadOnlyList<string> ids)
+    {
+        var speedCards = ids.Count(id => id == "(O)" + ModItemCatalog.SpeedCard);
+        var interval = DefaultTickInterval;
+        for (var i = 0; i < speedCards; i++)
+            interval = Math.Max(MinTickInterval, interval / 2);
+        if (interval == DefaultTickInterval)
+            bus.modData.Remove(TickIntervalKey);
+        else
+            bus.modData[TickIntervalKey] = interval.ToString();
+
+        var capacityCards = ids.Count(id => id == "(O)" + ModItemCatalog.CapacityCard);
+        var amount = DefaultItemsPerOperation;
+        for (var i = 0; i < capacityCards; i++)
+            amount = Math.Min(MaxItemsPerOperation, amount * 2);
+        if (amount == DefaultItemsPerOperation)
+            bus.modData.Remove(ItemsPerOperationKey);
+        else
+            bus.modData[ItemsPerOperationKey] = amount.ToString();
+
+        if (!ids.Contains("(O)" + ModItemCatalog.OreDictionaryCard, StringComparer.Ordinal))
+            bus.modData.Remove(OreDictionaryModeKey);
+        if (!ids.Contains("(O)" + ModItemCatalog.QualityCard, StringComparer.Ordinal))
+            bus.modData.Remove(QualityStrategyKey);
+    }
+
     private static Item? CreateFilterIconItem(string qualifiedItemId)
     {
         try
@@ -1203,4 +1479,13 @@ internal sealed class TransferFilterSlotView
     {
         return new TransferFilterSlotView { SlotIndex = slotIndex };
     }
+}
+
+internal sealed class TransferUpgradeSlotView
+{
+    public int SlotIndex { get; set; }
+    public string QualifiedItemId { get; set; } = string.Empty;
+    public Item? Item { get; set; }
+    public string DisplayName { get; set; } = string.Empty;
+    public bool Occupied => this.Item is not null || !string.IsNullOrWhiteSpace(this.QualifiedItemId);
 }

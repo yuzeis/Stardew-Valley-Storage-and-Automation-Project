@@ -21,10 +21,10 @@ internal sealed class PatternTerminalMenu : IClickableMenu
 
     public PatternTerminalMenu(PatternEncodingService patternEncodingService)
         : base(
-            x: Math.Max(0, (Game1.uiViewport.Width - 980) / 2),
-            y: Math.Max(0, (Game1.uiViewport.Height - 680) / 2),
-            width: 980,
-            height: 680,
+            x: Math.Max(0, (Game1.uiViewport.Width - GetMenuWidth()) / 2),
+            y: Math.Max(0, (Game1.uiViewport.Height - GetMenuHeight()) / 2),
+            width: GetMenuWidth(),
+            height: GetMenuHeight(),
             showUpperRightCloseButton: true)
     {
         this.patternEncodingService = patternEncodingService;
@@ -32,6 +32,10 @@ internal sealed class PatternTerminalMenu : IClickableMenu
         this.searchInput = SVSAPMenuWidgets.CreateSearchTextBox(this.searchBox, this.search);
         SVSAPMenuWidgets.PositionCloseButton(this.upperRightCloseButton, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
     }
+
+    private static int GetMenuWidth() => Math.Min(980, Game1.uiViewport.Width - 80);
+
+    private static int GetMenuHeight() => Math.Min(680, Game1.uiViewport.Height - 80);
 
     private void BuildLayout()
     {
@@ -53,13 +57,13 @@ internal sealed class PatternTerminalMenu : IClickableMenu
     public override void draw(SpriteBatch b)
     {
         this.SyncSearchFromInput();
-        SVSAPMenuWidgets.DrawPanel(b, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
+        SVSAPMenuWidgets.DrawStardewAE2Frame(b, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
 
         var patterns = this.GetVisiblePatterns();
         this.patternGrid.ClampScroll(patterns.Count);
         var innerX = this.xPositionOnScreen + SVSAPMenuWidgets.Pad;
         var top = this.yPositionOnScreen + 24;
-        b.DrawString(Game1.dialogueFont, ModText.Format("patternTerminal.title", FormatPatternKind(this.mode), patterns.Count), new Vector2(innerX, top), Game1.textColor);
+        b.DrawString(Game1.dialogueFont, ModText.Format("patternTerminal.title", FormatPatternKind(this.mode), patterns.Count), new Vector2(innerX + 12, top), Game1.textColor);
         SVSAPMenuWidgets.DrawSearchBox(b, this.searchBox, this.search);
         b.DrawString(Game1.smallFont, ModText.Get("patternTerminal.help"), new Vector2(this.searchBox.Right + 24, this.searchBox.Y + 10), Game1.textColor);
 
@@ -190,7 +194,15 @@ internal sealed class PatternTerminalMenu : IClickableMenu
             ModText.Format("patternTerminal.tooltip.outputs", FormatRequests(pattern.Outputs))
         };
         if (!string.IsNullOrWhiteSpace(pattern.MachineQualifiedItemId))
-            lines.Add(ModText.Format("patternTerminal.tooltip.machine", pattern.MachineQualifiedItemId));
+        {
+            var machineName = pattern.MachineQualifiedItemId;
+            try
+            {
+                machineName = ItemRegistry.Create(pattern.MachineQualifiedItemId).DisplayName;
+            }
+            catch {}
+            lines.Add(ModText.Format("patternTerminal.tooltip.machine", machineName));
+        }
 
         SVSAPMenuWidgets.DrawTooltipBox(b, mx + 28, my + 28, PatternDisplayNames.Get(pattern), lines);
     }

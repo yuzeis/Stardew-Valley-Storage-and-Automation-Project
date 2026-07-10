@@ -16,10 +16,10 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
     private readonly List<ClickableComponent> amountButtons = new();
     private readonly List<ClickableComponent> cancelButtons = new();
     private readonly List<ClickableComponent> pipelineButtons = new();
-    private readonly ClickableComponent refreshButton;
-    private readonly ClickableComponent queueButton;
-    private readonly ClickableComponent pipelineToggleButton;
-    private readonly ClickableComponent caskPipelineButton;
+    private ClickableComponent refreshButton = null!;
+    private ClickableComponent queueButton = null!;
+    private ClickableComponent pipelineToggleButton = null!;
+    private ClickableComponent caskPipelineButton = null!;
     private int queueAmount = 1;
     private int jobScrollOffset;
     private int pipelineScrollOffset;
@@ -33,43 +33,56 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
         Func<CraftingMonitorActionRequestMessage, bool> sendRequest,
         Action<Guid, Guid> requestSnapshot)
         : base(
-            x: Math.Max(0, (Game1.uiViewport.Width - 980) / 2),
-            y: Math.Max(0, (Game1.uiViewport.Height - 680) / 2),
-            width: 980,
-            height: 680,
+            x: Math.Max(0, (Game1.uiViewport.Width - GetMenuWidth()) / 2),
+            y: Math.Max(0, (Game1.uiViewport.Height - GetMenuHeight()) / 2),
+            width: GetMenuWidth(),
+            height: GetMenuHeight(),
             showUpperRightCloseButton: true)
     {
         this.snapshot = snapshot;
         this.sendRequest = sendRequest;
         this.requestSnapshot = requestSnapshot;
+        this.BuildLayout();
+        SVSAPMenuWidgets.PositionCloseButton(this.upperRightCloseButton, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
+    }
+
+    private static int GetMenuWidth() => Math.Min(980, Game1.uiViewport.Width - 80);
+
+    private static int GetMenuHeight() => Math.Min(680, Game1.uiViewport.Height - 80);
+
+    private void BuildLayout()
+    {
+        var isTwoRow = this.width < 900;
+        var buttonY1 = this.yPositionOnScreen + this.height - (isTwoRow ? 116 : 76);
+        var buttonY2 = this.yPositionOnScreen + this.height - 76;
+
         this.refreshButton = new ClickableComponent(
-            new Rectangle(this.xPositionOnScreen + this.width - 172, this.yPositionOnScreen + this.height - 76, 116, 38),
+            new Rectangle(this.xPositionOnScreen + this.width - 172, buttonY2, 116, 38),
             "refresh",
             ModText.Get("craftingMonitor.button.refresh"));
         this.queueButton = new ClickableComponent(
-            new Rectangle(this.xPositionOnScreen + this.width - 304, this.yPositionOnScreen + this.height - 76, 116, 38),
+            new Rectangle(this.xPositionOnScreen + this.width - 304, buttonY2, 116, 38),
             "queue",
             ModText.Get("craftingMonitor.button.queue"));
         this.pipelineToggleButton = new ClickableComponent(
-            new Rectangle(this.xPositionOnScreen + this.width - 436, this.yPositionOnScreen + this.height - 76, 116, 38),
+            new Rectangle(this.xPositionOnScreen + this.width - 436, buttonY2, 116, 38),
             "toggle_pipeline",
             ModText.Get("craftingMonitor.button.pipeline"));
         this.caskPipelineButton = new ClickableComponent(
-            new Rectangle(this.xPositionOnScreen + this.width - 568, this.yPositionOnScreen + this.height - 76, 116, 38),
+            new Rectangle(this.xPositionOnScreen + this.width - 568, buttonY2, 116, 38),
             "toggle_cask",
             ModText.Get("craftingMonitor.button.cask"));
 
+        this.amountButtons.Clear();
         var amountX = this.xPositionOnScreen + 56;
         foreach (var amount in new[] { 1, 5, 10, 25, 100 })
         {
             this.amountButtons.Add(new ClickableComponent(
-                new Rectangle(amountX, this.yPositionOnScreen + this.height - 76, 58, 38),
+                new Rectangle(amountX, buttonY1, 58, 38),
                 amount.ToString(),
                 amount.ToString()));
             amountX += 64;
         }
-
-        SVSAPMenuWidgets.PositionCloseButton(this.upperRightCloseButton, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
     }
 
     public bool MatchesNetwork(Guid networkId)
@@ -115,13 +128,13 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
 
     public override void draw(SpriteBatch b)
     {
-        SVSAPMenuWidgets.DrawPanel(b, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
+        SVSAPMenuWidgets.DrawStardewAE2Frame(b, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
         this.ClampScrolls();
 
         var jobs = this.snapshot.Jobs;
         var pipelines = this.snapshot.Pipelines;
         var title = ModText.Format("remoteCraftingMonitor.title", this.snapshot.NetworkName, jobs.Count, pipelines.Count);
-        b.DrawString(Game1.dialogueFont, title, new Vector2(this.xPositionOnScreen + 48, this.yPositionOnScreen + 32), Game1.textColor);
+        b.DrawString(Game1.dialogueFont, title, new Vector2(this.xPositionOnScreen + SVSAPMenuWidgets.Pad + 12, this.yPositionOnScreen + 32), Game1.textColor);
         if (this.requestPending)
             b.DrawString(Game1.smallFont, ModText.Get("remoteMonitor.pendingInline"), new Vector2(this.xPositionOnScreen + 48, this.yPositionOnScreen + 66), Color.Firebrick);
 

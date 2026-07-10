@@ -113,20 +113,222 @@ internal sealed class PatternProviderService
 
     public IReadOnlyList<string> DescribeProvider(SObject provider)
     {
-        if (!this.TryResolveProvider(provider, create: false, out _, out var providerData, out _, out var message))
+        if (!this.TryResolveProvider(provider, create: false, out var network, out var providerData, out var endpointId, out var message))
             return new[] { message };
-
-        if (providerData is null || providerData.Slots.Count == 0)
-            return new[] { ModText.Get("ui.patternProvider.empty"), ModText.Get("ui.patternProvider.help") };
 
         var lines = new List<string>
         {
-            ModText.Format("ui.patternProvider.inserted", providerData.Slots.Count, SlotCount)
+            ModText.Format("ui.patternProvider.priority", GetEndpointPriority(network, endpointId)),
+            ModText.Get("ui.patternProvider.orderRule")
         };
+        if (providerData is null || providerData.Slots.Count == 0)
+        {
+            lines.Add(ModText.Get("ui.patternProvider.empty"));
+            lines.Add(ModText.Get("ui.patternProvider.help"));
+            return lines;
+        }
+
+        lines.Add(ModText.Format("ui.patternProvider.inserted", providerData.Slots.Count, SlotCount));
         foreach (var slot in providerData.Slots.OrderBy(slot => slot.SlotIndex))
             lines.Add(ModText.Format("ui.patternProvider.slot", slot.SlotIndex + 1, DescribePatternSlot(slot)));
 
         return lines;
+    }
+
+    public IReadOnlyList<PatternProviderSlotView> GetSlotViews(SObject provider)
+    {
+        if (!this.TryResolveProvider(provider, create: false, out _, out var providerData, out _, out _)
+            || providerData is null)
+        {
+            return Array.Empty<PatternProviderSlotView>();
+        }
+
+        var views = new List<PatternProviderSlotView>();
+        foreach (var slot in providerData.Slots.OrderBy(slot => slot.SlotIndex))
+        {
+            var item = PatternCodec.CreateItem(slot);
+            if (!PatternCodec.TryRead(item, out var pattern))
+                continue;
+            views.Add(new PatternProviderSlotView(slot.SlotIndex, item, pattern));
+        }
+
+        return views;
+    }
+
+    public int GetPriority(SObject provider)
+    {
+        return this.TryResolveProvider(provider, create: false, out var network, out _, out var endpointId, out _)
+            ? GetEndpointPriority(network, endpointId)
+            : 0;
+    }
+
+    public bool TryInsertPatternSlot(SObject provider, int slotIndex, Item held, out string message)
+    {
+        if (slotIndex < 0 || slotIndex >= SlotCount)
+        {
+            message = ModText.Get("ui.patternProvider.invalidSlot");
+            return false;
+        }
+        if (!PatternCodec.IsPatternItem(held) || !PatternCodec.TryRead(held, out _))
+        {
+            message = ModText.Get("ui.patternProvider.noPatternData");
+            return false;
+        }
+        if (!this.TryResolveProvider(provider, create: true, out _, out var providerData, out _, out message)
+            || providerData is null)
+        {
+            return false;
+        }
+        if (providerData.Slots.Any(slot => slot.SlotIndex == slotIndex))
+        {
+            message = ModText.Get("ui.patternProvider.slotOccupied");
+            return false;
+        }
+
+        providerData.Slots.Add(PatternCodec.ToSlotData(held, slotIndex));
+        held.Stack--;
+        if (held.Stack <= 0)
+            Game1.player.removeItemFromInventory(held);
+        this.repository.Save();
+        message = ModText.Format("ui.patternProvider.insertedSlot", slotIndex + 1);
+        return true;
+    }
+
+    public StructuralActionResult ApplyInsertPatternSlot(
+        SObject provider,
+        int slotIndex,
+        string heldQualifiedItemId,
+        string heldSerializedItem)
+    {
+        if (slotIndex < 0 || slotIndex >= SlotCount)
+            return StructuralActionResult.Fail(ModText.Get("ui.patternProvider.invalidSlot"));
+        if (heldQualifiedItemId is not ("(O)" + ModItemCatalog.CraftingPattern)
+            and not ("(O)" + ModItemCatalog.ProcessingPattern)
+            || string.IsNullOrWhiteSpace(heldSerializedItem))
+        {
+            return StructuralActionResult.Fail(ModText.Get("ui.patternProvider.noPatternData"));
+        }
+
+        Item held;
+        try
+        {
+            held = SerializedItemCodec.CreateItem(heldSerializedItem, 1);
+        }
+        catch
+        {
+            return StructuralActionResult.Fail(ModText.Get("ui.patternProvider.readFailed"));
+        }
+
+        if (!string.Equals(held.QualifiedItemId, heldQualifiedItemId, StringComparison.Ordinal)
+            || !PatternCodec.IsPatternItem(held)
+            || !PatternCodec.TryRead(held, out _))
+        {
+            return StructuralActionResult.Fail(ModText.Get("ui.patternProvider.noPatternData"));
+        }
+        if (!this.TryResolveProvider(provider, create: true, out _, out var providerData, out _, out var message)
+            || providerData is null)
+        {
+            return StructuralActionResult.Fail(message);
+        }
+        if (providerData.Slots.Any(slot => slot.SlotIndex == slotIndex))
+            return StructuralActionResult.Fail(ModText.Get("ui.patternProvider.slotOccupied"));
+
+        providerData.Slots.Add(PatternCodec.ToSlotData(held, slotIndex));
+        this.repository.Save();
+        return new StructuralActionResult
+        {
+            Success = true,
+            Message = ModText.Format("ui.patternProvider.insertedSlot", slotIndex + 1),
+            ConsumeHeldOne = true
+        };
+    }
+
+    public StructuralActionResult ApplyEjectPatternSlot(SObject provider, int slotIndex)
+    {
+        if (!this.TryResolveProvider(provider, create: false, out _, out var providerData, out _, out var message)
+            || providerData is null)
+        {
+            return StructuralActionResult.Fail(message);
+        }
+
+        var slot = providerData.Slots.FirstOrDefault(entry => entry.SlotIndex == slotIndex);
+        if (slot is null)
+            return StructuralActionResult.Fail(ModText.Get("ui.patternProvider.slotEmpty"));
+
+        var item = PatternCodec.CreateItem(slot);
+        providerData.Slots.Remove(slot);
+        this.repository.Save();
+        return new StructuralActionResult
+        {
+            Success = true,
+            Message = ModText.Format("ui.patternProvider.ejectedSlot", slotIndex + 1),
+            ReturnedSerializedItem = SerializedItemCodec.SerializePrototype(item)
+        };
+    }
+
+    public StructuralActionResult ApplyMovePatternSlot(SObject provider, int slotIndex, int direction)
+    {
+        return this.TryMovePatternSlot(provider, slotIndex, direction, out var message)
+            ? new StructuralActionResult { Success = true, Message = message }
+            : StructuralActionResult.Fail(message);
+    }
+
+    public StructuralActionResult ApplyAdjustPriority(SObject provider, int delta)
+    {
+        return this.TryAdjustPriority(provider, delta, out var message)
+            ? new StructuralActionResult { Success = true, Message = message }
+            : StructuralActionResult.Fail(message);
+    }
+
+    public bool TryMovePatternSlot(SObject provider, int slotIndex, int direction, out string message)
+    {
+        if (!this.TryResolveProvider(provider, create: false, out _, out var providerData, out _, out message)
+            || providerData is null)
+        {
+            return false;
+        }
+
+        var source = providerData.Slots.FirstOrDefault(slot => slot.SlotIndex == slotIndex);
+        if (source is null)
+        {
+            message = ModText.Get("ui.patternProvider.slotEmpty");
+            return false;
+        }
+
+        var targetIndex = Math.Clamp(slotIndex + Math.Sign(direction), 0, SlotCount - 1);
+        if (targetIndex == slotIndex)
+        {
+            message = direction < 0
+                ? ModText.Get("ui.patternProvider.patternAlreadyFirst")
+                : ModText.Get("ui.patternProvider.patternAlreadyLast");
+            return false;
+        }
+
+        var target = providerData.Slots.FirstOrDefault(slot => slot.SlotIndex == targetIndex);
+        if (target is not null)
+            target.SlotIndex = slotIndex;
+        source.SlotIndex = targetIndex;
+        this.repository.Save();
+        message = ModText.Format("ui.patternProvider.patternMoved", targetIndex + 1);
+        return true;
+    }
+
+    public bool TryAdjustPriority(SObject provider, int delta, out string message)
+    {
+        if (!this.TryResolveProvider(provider, create: true, out var network, out _, out var endpointId, out message))
+            return false;
+
+        var endpoint = network.Endpoints.FirstOrDefault(candidate => candidate.EndpointId == endpointId);
+        if (endpoint is null)
+        {
+            message = ModText.Get("ui.patternProvider.notLinked");
+            return false;
+        }
+
+        endpoint.Priority = Math.Clamp(endpoint.Priority + Math.Sign(delta), -100, 100);
+        this.repository.Save();
+        message = ModText.Format("ui.patternProvider.priorityChanged", endpoint.Priority);
+        return true;
     }
 
     public IReadOnlyList<int> GetOccupiedSlotIndexes(SObject provider)
@@ -181,6 +383,11 @@ internal sealed class PatternProviderService
         }
 
         return providerData;
+    }
+
+    private static int GetEndpointPriority(NetworkData network, Guid endpointId)
+    {
+        return network.Endpoints.FirstOrDefault(endpoint => endpoint.EndpointId == endpointId)?.Priority ?? 0;
     }
 
     private bool TryResolveProvider(
@@ -325,3 +532,5 @@ internal sealed class PatternProviderService
         return ModText.Format("ui.patternProvider.patternLine", kind, PatternDisplayNames.Get(pattern), machine);
     }
 }
+
+internal sealed record PatternProviderSlotView(int SlotIndex, Item Item, PatternData Pattern);

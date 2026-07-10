@@ -28,6 +28,8 @@ internal sealed class PendingRemoteDelivery
     public string Message { get; set; } = string.Empty;
     public string ReturnedSerializedItem { get; set; } = string.Empty;
     public int ReturnedCount { get; set; }
+    public int CreatedDay { get; set; }
+    public long CreatedTick { get; set; }
 }
 
 internal sealed class NetworkData

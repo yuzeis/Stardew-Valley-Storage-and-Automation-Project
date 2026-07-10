@@ -100,8 +100,8 @@ internal sealed class SVSAPStatusMenu : IClickableMenu
     public override void draw(SpriteBatch b)
     {
         var panel = new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height);
-        SVSAPMenuWidgets.DrawPanel(b, panel);
-        Utility.drawTextWithShadow(b, this.title, Game1.dialogueFont, new Vector2(this.xPositionOnScreen + Pad, this.yPositionOnScreen + 28), Game1.textColor);
+        SVSAPMenuWidgets.DrawStardewAE2Frame(b, panel);
+        Utility.drawTextWithShadow(b, this.title, Game1.dialogueFont, new Vector2(this.xPositionOnScreen + Pad + 12, this.yPositionOnScreen + 28), Game1.textColor);
 
         var content = this.ContentBounds;
         SVSAPMenuWidgets.DrawInsetBox(b, content);
@@ -138,33 +138,11 @@ internal sealed class SVSAPStatusMenu : IClickableMenu
                 continue;
             }
 
-            result.AddRange(WrapLine(line, width));
+            var parsed = Game1.parseText(line, Game1.smallFont, width);
+            result.AddRange(parsed.Split('\n'));
         }
 
         return result;
-    }
-
-    private static IEnumerable<string> WrapLine(string line, int maxWidth)
-    {
-        var words = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        if (words.Length == 0)
-            yield break;
-
-        var current = words[0];
-        for (var i = 1; i < words.Length; i++)
-        {
-            var candidate = current + " " + words[i];
-            if (Game1.smallFont.MeasureString(candidate).X <= maxWidth)
-            {
-                current = candidate;
-                continue;
-            }
-
-            yield return current;
-            current = words[i];
-        }
-
-        yield return current;
     }
 }
 

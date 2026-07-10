@@ -10,7 +10,7 @@ namespace SVSAP.UI;
 
 internal sealed class CraftingTerminalMenu : IClickableMenu
 {
-    private const int ViewRefreshTicks = 5;
+    private const int ViewRefreshTicks = 30;
 
     private readonly NetworkData network;
     private readonly InventoryScanner scanner;
@@ -39,10 +39,10 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
         CraftingRecipeService craftingRecipeService,
         Func<string?>? getActionBlockMessage = null)
         : base(
-            x: Math.Max(0, (Game1.uiViewport.Width - 980) / 2),
-            y: Math.Max(0, (Game1.uiViewport.Height - 680) / 2),
-            width: 980,
-            height: 680,
+            x: Math.Max(0, (Game1.uiViewport.Width - GetMenuWidth()) / 2),
+            y: Math.Max(0, (Game1.uiViewport.Height - GetMenuHeight()) / 2),
+            width: GetMenuWidth(),
+            height: GetMenuHeight(),
             showUpperRightCloseButton: true)
     {
         this.network = network;
@@ -55,6 +55,10 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
         SVSAPMenuWidgets.PositionCloseButton(this.upperRightCloseButton, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
     }
 
+    private static int GetMenuWidth() => Math.Min(980, Game1.uiViewport.Width - 80);
+
+    private static int GetMenuHeight() => Math.Min(680, Game1.uiViewport.Height - 80);
+
     private void BuildLayout()
     {
         var innerX = this.xPositionOnScreen + SVSAPMenuWidgets.Pad;
@@ -62,15 +66,19 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
         var top = this.yPositionOnScreen + 24;
         this.searchBox = new Rectangle(innerX, top + 48, 360, 40);
 
-        var buttonY = this.yPositionOnScreen + this.height - 54;
+        var isTwoRow = this.width < 900;
+        var buttonY1 = this.yPositionOnScreen + this.height - (isTwoRow ? 98 : 54);
+        var buttonY2 = this.yPositionOnScreen + this.height - 54;
+
         var buttonX = innerX;
         foreach (var amount in new[] { 1, 5, 10, 25, 100 })
         {
-            this.amountButtons.Add(new ClickableComponent(new Rectangle(buttonX, buttonY, 76, 42), amount.ToString(), amount.ToString()));
+            this.amountButtons.Add(new ClickableComponent(new Rectangle(buttonX, buttonY1, 76, 42), amount.ToString(), amount.ToString()));
             buttonX += 86;
         }
 
-        buttonX += 16;
+        buttonX = isTwoRow ? innerX : buttonX + 16;
+        var targetY = isTwoRow ? buttonY2 : buttonY1;
         foreach (var option in new[]
         {
             (Strategy: MaterialQualityStrategy.LowQualityFirst, Label: ModText.Get("craftingTerminal.quality.low")),
@@ -78,14 +86,14 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
             (Strategy: MaterialQualityStrategy.PreserveGoldIridium, Label: ModText.Get("craftingTerminal.quality.preserve"))
         })
         {
-            this.qualityButtons.Add(new ClickableComponent(new Rectangle(buttonX, buttonY, 76, 42), option.Strategy.ToString(), option.Label));
+            this.qualityButtons.Add(new ClickableComponent(new Rectangle(buttonX, targetY, 76, 42), option.Strategy.ToString(), option.Label));
             buttonX += 86;
         }
 
-        this.craftableOnlyButton = new ClickableComponent(new Rectangle(buttonX, buttonY, 86, 42), "ready", ModText.Get("craftingTerminal.ready"));
+        this.craftableOnlyButton = new ClickableComponent(new Rectangle(buttonX, targetY, 86, 42), "ready", ModText.Get("craftingTerminal.ready"));
 
         var gridTop = top + 108;
-        var gridBottom = buttonY - 18;
+        var gridBottom = buttonY1 - 18;
         this.gridArea = new Rectangle(innerX, gridTop, innerW, Math.Max(SVSAPMenuWidgets.Cell, gridBottom - gridTop));
         this.recipeGrid.SetBounds(this.gridArea);
     }
@@ -93,7 +101,7 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
     public override void draw(SpriteBatch b)
     {
         this.SyncSearchFromInput();
-        SVSAPMenuWidgets.DrawPanel(b, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
+        SVSAPMenuWidgets.DrawStardewAE2Frame(b, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
 
         var visible = this.GetVisibleRecipes();
         this.recipeGrid.ClampScroll(visible.Count);
@@ -101,7 +109,7 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
         var innerX = this.xPositionOnScreen + SVSAPMenuWidgets.Pad;
         var top = this.yPositionOnScreen + 24;
         var title = ModText.Format("craftingTerminal.title", this.network.Name, visible.Count, snapshot.Entries.Count);
-        b.DrawString(Game1.dialogueFont, title, new Vector2(innerX, top), Game1.textColor);
+        b.DrawString(Game1.dialogueFont, title, new Vector2(innerX + 12, top), Game1.textColor);
 
         SVSAPMenuWidgets.DrawSearchBox(b, this.searchBox, this.search);
         b.DrawString(
@@ -115,8 +123,7 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
             visible,
             recipe => recipe.OutputPrototype,
             _ => 0,
-            recipe => !this.GetAvailability(recipe).CanCraft,
-            recipe => this.GetAvailability(recipe).CanCraft ? null : "!");
+            recipe => !this.GetAvailability(recipe).CanCraft);
 
         if (visible.Count == 0)
         {
@@ -156,6 +163,7 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
 
             this.batches = int.Parse(button.name);
             this.ResetScroll();
+            this.InvalidateCache();
             Game1.playSound("smallSelect");
             return;
         }
@@ -169,6 +177,7 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
                 this.qualityStrategy = strategy;
 
             this.ResetScroll();
+            this.InvalidateCache();
             Game1.playSound("smallSelect");
             return;
         }
@@ -177,6 +186,7 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
         {
             this.showCraftableOnly = !this.showCraftableOnly;
             this.ResetScroll();
+            this.InvalidateCache();
             Game1.playSound("smallSelect");
             return;
         }
@@ -313,12 +323,12 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
             ModText.Format("craftingTerminal.tooltip.output", recipe.OutputCount * this.batches),
             availability.CanCraft ? ModText.Get("craftingTerminal.confirm.ready") : ModText.Get("craftingTerminal.confirm.missing")
         };
-        lines.AddRange(availability.IngredientLines);
 
         Game1.activeClickableMenu = new CraftingConfirmationMenu(
             this,
             recipe.DisplayName,
             lines,
+            availability.Ingredients,
             () => this.ExecuteCraft(recipe));
         Game1.playSound("smallSelect");
     }

@@ -14,6 +14,9 @@ namespace SVSAP.UI;
 /// </summary>
 internal sealed class NetworkTerminalMenu : IClickableMenu
 {
+    private const int CompactCell = 52;
+    private const int SnapshotRefreshTicks = 30;
+
     private readonly NetworkData network;
     private readonly InventoryScanner scanner;
     private readonly InventoryTransactionService transactionService;
@@ -27,8 +30,8 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
     private ClickableComponent depositSameButton = null!;
     private ClickableComponent lockButton = null!;
 
-    private readonly SVSAPIconGrid<NetworkInventoryEntry> itemGrid = new();
-    private readonly SVSAPBackpackGrid backpackGrid = new();
+    private readonly SVSAPIconGrid<NetworkInventoryEntry> itemGrid = new(CompactCell);
+    private readonly SVSAPBackpackGrid backpackGrid = new(CompactCell);
     private Rectangle searchBox;
     private Rectangle gridArea;
     private Rectangle invArea;
@@ -38,6 +41,7 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
     private TerminalInventoryCategory selectedCategory = TerminalInventoryCategory.All;
     private int? selectedQuality;
     private TerminalInventorySortMode sortMode = TerminalInventorySortMode.Count;
+    private int snapshotAtTick;
 
     public NetworkTerminalMenu(
         NetworkData network,
@@ -56,6 +60,7 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
         this.transactionService = transactionService;
         this.getActionBlockMessage = getActionBlockMessage ?? (() => null);
         this.snapshot = this.CreateSnapshot();
+        this.snapshotAtTick = Game1.ticks;
 
         this.BuildLayout();
         this.searchInput = SVSAPMenuWidgets.CreateSearchTextBox(this.searchBox, this.search);
@@ -72,7 +77,7 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
         var innerW = this.width - SVSAPMenuWidgets.Pad * 2;
         var top = this.yPositionOnScreen + 24;
 
-        this.searchBox = new Rectangle(innerX, top + 44, 380, 40);
+        this.searchBox = new Rectangle(innerX, top + 44, Math.Min(380, innerW - 20), 40);
 
         var bx = innerX;
         var catY = top + 96;
@@ -121,24 +126,36 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
         var lockX = sameX - 8 - 100;
         this.lockButton = new ClickableComponent(new Rectangle(lockX, bottomY, 100, 42), "lock", ModText.Get("terminal.lock"));
 
-        var backpackColumns = SVSAPBackpackGrid.GetColumnCount(innerW);
-        var invH = SVSAPBackpackGrid.GetHeight(backpackColumns);
+        var backpackColumns = SVSAPBackpackGrid.GetColumnCount(innerW, CompactCell);
+        var invH = SVSAPBackpackGrid.GetHeight(backpackColumns, CompactCell);
         var invTop = bottomY - 18 - invH;
-        var invW = backpackColumns * SVSAPMenuWidgets.Cell;
+        var invW = backpackColumns * CompactCell;
         this.invArea = new Rectangle(innerX + Math.Max(0, (innerW - invW) / 2), invTop, invW, invH);
         this.backpackGrid.SetBounds(this.invArea);
 
         var gridTop = filterY + 50;
         var gridBottom = invTop - 16;
-        this.gridArea = new Rectangle(innerX, gridTop, innerW, Math.Max(SVSAPMenuWidgets.Cell, gridBottom - gridTop));
+        this.gridArea = new Rectangle(innerX, gridTop, innerW, Math.Max(CompactCell, gridBottom - gridTop));
         this.itemGrid.SetBounds(this.gridArea);
+    }
+
+    public override void update(GameTime time)
+    {
+        base.update(time);
+        var tick = Game1.ticks;
+        if (tick >= this.snapshotAtTick && tick - this.snapshotAtTick < SnapshotRefreshTicks)
+            return;
+
+        this.snapshot = this.CreateSnapshot();
+        this.snapshotAtTick = tick;
+        this.itemGrid.ClampScroll(this.GetVisibleEntries().Count);
     }
 
     public override void draw(SpriteBatch b)
     {
         this.SyncSearchFromInput();
         var panel = new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height);
-        SVSAPMenuWidgets.DrawPanel(b, panel);
+        SVSAPMenuWidgets.DrawStardewAE2Frame(b, panel);
 
         var innerX = this.xPositionOnScreen + SVSAPMenuWidgets.Pad;
         var top = this.yPositionOnScreen + 24;
@@ -146,14 +163,23 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
         this.itemGrid.ClampScroll(entries.Count);
 
         var title = ModText.Format("terminal.title", this.network.Name, entries.Count, this.snapshot.Entries.Count, this.snapshot.SourceCount);
-        b.DrawString(Game1.dialogueFont, title, new Vector2(innerX, top), Game1.textColor);
+        var titleSize = Game1.dialogueFont.MeasureString(title);
+        var scale = this.width < 900 ? Math.Max(0.5f, (this.width - 80) / titleSize.X) : 1f;
+        b.DrawString(Game1.dialogueFont, title, new Vector2(innerX, top), Game1.textColor, 0f, Vector2.Zero, scale, SpriteEffects.None, 1f);
 
         SVSAPMenuWidgets.DrawSearchBox(b, this.searchBox, this.search);
-        b.DrawString(
-            Game1.smallFont,
-            TerminalInventoryFilters.FormatStorageSummary(this.snapshot.StorageSummary),
-            new Vector2(this.searchBox.X + this.searchBox.Width + 24, this.searchBox.Y + 10),
-            Game1.textColor);
+
+        var summaryText = TerminalInventoryFilters.FormatStorageSummary(this.snapshot.StorageSummary);
+        var summarySize = Game1.smallFont.MeasureString(summaryText);
+        var showSummary = this.searchBox.Right + 24 + summarySize.X <= this.xPositionOnScreen + this.width - SVSAPMenuWidgets.Pad;
+        if (showSummary)
+        {
+            b.DrawString(
+                Game1.smallFont,
+                summaryText,
+                new Vector2(this.searchBox.X + this.searchBox.Width + 24, this.searchBox.Y + 10),
+                Game1.textColor);
+        }
 
         foreach (var button in this.categoryButtons)
         {
@@ -342,6 +368,7 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
         {
             this.transactionService.SaveNetworkState();
             this.snapshot = this.CreateSnapshot();
+            this.snapshotAtTick = Game1.ticks;
             Game1.addHUDMessage(new HUDMessage(message, HUDMessage.newQuest_type));
             Game1.playSound("coin");
         }
@@ -368,6 +395,7 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
         {
             this.transactionService.SaveNetworkState();
             this.snapshot = this.CreateSnapshot();
+            this.snapshotAtTick = Game1.ticks;
             Game1.addHUDMessage(new HUDMessage(ModText.Format("inventory.depositSlotSuccess", moved), HUDMessage.newQuest_type));
             Game1.playSound("Ship");
         }
@@ -387,6 +415,7 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
         {
             this.transactionService.SaveNetworkState();
             this.snapshot = this.CreateSnapshot();
+            this.snapshotAtTick = Game1.ticks;
             Game1.addHUDMessage(new HUDMessage(message, HUDMessage.newQuest_type));
             Game1.playSound("Ship");
         }

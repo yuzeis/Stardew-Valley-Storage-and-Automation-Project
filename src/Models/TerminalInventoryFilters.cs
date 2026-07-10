@@ -135,8 +135,20 @@ internal static class TerminalInventoryFilters
         if (lockedQualifiedItemIds.Count == 0)
             return ModText.Get("terminal.locked.none");
 
-        var shown = lockedQualifiedItemIds.Take(4).ToList();
-        var suffix = lockedQualifiedItemIds.Count > shown.Count ? $" +{lockedQualifiedItemIds.Count - shown.Count:N0}" : string.Empty;
-        return ModText.Format("terminal.locked.list", string.Join(", ", shown), suffix);
+        var shownNames = new List<string>();
+        foreach (var id in lockedQualifiedItemIds.Take(4))
+        {
+            try
+            {
+                var name = ItemRegistry.Create(id).DisplayName;
+                shownNames.Add(name);
+            }
+            catch
+            {
+                shownNames.Add(id);
+            }
+        }
+        var suffix = lockedQualifiedItemIds.Count > shownNames.Count ? $" +{lockedQualifiedItemIds.Count - shownNames.Count:N0}" : string.Empty;
+        return ModText.Format("terminal.locked.list", string.Join(", ", shownNames), suffix);
     }
 }

@@ -1,5 +1,6 @@
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
+using SVSAP.Content;
 using SVSAP.Services;
 using StardewValley;
 using StardewValley.Menus;
@@ -12,6 +13,9 @@ internal sealed class TransferBusMenu : IClickableMenu
     private const int Pad = 28;
     private const int FilterColumns = 3;
     private const int FilterRows = 3;
+    private const int UpgradeColumns = 4;
+    private const int UpgradeRows = 2;
+    private const int UpgradeCell = 46;
     private const int ControlButtonWidth = 150;
     private const int ControlButtonHeight = 42;
     private const int ControlButtonGap = 10;
@@ -22,15 +26,18 @@ internal sealed class TransferBusMenu : IClickableMenu
 
     private readonly SObject bus;
     private readonly TransferBusService transferBusService;
-    private readonly SVSAPBackpackGrid backpackGrid = new();
+    private const int BackpackCell = 52;
+    private readonly SVSAPBackpackGrid backpackGrid = new(BackpackCell);
     private readonly List<ClickableComponent> directionButtons = new();
     private ClickableComponent modeButton = null!;
     private ClickableComponent oreButton = null!;
     private ClickableComponent qualityButton = null!;
     private ClickableComponent clearButton = null!;
     private Rectangle filterArea;
+    private Rectangle upgradeArea;
     private Rectangle invArea;
     private int selectedSlot;
+    private int selectedUpgradeSlot = -1;
 
     public TransferBusMenu(SObject bus, TransferBusService transferBusService)
         : base(
@@ -57,6 +64,7 @@ internal sealed class TransferBusMenu : IClickableMenu
         var top = this.yPositionOnScreen + 24;
 
         this.filterArea = new Rectangle(innerX, top + 92, FilterColumns * SVSAPMenuWidgets.Cell, FilterRows * SVSAPMenuWidgets.Cell);
+        this.upgradeArea = new Rectangle(innerX, this.filterArea.Bottom + 14, UpgradeColumns * UpgradeCell, UpgradeRows * UpgradeCell);
         var controlsX = this.filterArea.Right + 34;
         var controlsY = this.filterArea.Y;
         var controlsAvailable = Math.Max(1, this.xPositionOnScreen + this.width - Pad - controlsX);
@@ -86,9 +94,9 @@ internal sealed class TransferBusMenu : IClickableMenu
                 directions[i].Label));
         }
 
-        var backpackColumns = SVSAPBackpackGrid.GetColumnCount(innerW);
-        var invH = SVSAPBackpackGrid.GetHeight(backpackColumns);
-        var invW = backpackColumns * SVSAPMenuWidgets.Cell;
+        var backpackColumns = SVSAPBackpackGrid.GetColumnCount(innerW, BackpackCell);
+        var invH = SVSAPBackpackGrid.GetHeight(backpackColumns, BackpackCell);
+        var invW = backpackColumns * BackpackCell;
         this.invArea = new Rectangle(innerX + Math.Max(0, (innerW - invW) / 2), this.yPositionOnScreen + this.height - Pad - invH, invW, invH);
         this.backpackGrid.SetBounds(this.invArea);
     }
@@ -149,15 +157,17 @@ internal sealed class TransferBusMenu : IClickableMenu
 
     public override void draw(SpriteBatch b)
     {
-        SVSAPMenuWidgets.DrawPanel(b, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
-        Utility.drawTextWithShadow(b, this.bus.DisplayName, Game1.dialogueFont, new Vector2(this.xPositionOnScreen + Pad, this.yPositionOnScreen + 26), Game1.textColor);
+        SVSAPMenuWidgets.DrawStardewAE2Frame(b, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
+        Utility.drawTextWithShadow(b, this.bus.DisplayName, Game1.dialogueFont, new Vector2(this.xPositionOnScreen + Pad + 12, this.yPositionOnScreen + 26), Game1.textColor);
 
         var slots = this.transferBusService.GetFilterSlotViews(this.bus);
+        var upgrades = this.transferBusService.GetUpgradeSlotViews(this.bus);
         this.DrawFilterSlots(b, slots);
+        this.DrawUpgradeSlots(b, upgrades);
         this.DrawControls(b);
         SVSAPMenuWidgets.DrawSeparator(b, new Rectangle(this.xPositionOnScreen + Pad, this.invArea.Y - 12, this.width - Pad * 2, 2));
         this.backpackGrid.Draw(b);
-        this.DrawHoverTooltip(b, slots);
+        this.DrawHoverTooltip(b, slots, upgrades);
         this.upperRightCloseButton?.draw(b);
         this.drawMouse(b);
     }
@@ -168,25 +178,41 @@ internal sealed class TransferBusMenu : IClickableMenu
 
         if (this.modeButton.containsPoint(x, y))
         {
-            this.RunAction(() => this.transferBusService.TryToggleFilterMode(this.bus, out var message) ? message : message);
+            this.RunAction(() =>
+            {
+                var success = this.transferBusService.TryToggleFilterMode(this.bus, out var message);
+                return (success, message);
+            });
             return;
         }
 
         if (this.oreButton.containsPoint(x, y))
         {
-            this.RunAction(() => this.transferBusService.TryToggleOreDictionaryMode(this.bus, out var message) ? message : message);
+            this.RunAction(() =>
+            {
+                var success = this.transferBusService.TryToggleOreDictionaryMode(this.bus, out var message);
+                return (success, message);
+            });
             return;
         }
 
         if (this.qualityButton.containsPoint(x, y))
         {
-            this.RunAction(() => this.transferBusService.TryToggleQualityStrategy(this.bus, out var message) ? message : message);
+            this.RunAction(() =>
+            {
+                var success = this.transferBusService.TryToggleQualityStrategy(this.bus, out var message);
+                return (success, message);
+            });
             return;
         }
 
         if (this.clearButton.containsPoint(x, y))
         {
-            this.RunAction(() => this.transferBusService.TryClearFilter(this.bus, out var message) ? message : message);
+            this.RunAction(() =>
+            {
+                var success = this.transferBusService.TryClearFilter(this.bus, out var message);
+                return (success, message);
+            });
             return;
         }
 
@@ -195,7 +221,32 @@ internal sealed class TransferBusMenu : IClickableMenu
             if (!button.containsPoint(x, y) || !int.TryParse(button.name, out var direction))
                 continue;
 
-            this.RunAction(() => this.transferBusService.TrySetFacingDirection(this.bus, direction, out var message) ? message : message);
+            this.RunAction(() =>
+            {
+                var success = this.transferBusService.TrySetFacingDirection(this.bus, direction, out var message);
+                return (success, message);
+            });
+            return;
+        }
+
+        var upgradeSlot = this.HitUpgradeSlot(x, y);
+        if (upgradeSlot >= 0)
+        {
+            this.selectedUpgradeSlot = upgradeSlot;
+            this.selectedSlot = -1;
+            var view = this.transferBusService.GetUpgradeSlotViews(this.bus).FirstOrDefault(slot => slot.SlotIndex == upgradeSlot);
+            if (view?.Occupied == true)
+            {
+                this.RunAction(() =>
+                {
+                    var success = this.transferBusService.TryEjectUpgradeSlot(this.bus, upgradeSlot, out var message);
+                    return (success, message);
+                });
+            }
+            else
+            {
+                Game1.playSound("smallSelect");
+            }
             return;
         }
 
@@ -203,11 +254,8 @@ internal sealed class TransferBusMenu : IClickableMenu
         if (filterSlot >= 0)
         {
             this.selectedSlot = filterSlot;
-            var view = this.transferBusService.GetFilterSlotViews(this.bus).FirstOrDefault(slot => slot.SlotIndex == filterSlot);
-            if (view?.Occupied == true)
-                this.RunAction(() => this.transferBusService.TryClearFilterSlot(this.bus, filterSlot, out var message) ? message : message);
-            else
-                Game1.playSound("smallSelect");
+            this.selectedUpgradeSlot = -1;
+            Game1.playSound("smallSelect");
             return;
         }
 
@@ -218,10 +266,25 @@ internal sealed class TransferBusMenu : IClickableMenu
 
     public override void receiveRightClick(int x, int y, bool playSound = true)
     {
+        var upgradeSlot = this.HitUpgradeSlot(x, y);
+        if (upgradeSlot >= 0)
+        {
+            this.RunAction(() =>
+            {
+                var success = this.transferBusService.TryEjectUpgradeSlot(this.bus, upgradeSlot, out var message);
+                return (success, message);
+            });
+            return;
+        }
+
         var filterSlot = this.HitFilterSlot(x, y);
         if (filterSlot >= 0)
         {
-            this.RunAction(() => this.transferBusService.TryClearFilterSlot(this.bus, filterSlot, out var message) ? message : message);
+            this.RunAction(() =>
+            {
+                var success = this.transferBusService.TryClearFilterSlot(this.bus, filterSlot, out var message);
+                return (success, message);
+            });
             return;
         }
 
@@ -235,10 +298,11 @@ internal sealed class TransferBusMenu : IClickableMenu
             var cell = this.GetFilterSlotBounds(index);
             var selected = index == this.selectedSlot;
             SVSAPMenuWidgets.DrawSlotBackground(b, cell);
-            if (selected)
-                b.Draw(Game1.staminaRect, new Rectangle(cell.X - 2, cell.Y - 2, cell.Width + 4, cell.Height + 4), Color.LightGreen * 0.35f);
-
             var view = slots.FirstOrDefault(slot => slot.SlotIndex == index);
+            SVSAPMenuWidgets.DrawSlotStatusLine(b, cell, view?.Occupied == true ? PixelStatus.Ready : PixelStatus.Idle);
+            if (selected)
+                DrawSelection(b, cell);
+
             view?.Item?.drawInMenu(
                 b,
                 new Vector2(cell.X + SVSAPMenuWidgets.IconInset, cell.Y + SVSAPMenuWidgets.IconInset),
@@ -246,20 +310,44 @@ internal sealed class TransferBusMenu : IClickableMenu
                 1f,
                 0.86f,
                 StackDrawType.Hide,
-                Color.White,
+                Color.White * 0.58f,
                 true);
+        }
+    }
+
+    private void DrawUpgradeSlots(SpriteBatch b, IReadOnlyList<TransferUpgradeSlotView> slots)
+    {
+        for (var index = 0; index < TransferBusService.UpgradeSlotCount; index++)
+        {
+            var bounds = this.GetUpgradeSlotBounds(index);
+            var view = slots.FirstOrDefault(slot => slot.SlotIndex == index);
+            SVSAPMenuWidgets.DrawSlotBackground(b, bounds, view?.Occupied != true);
+            SVSAPMenuWidgets.DrawSlotStatusLine(b, bounds, view?.Occupied == true ? PixelStatus.Ready : PixelStatus.Idle);
+            if (index == this.selectedUpgradeSlot)
+                DrawSelection(b, bounds);
+            if (view?.Item is not null)
+                view.Item.drawInMenu(b, new Vector2(bounds.X + 2, bounds.Y + 2), 0.58f, 1f, 0.86f, StackDrawType.Hide, Color.White, true);
+            else
+                SVSAPMenuWidgets.DrawGhostUpgradeSlot(b, bounds, "module");
         }
     }
 
     private void DrawControls(SpriteBatch b)
     {
+        var blacklist = this.transferBusService.IsFilterBlacklistModeEnabled(this.bus);
+        this.modeButton.label = blacklist
+            ? ModText.Get("ui.transferBus.mode.blacklist")
+            : ModText.Get("ui.transferBus.mode.whitelist");
         this.oreButton.label = this.transferBusService.IsOreDictionaryModeEnabled(this.bus)
             ? ModText.Get("ui.transferBus.oreDictionaryOnShort")
             : ModText.Get("ui.transferBus.oreDictionaryOffShort");
 
-        SVSAPMenuWidgets.DrawButton(b, this.modeButton, ModText.Get("ui.transferBus.action.toggleFilterMode"));
-        SVSAPMenuWidgets.DrawButton(b, this.oreButton);
-        SVSAPMenuWidgets.DrawButton(b, this.qualityButton);
+        this.qualityButton.label = this.transferBusService.GetConfiguredQualityStrategy(this.bus).ToString();
+        SVSAPMenuWidgets.DrawButton(b, this.modeButton, tint: blacklist ? Color.Orange : Color.LightGreen);
+        var hasOreCard = this.transferBusService.HasInstalledUpgrade(this.bus, "(O)" + ModItemCatalog.OreDictionaryCard);
+        var hasQualityCard = this.transferBusService.HasInstalledUpgrade(this.bus, "(O)" + ModItemCatalog.QualityCard);
+        SVSAPMenuWidgets.DrawButton(b, this.oreButton, tint: !hasOreCard ? Color.Gray : this.transferBusService.IsOreDictionaryModeEnabled(this.bus) ? Color.LightGreen : Color.White);
+        SVSAPMenuWidgets.DrawButton(b, this.qualityButton, tint: hasQualityCard ? Color.White : Color.Gray);
         SVSAPMenuWidgets.DrawButton(b, this.clearButton);
 
         var facing = this.transferBusService.GetFacingDirection(this.bus);
@@ -269,17 +357,25 @@ internal sealed class TransferBusMenu : IClickableMenu
             SVSAPMenuWidgets.DrawButton(b, button, tint: selected ? Color.LightGreen : Color.White);
         }
 
-        var lines = this.transferBusService.DescribeConfigurationLines(this.bus).Take(7).ToList();
+        var lines = this.transferBusService.DescribeConfigurationLines(this.bus).ToList();
         var x = this.filterArea.Right + 34;
-        var y = this.filterArea.Bottom + 24;
-        foreach (var line in lines)
+        var y = this.filterArea.Bottom + 18;
+        var maxLines = Math.Max(0, (this.invArea.Y - 18 - y) / 24);
+        foreach (var line in lines.Take(maxLines))
         {
-            b.DrawString(Game1.smallFont, line, new Vector2(x, y), Game1.textColor);
-            y += 26;
+            SVSAPMenuWidgets.DrawFittedLine(
+                b,
+                line,
+                new Rectangle(x, y, this.xPositionOnScreen + this.width - Pad - x, 22),
+                Game1.textColor);
+            y += 24;
         }
     }
 
-    private void DrawHoverTooltip(SpriteBatch b, IReadOnlyList<TransferFilterSlotView> slots)
+    private void DrawHoverTooltip(
+        SpriteBatch b,
+        IReadOnlyList<TransferFilterSlotView> slots,
+        IReadOnlyList<TransferUpgradeSlotView> upgrades)
     {
         var mx = Game1.getMouseX();
         var my = Game1.getMouseY();
@@ -289,11 +385,27 @@ internal sealed class TransferBusMenu : IClickableMenu
             var view = slots.FirstOrDefault(slot => slot.SlotIndex == slotIndex);
             if (view?.Occupied == true)
             {
-                var lines = new List<string> { view.QualifiedItemId };
+                var lines = new List<string>();
                 if (view.OreGroups.Count > 0)
                     lines.Add(ModText.Format("ui.transferBus.tooltip.oreGroups", string.Join(", ", view.OreGroups)));
                 SVSAPMenuWidgets.DrawTooltipBox(b, mx + 28, my + 28, view.DisplayName, lines);
             }
+            return;
+        }
+
+        var upgradeIndex = this.HitUpgradeSlot(mx, my);
+        if (upgradeIndex >= 0)
+        {
+            var upgrade = upgrades.FirstOrDefault(slot => slot.SlotIndex == upgradeIndex);
+            var title = upgrade?.Occupied == true
+                ? upgrade.DisplayName
+                : ModText.Get("ui.transferBus.upgradeEmpty");
+            SVSAPMenuWidgets.DrawTooltipBox(
+                b,
+                mx + 28,
+                my + 28,
+                title,
+                new[] { ModText.Get("ui.transferBus.upgradeHint") });
             return;
         }
 
@@ -315,9 +427,36 @@ internal sealed class TransferBusMenu : IClickableMenu
         if (item is null)
             return;
 
+        if (TransferBusService.IsUpgradeCard(item.QualifiedItemId))
+        {
+            var target = this.FindTargetUpgradeSlot();
+            this.RunAction(() =>
+            {
+                var success = this.transferBusService.TryInsertUpgradeSlot(this.bus, target, item, out var message);
+                return (success, message);
+            });
+            return;
+        }
+
+        if (TransferBusService.IsConfigurationCard(item.QualifiedItemId))
+        {
+            this.RunAction(() =>
+            {
+                var success = this.transferBusService.TryApplyConfigurationItem(this.bus, item, out var message);
+                return (success, message);
+            });
+            return;
+        }
+
         var slot = this.FindTargetFilterSlot();
-        this.RunAction(() => this.transferBusService.TrySetFilterSlot(this.bus, slot, item.QualifiedItemId, out var message) ? message : message);
-        this.selectedSlot = Math.Min(slot + 1, FilterColumns * FilterRows - 1);
+        if (this.RunAction(() =>
+        {
+            var success = this.transferBusService.TrySetFilterSlot(this.bus, slot, item.QualifiedItemId, out var message);
+            return (success, message);
+        }))
+        {
+            this.selectedSlot = Math.Min(slot + 1, FilterColumns * FilterRows - 1);
+        }
     }
 
     private int FindTargetFilterSlot()
@@ -327,6 +466,18 @@ internal sealed class TransferBusMenu : IClickableMenu
             return this.selectedSlot;
 
         return slots.FirstOrDefault(slot => !slot.Occupied)?.SlotIndex ?? 0;
+    }
+
+    private int FindTargetUpgradeSlot()
+    {
+        var slots = this.transferBusService.GetUpgradeSlotViews(this.bus);
+        if (this.selectedUpgradeSlot >= 0
+            && this.selectedUpgradeSlot < TransferBusService.UpgradeSlotCount
+            && slots.Any(slot => slot.SlotIndex == this.selectedUpgradeSlot && !slot.Occupied))
+        {
+            return this.selectedUpgradeSlot;
+        }
+        return slots.FirstOrDefault(slot => !slot.Occupied)?.SlotIndex ?? -1;
     }
 
     private int HitFilterSlot(int x, int y)
@@ -353,11 +504,39 @@ internal sealed class TransferBusMenu : IClickableMenu
             SVSAPMenuWidgets.Cell - 4);
     }
 
-    private void RunAction(Func<string?> action)
+    private int HitUpgradeSlot(int x, int y)
     {
-        var message = action();
-        if (!string.IsNullOrWhiteSpace(message))
-            Game1.addHUDMessage(new HUDMessage(message, HUDMessage.newQuest_type));
-        Game1.playSound("smallSelect");
+        if (!this.upgradeArea.Contains(x, y))
+            return -1;
+        var column = (x - this.upgradeArea.X) / UpgradeCell;
+        var row = (y - this.upgradeArea.Y) / UpgradeCell;
+        var index = row * UpgradeColumns + column;
+        return index is >= 0 and < TransferBusService.UpgradeSlotCount ? index : -1;
+    }
+
+    private Rectangle GetUpgradeSlotBounds(int index)
+    {
+        return new Rectangle(
+            this.upgradeArea.X + index % UpgradeColumns * UpgradeCell,
+            this.upgradeArea.Y + index / UpgradeColumns * UpgradeCell,
+            UpgradeCell - 4,
+            UpgradeCell - 4);
+    }
+
+    private bool RunAction(Func<(bool Success, string Message)> action)
+    {
+        var result = action();
+        if (!string.IsNullOrWhiteSpace(result.Message))
+            Game1.addHUDMessage(new HUDMessage(result.Message, result.Success ? HUDMessage.newQuest_type : HUDMessage.error_type));
+        Game1.playSound(result.Success ? "smallSelect" : "cancel");
+        return result.Success;
+    }
+
+    private static void DrawSelection(SpriteBatch b, Rectangle bounds)
+    {
+        b.Draw(Game1.staminaRect, new Rectangle(bounds.X, bounds.Y, bounds.Width, 2), Color.Gold);
+        b.Draw(Game1.staminaRect, new Rectangle(bounds.X, bounds.Bottom - 2, bounds.Width, 2), Color.Gold);
+        b.Draw(Game1.staminaRect, new Rectangle(bounds.X, bounds.Y, 2, bounds.Height), Color.Gold);
+        b.Draw(Game1.staminaRect, new Rectangle(bounds.Right - 2, bounds.Y, 2, bounds.Height), Color.Gold);
     }
 }

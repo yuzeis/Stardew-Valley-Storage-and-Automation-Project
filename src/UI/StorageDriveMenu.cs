@@ -1,5 +1,6 @@
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
+using SVSAP.Content;
 using SVSAP.Services;
 using StardewValley;
 using StardewValley.Menus;
@@ -15,6 +16,9 @@ internal sealed class StorageDriveMenu : IClickableMenu
     private const int MinSlotColumns = 3;
     private const int SummaryMinWidth = 180;
     private const int SummaryGap = 32;
+    private const int InventoryCell = 48;
+    private const int InventoryColumns = 12;
+    private const int ViewRefreshTicks = 30;
 
     private readonly SObject drive;
     private readonly GameLocation location;
@@ -23,6 +27,11 @@ internal sealed class StorageDriveMenu : IClickableMenu
     private readonly int slotColumns;
     private readonly int slotRows;
     private Rectangle slotArea;
+    private readonly Rectangle inventoryArea;
+    private IReadOnlyList<StorageDriveSlotView> cachedViews = Array.Empty<StorageDriveSlotView>();
+    private IReadOnlyList<string> cachedSummary = Array.Empty<string>();
+    private int cachedAtTick = -1;
+    private int selectedSlot;
 
     public StorageDriveMenu(SObject drive, GameLocation location, Vector2 tile, StorageDriveService storageDriveService)
         : base(
@@ -40,12 +49,17 @@ internal sealed class StorageDriveMenu : IClickableMenu
         this.slotColumns = layout.Columns;
         this.slotRows = layout.Rows;
         this.slotArea = new Rectangle(this.xPositionOnScreen + Pad, this.yPositionOnScreen + 112, this.slotColumns * SVSAPMenuWidgets.Cell, this.slotRows * SVSAPMenuWidgets.Cell);
+        this.inventoryArea = new Rectangle(
+            this.xPositionOnScreen + (this.width - InventoryColumns * InventoryCell) / 2,
+            this.yPositionOnScreen + this.height - Pad - 3 * InventoryCell,
+            InventoryColumns * InventoryCell,
+            3 * InventoryCell);
         SVSAPMenuWidgets.PositionCloseButton(this.upperRightCloseButton, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
     }
 
     private static int GetMenuWidth() => Math.Min(760, Math.Max(520, Game1.uiViewport.Width - 48));
 
-    private static int GetMenuHeight() => Math.Min(500, Math.Max(420, Game1.uiViewport.Height - 48));
+    private static int GetMenuHeight() => Math.Min(640, Math.Max(560, Game1.uiViewport.Height - 48));
 
     internal static StorageDriveMenuLayoutShape CalculateLayoutShape(int menuWidth)
     {
@@ -66,13 +80,14 @@ internal sealed class StorageDriveMenu : IClickableMenu
 
     public override void draw(SpriteBatch b)
     {
-        SVSAPMenuWidgets.DrawPanel(b, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
-        Utility.drawTextWithShadow(b, this.drive.DisplayName, Game1.dialogueFont, new Vector2(this.xPositionOnScreen + Pad, this.yPositionOnScreen + 26), Game1.textColor);
+        SVSAPMenuWidgets.DrawStardewAE2Frame(b, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
+        Utility.drawTextWithShadow(b, this.drive.DisplayName, Game1.dialogueFont, new Vector2(this.xPositionOnScreen + Pad + 12, this.yPositionOnScreen + 26), Game1.textColor);
 
-        var views = this.storageDriveService.GetSlotViews(this.drive);
-        this.DrawSlots(b, views);
-        this.DrawSummary(b);
-        this.DrawHoverTooltip(b, views);
+        this.RefreshCachedViews();
+        this.DrawSlots(b, this.cachedViews);
+        this.DrawSummary(b, this.cachedSummary);
+        this.DrawInventory(b);
+        this.DrawHoverTooltip(b, this.cachedViews);
         this.upperRightCloseButton?.draw(b);
         this.drawMouse(b);
     }
@@ -82,19 +97,38 @@ internal sealed class StorageDriveMenu : IClickableMenu
         base.receiveLeftClick(x, y, playSound);
 
         var slotIndex = this.HitSlot(x, y);
-        if (slotIndex < 0)
-            return;
+        if (slotIndex >= 0)
+        {
+            this.RefreshCachedViews(force: true);
+            var occupied = this.cachedViews.FirstOrDefault(view => view.SlotIndex == slotIndex)?.Occupied == true;
+            if (!occupied)
+            {
+                this.selectedSlot = slotIndex;
+                var held = Game1.player.CurrentItem;
+                if (held is not null && ModItemCatalog.TryGetStorageCellTier(held.QualifiedItemId, out _))
+                    this.RunInsert(slotIndex, held);
+                else
+                    Game1.playSound("smallSelect");
+                return;
+            }
 
-        if (this.storageDriveService.TryEjectCellSlot(this.drive, this.location, this.tile, slotIndex, out var message))
-        {
-            Game1.addHUDMessage(new HUDMessage(message, HUDMessage.newQuest_type));
-            Game1.playSound("Ship");
+            this.RunEject(slotIndex);
+            return;
         }
-        else
+
+        var inventoryIndex = this.HitInventorySlot(x, y);
+        if (inventoryIndex < 0 || Game1.player.Items[inventoryIndex] is not Item item)
+            return;
+        if (!ModItemCatalog.TryGetStorageCellTier(item.QualifiedItemId, out _))
         {
-            Game1.addHUDMessage(new HUDMessage(message, HUDMessage.error_type));
             Game1.playSound("cancel");
+            return;
         }
+
+        var targetSlot = this.storageDriveService.HasCellSlot(this.drive, this.selectedSlot)
+            ? Enumerable.Range(0, SlotCount).FirstOrDefault(index => !this.storageDriveService.HasCellSlot(this.drive, index))
+            : this.selectedSlot;
+        this.RunInsert(targetSlot, item);
     }
 
     private void DrawSlots(SpriteBatch b, IReadOnlyList<StorageDriveSlotView> views)
@@ -107,6 +141,9 @@ internal sealed class StorageDriveMenu : IClickableMenu
             var cell = this.GetSlotBounds(index);
             var view = views.FirstOrDefault(slot => slot.SlotIndex == index);
             SVSAPMenuWidgets.DrawSlotBackground(b, cell, view?.Occupied != true);
+            SVSAPMenuWidgets.DrawSlotStatusLine(b, cell, view?.Occupied == true ? PixelStatus.Ready : PixelStatus.Idle);
+            if (index == this.selectedSlot)
+                DrawSelection(b, cell);
             if (view?.Item is null)
                 continue;
 
@@ -127,9 +164,8 @@ internal sealed class StorageDriveMenu : IClickableMenu
         }
     }
 
-    private void DrawSummary(SpriteBatch b)
+    private void DrawSummary(SpriteBatch b, IReadOnlyList<string> lines)
     {
-        var lines = this.storageDriveService.DescribeDrive(this.drive);
         var x = this.slotArea.Right + 32;
         var y = this.slotArea.Y;
         var maxWidth = this.xPositionOnScreen + this.width - Pad - x;
@@ -138,20 +174,66 @@ internal sealed class StorageDriveMenu : IClickableMenu
             var text = line.Length > 48 ? line[..48] + "..." : line;
             b.DrawString(Game1.smallFont, text, new Vector2(x, y), Game1.textColor);
             y += 28;
-            if (y > this.yPositionOnScreen + this.height - 72)
+            if (y > this.inventoryArea.Y - 56)
                 break;
         }
 
-        b.DrawString(
-            Game1.smallFont,
+        SVSAPMenuWidgets.DrawFittedLine(
+            b,
             ModText.Get("ui.storageDrive.guiHelp"),
-            new Vector2(this.xPositionOnScreen + Pad, this.yPositionOnScreen + this.height - 58),
-            Color.DimGray,
-            0f,
-            Vector2.Zero,
-            maxWidth > 0 ? 1f : 1f,
-            SpriteEffects.None,
-            1f);
+            new Rectangle(this.xPositionOnScreen + Pad, this.inventoryArea.Y - 42, this.width - Pad * 2, 28),
+            Color.DimGray);
+    }
+
+    private void DrawInventory(SpriteBatch b)
+    {
+        b.Draw(Game1.staminaRect, new Rectangle(this.inventoryArea.X, this.inventoryArea.Y - 10, this.inventoryArea.Width, 2), Color.SaddleBrown * 0.45f);
+        for (var index = 0; index < Math.Min(36, Game1.player.Items.Count); index++)
+        {
+            var bounds = this.GetInventorySlotBounds(index);
+            SVSAPMenuWidgets.DrawSlotBackground(b, bounds, Game1.player.Items[index] is null);
+            Game1.player.Items[index]?.drawInMenu(b, new Vector2(bounds.X + 4, bounds.Y + 4), 0.68f, 1f, 0.86f, StackDrawType.Draw, Color.White, true);
+        }
+    }
+
+    private void RunInsert(int slotIndex, Item item)
+    {
+        var success = this.storageDriveService.TryInsertCellSlot(this.drive, slotIndex, item, out var message);
+        Game1.addHUDMessage(new HUDMessage(message, success ? HUDMessage.newQuest_type : HUDMessage.error_type));
+        Game1.playSound(success ? "Ship" : "cancel");
+        if (success)
+        {
+            this.selectedSlot = Math.Min(SlotCount - 1, slotIndex + 1);
+            this.RefreshCachedViews(force: true);
+        }
+    }
+
+    private void RunEject(int slotIndex)
+    {
+        var success = this.storageDriveService.TryEjectCellSlot(this.drive, this.location, this.tile, slotIndex, out var message);
+        Game1.addHUDMessage(new HUDMessage(message, success ? HUDMessage.newQuest_type : HUDMessage.error_type));
+        Game1.playSound(success ? "Ship" : "cancel");
+        if (success)
+        {
+            this.selectedSlot = slotIndex;
+            this.RefreshCachedViews(force: true);
+        }
+    }
+
+    private void RefreshCachedViews(bool force = false)
+    {
+        var tick = Game1.ticks;
+        if (!force
+            && this.cachedAtTick >= 0
+            && tick >= this.cachedAtTick
+            && tick - this.cachedAtTick < ViewRefreshTicks)
+        {
+            return;
+        }
+
+        this.cachedViews = this.storageDriveService.GetSlotViews(this.drive);
+        this.cachedSummary = this.storageDriveService.DescribeDrive(this.drive);
+        this.cachedAtTick = tick;
     }
 
     private void DrawHoverTooltip(SpriteBatch b, IReadOnlyList<StorageDriveSlotView> views)
@@ -195,6 +277,31 @@ internal sealed class StorageDriveMenu : IClickableMenu
             this.slotArea.Y + row * SVSAPMenuWidgets.Cell,
             SVSAPMenuWidgets.Cell - 4,
             SVSAPMenuWidgets.Cell - 4);
+    }
+
+    private int HitInventorySlot(int x, int y)
+    {
+        if (!this.inventoryArea.Contains(x, y))
+            return -1;
+        var index = (y - this.inventoryArea.Y) / InventoryCell * InventoryColumns + (x - this.inventoryArea.X) / InventoryCell;
+        return index >= 0 && index < Math.Min(36, Game1.player.Items.Count) ? index : -1;
+    }
+
+    private Rectangle GetInventorySlotBounds(int index)
+    {
+        return new Rectangle(
+            this.inventoryArea.X + index % InventoryColumns * InventoryCell,
+            this.inventoryArea.Y + index / InventoryColumns * InventoryCell,
+            InventoryCell - 4,
+            InventoryCell - 4);
+    }
+
+    private static void DrawSelection(SpriteBatch b, Rectangle bounds)
+    {
+        b.Draw(Game1.staminaRect, new Rectangle(bounds.X, bounds.Y, bounds.Width, 2), Color.Gold);
+        b.Draw(Game1.staminaRect, new Rectangle(bounds.X, bounds.Bottom - 2, bounds.Width, 2), Color.Gold);
+        b.Draw(Game1.staminaRect, new Rectangle(bounds.X, bounds.Y, 2, bounds.Height), Color.Gold);
+        b.Draw(Game1.staminaRect, new Rectangle(bounds.Right - 2, bounds.Y, 2, bounds.Height), Color.Gold);
     }
 }
 

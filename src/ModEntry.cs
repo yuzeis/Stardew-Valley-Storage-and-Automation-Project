@@ -112,6 +112,7 @@ public sealed class ModEntry : Mod
         helper.Events.GameLoop.ReturnedToTitle += this.OnReturnedToTitle;
         helper.Events.GameLoop.UpdateTicked += this.transferBusService.OnUpdateTicked;
         helper.Events.GameLoop.UpdateTicked += this.patternExecutionService.OnUpdateTicked;
+        helper.Events.GameLoop.UpdateTicked += this.networkInteractionService.OnUpdateTicked;
         helper.Events.Player.InventoryChanged += this.OnInventoryChanged;
         helper.Events.Input.ButtonPressed += this.networkInteractionService.OnButtonPressed;
         helper.Events.Multiplayer.PeerContextReceived += this.OnPeerContextReceived;
@@ -173,6 +174,8 @@ public sealed class ModEntry : Mod
         {
             this.storageCellInitializer.InitializeInventory(Game1.player);
             SyncSVSAPCraftingRecipeUnlocks(Game1.player, this.config);
+            this.networkInteractionService.RestoreDurableRemoteDeliveries();
+            this.networkInteractionService.RehydrateDurableClientEscrows();
         }
 
         if (!Context.IsMainPlayer)
@@ -191,6 +194,9 @@ public sealed class ModEntry : Mod
     {
         if (Game1.player is not null)
             SyncSVSAPCraftingRecipeUnlocks(Game1.player, this.config);
+
+        if (Context.IsMainPlayer && Context.IsWorldReady)
+            this.networkInteractionService.PruneExpiredPendingRemoteDeliveries(Game1.Date.TotalDays);
     }
 
     private void OnSaving(object? sender, SavingEventArgs e)
@@ -203,7 +209,7 @@ public sealed class ModEntry : Mod
 
     private void OnReturnedToTitle(object? sender, ReturnedToTitleEventArgs e)
     {
-        this.networkInteractionService.ClearActionResponseCaches();
+        this.networkInteractionService.ClearActionResponseCachesWithoutRestore();
     }
 
     private void OnInventoryChanged(object? sender, InventoryChangedEventArgs e)
@@ -343,6 +349,8 @@ public sealed class ModEntry : Mod
         this.UpdatePeerActionCompatibility(e.Peer);
         if (Context.IsMainPlayer && !e.Peer.IsHost && this.PeerHasThisMod(e.Peer))
             this.networkInteractionService.ResendPendingRemoteDeliveries(e.Peer.PlayerID);
+        else if (!Context.IsMainPlayer && e.Peer.IsHost && this.PeerHasThisMod(e.Peer))
+            this.networkInteractionService.RetryDurableClientEscrows();
     }
 
     private void OnPeerDisconnected(object? sender, PeerDisconnectedEventArgs e)
@@ -350,9 +358,13 @@ public sealed class ModEntry : Mod
         this.warnedMissingSVSAPPeers.Remove(e.Peer.PlayerID);
         this.networkInteractionService.ClearPeerActionBlock(e.Peer.PlayerID);
         if (!Context.IsMainPlayer && e.Peer.IsHost)
-            this.networkInteractionService.ClearActionResponseCaches();
-        else
-            this.networkInteractionService.ClearActionResponseCaches(e.Peer.PlayerID);
+        {
+            this.networkInteractionService.ClearActionResponseCachesWithoutRestore();
+            this.networkInteractionService.RehydrateDurableClientEscrows();
+        }
+
+        // Host-side response caches intentionally survive a peer disconnect so the
+        // same durable transaction can be replayed and reconciled after reconnect.
     }
 
     private void WarnIfPeerMissingRequiredMod(IMultiplayerPeer peer)

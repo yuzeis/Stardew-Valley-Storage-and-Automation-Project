@@ -121,6 +121,11 @@ internal sealed class RuntimeSelfTestService
         Assert(StorageDriveMenu.LayoutFits(menuWidth: 520), "storage drive GUI must wrap storage-cell slots before the summary panel overflows compact widths");
         Assert(TransferBusMenu.LayoutFits(menuWidth: 1040), "importer/exporter GUI must fit its 3x3 filter and controls at full width");
         Assert(TransferBusMenu.LayoutFits(menuWidth: 720), "importer/exporter GUI controls must wrap instead of overflowing compact widths");
+
+        var compactTerminalGrid = new SVSAPIconGrid<object>(52);
+        compactTerminalGrid.SetBounds(new Rectangle(0, 0, 664, 104));
+        Assert(compactTerminalGrid.Columns == 12, "800x720 terminal content width must preserve a 12-column AE2-style item grid");
+        Assert(SVSAPBackpackGrid.GetColumnCount(664, 52) == 12, "800x720 terminal backpack must remain a compact 12-column grid");
     }
 
     private void TestStorageCellStackGuard()
@@ -644,12 +649,30 @@ internal sealed class RuntimeSelfTestService
         Assert(typeof(RemoteDeliveryAckMessage).GetProperty(nameof(RemoteDeliveryAckMessage.TransactionId))?.PropertyType == typeof(Guid), "remote delivery ACK must name the original transaction");
         Assert(typeof(NetworkSaveData).GetProperty(nameof(NetworkSaveData.SchemaVersion))?.PropertyType == typeof(int), "network save data must carry a schema version");
         Assert(typeof(NetworkSaveData).GetProperty(nameof(NetworkSaveData.PendingRemoteDeliveries))?.PropertyType == typeof(List<PendingRemoteDelivery>), "network save data must persist pending remote deliveries");
+        Assert(typeof(PendingRemoteDelivery).GetProperty(nameof(PendingRemoteDelivery.CreatedDay))?.PropertyType == typeof(int), "pending remote deliveries must record the in-game day for retention handling");
+        Assert(typeof(PendingRemoteDelivery).GetProperty(nameof(PendingRemoteDelivery.CreatedTick))?.PropertyType == typeof(long), "pending remote deliveries must record a tick stamp for diagnostics");
         Assert(typeof(NetworkInteractionService).GetMethod(nameof(NetworkInteractionService.ResendPendingRemoteDeliveries), BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.ReturnType == typeof(void), "host must expose pending remote delivery resend on peer reconnect");
+        Assert(typeof(NetworkInteractionService).GetMethod(nameof(NetworkInteractionService.PruneExpiredPendingRemoteDeliveries), BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.ReturnType == typeof(int), "host must prune or mailbox expired pending remote deliveries");
+        Assert(typeof(NetworkInteractionService).GetMethod(nameof(NetworkInteractionService.RestoreDurableRemoteDeliveries), BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.ReturnType == typeof(int), "clients must restore mailboxed remote deliveries on save load");
         Assert(typeof(NetworkInteractionService).GetMethod("HandleRemoteDeliveryAck", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "host must handle remote delivery ACK messages");
         Assert(typeof(NetworkInteractionService).GetMethod("MarkRemoteDeliveryReconciled", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "client must remember delivered payload ids before ACKing duplicates");
+        Assert(typeof(NetworkInteractionService).GetMethod("PersistReconciledRemoteDelivery", BindingFlags.Static | BindingFlags.NonPublic) is not null, "client reconciled remote delivery ids must persist across restart");
+        Assert(typeof(NetworkInteractionService).GetMethod("QueueDurableRemoteDeliveryForPlayer", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "host must move expired unconfirmed remote deliveries into a player mailbox instead of keeping global pending records forever");
+        Assert(typeof(NetworkInteractionService).GetField("PendingRemoteDeliveryRetentionDays", BindingFlags.Static | BindingFlags.NonPublic)?.GetRawConstantValue() is int retentionDays && retentionDays > 0, "remote delivery retention must use a positive in-game day window");
         Assert(typeof(NetworkInteractionService).GetMethod("DeliverStructuralReturnedItem", BindingFlags.Instance | BindingFlags.NonPublic)?.ReturnType == typeof(bool), "structural returned-item delivery must be retryable without reapplying held-item side effects");
         Assert(typeof(NetworkInteractionService).GetMethod("RegisterTerminalRemoteDelivery", BindingFlags.Instance | BindingFlags.NonPublic)?.ReturnType == typeof(bool), "terminal withdraw payloads must be registered in durable pending delivery storage");
         Assert(typeof(NetworkInteractionService).GetMethod("RegisterStructuralRemoteDelivery", BindingFlags.Instance | BindingFlags.NonPublic)?.ReturnType == typeof(bool), "structural returned items must be registered in durable pending delivery storage");
+        Assert(typeof(NetworkInteractionService).GetField("DurableClientActionEscrowModDataKey", BindingFlags.Static | BindingFlags.NonPublic)?.GetRawConstantValue() is string durableKey && !string.IsNullOrWhiteSpace(durableKey), "client terminal and structural deposits must use durable escrow storage");
+        Assert(typeof(NetworkInteractionService).GetMethod(nameof(NetworkInteractionService.RehydrateDurableClientEscrows), BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.ReturnType == typeof(int), "durable client escrows must be rehydrated for host reconciliation after reconnect");
+        Assert(typeof(NetworkInteractionService).GetMethod(
+            nameof(NetworkInteractionService.RetryDurableClientEscrows),
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            binder: null,
+            types: Type.EmptyTypes,
+            modifiers: null)?.ReturnType == typeof(void), "durable client escrows must replay their original transaction id");
+        Assert(typeof(NetworkInteractionService).GetMethod(nameof(NetworkInteractionService.OnUpdateTicked), BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic) is not null, "durable client escrow reconciliation must have a bounded timeout retry path");
+        Assert(typeof(NetworkInteractionService).GetField("ClientEscrowResponseTimeoutTicks", BindingFlags.Static | BindingFlags.NonPublic)?.GetRawConstantValue() is int timeoutTicks && timeoutTicks > 0, "client escrow retries must use a positive timeout");
+        Assert(typeof(NetworkInteractionService).GetField("ClientEscrowRetryLimit", BindingFlags.Static | BindingFlags.NonPublic)?.GetRawConstantValue() is int retryLimit && retryLimit > 0, "client escrow retries must be bounded");
     }
 
     private void TestRemoteSnapshotPagingContract()
@@ -661,30 +684,53 @@ internal sealed class RuntimeSelfTestService
         Assert(NetworkInteractionService.NormalizeTerminalSnapshotEntryLimit(0) == 512, "remote terminal snapshots must default to a bounded page size");
         Assert(NetworkInteractionService.NormalizeTerminalSnapshotEntryLimit(2000) == 1024, "remote terminal snapshots must clamp oversized page requests");
         Assert(typeof(RemoteNetworkTerminalMenu).GetMethod("RequestPage", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "remote terminal UI must expose page navigation over bounded snapshots");
+        Assert(typeof(RemoteNetworkTerminalMenu).GetMethod("ApplyPushUpdate", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic) is not null, "terminal push updates must preserve each viewer's local page offset");
+        Assert(typeof(RemoteCraftingTerminalMenu).GetMethod("ApplyPushUpdate", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic) is not null, "crafting push updates must preserve each viewer's local batch and quality choices");
+        Assert(typeof(StorageDriveMenu).GetMethod("RefreshCachedViews", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "storage drive slot views must be cached outside the draw loop");
+        Assert(typeof(PatternProviderMenu).GetMethod("RefreshCachedViews", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "pattern provider slot views must be cached outside the draw loop");
     }
 
     private void TestRemoteStructuralSnapshotContract()
     {
-        Assert(MultiplayerMessageTypes.StructuralSnapshotRequest == "StructuralSnapshotRequest", "storage drive / transfer bus remote menus must have a structural snapshot request message");
-        Assert(MultiplayerMessageTypes.StructuralSnapshotResponse == "StructuralSnapshotResponse", "storage drive / transfer bus remote menus must have a structural snapshot response message");
+        Assert(MultiplayerMessageTypes.StructuralSnapshotRequest == "StructuralSnapshotRequest", "storage drive / transfer bus / pattern provider remote menus must have a structural snapshot request message");
+        Assert(MultiplayerMessageTypes.StructuralSnapshotResponse == "StructuralSnapshotResponse", "storage drive / transfer bus / pattern provider remote menus must have a structural snapshot response message");
         Assert(typeof(StructuralSnapshotRequestMessage).GetProperty(nameof(StructuralSnapshotRequestMessage.Kind))?.PropertyType == typeof(StructuralSnapshotKind), "structural snapshot requests must identify the requested menu kind");
         Assert(typeof(StructuralSnapshotResponseMessage).GetProperty(nameof(StructuralSnapshotResponseMessage.StorageDrive))?.PropertyType == typeof(RemoteStorageDriveSnapshotMessage), "structural snapshots must carry storage drive slot state");
         Assert(typeof(StructuralSnapshotResponseMessage).GetProperty(nameof(StructuralSnapshotResponseMessage.TransferBus))?.PropertyType == typeof(RemoteTransferBusSnapshotMessage), "structural snapshots must carry transfer bus configuration state");
+        Assert(typeof(StructuralSnapshotResponseMessage).GetProperty(nameof(StructuralSnapshotResponseMessage.PatternProvider))?.PropertyType == typeof(RemotePatternProviderSnapshotMessage), "structural snapshots must carry pattern provider priority and slot state");
+        Assert(typeof(StructuralActionRequestMessage).GetProperty(nameof(StructuralActionRequestMessage.ActionValue))?.PropertyType == typeof(int), "structural pattern reorder and priority requests must carry a signed action value");
         Assert(typeof(RemoteStorageDriveMenu).GetProperty("Snapshot", BindingFlags.Instance | BindingFlags.NonPublic)?.PropertyType == typeof(StructuralSnapshotResponseMessage), "remote storage drive menu must render host-authored snapshots");
         Assert(typeof(RemoteTransferBusMenu).GetProperty("Snapshot", BindingFlags.Instance | BindingFlags.NonPublic)?.PropertyType == typeof(StructuralSnapshotResponseMessage), "remote transfer bus menu must render host-authored snapshots");
+        Assert(typeof(RemotePatternProviderMenu).GetProperty("Snapshot", BindingFlags.Instance | BindingFlags.NonPublic)?.PropertyType == typeof(StructuralSnapshotResponseMessage), "remote pattern provider menu must render host-authored snapshots");
         Assert(typeof(NetworkInteractionService).GetMethod("CreateStructuralSnapshotResponse", BindingFlags.Instance | BindingFlags.NonPublic)?.ReturnType == typeof(StructuralSnapshotResponseMessage), "host must produce structural snapshots for farmhand empty-hand menus");
         Assert(typeof(NetworkInteractionService).GetMethod("HandleStructuralSnapshotRequest", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "host must receive structural snapshot requests");
         Assert(typeof(NetworkInteractionService).GetMethod("HandleStructuralSnapshotResponse", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "farmhand must receive structural snapshot responses");
-        Assert(typeof(NetworkInteractionService).GetMethod("RefreshActiveRemoteStructuralMenu", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "structural actions must refresh open remote storage/transfer menus");
+        Assert(typeof(NetworkInteractionService).GetMethod("RefreshActiveRemoteStructuralMenu", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "structural actions must refresh open remote storage/transfer/provider menus");
         Assert(typeof(StorageDriveService).GetMethod(nameof(StorageDriveService.ApplyEjectCellSlot))?.ReturnType == typeof(StructuralActionResult), "remote storage drive slot ejection must use a host-authoritative kernel");
+        Assert(typeof(StorageDriveService).GetMethod(nameof(StorageDriveService.ApplyInsertCellSlot))?.ReturnType == typeof(StructuralActionResult), "remote storage drive slot insertion must use a host-authoritative kernel");
         Assert(typeof(TransferBusService).GetMethod(nameof(TransferBusService.ApplySetFilterSlot))?.ReturnType == typeof(StructuralActionResult), "remote transfer filter edits must use a host-authoritative kernel");
+        Assert(typeof(TransferBusService).GetMethod(nameof(TransferBusService.ApplyInsertUpgradeSlot))?.ReturnType == typeof(StructuralActionResult), "remote transfer upgrade insertion must use a host-authoritative kernel");
+        Assert(typeof(TransferBusService).GetMethod(nameof(TransferBusService.ApplyEjectUpgradeSlot))?.ReturnType == typeof(StructuralActionResult), "remote transfer upgrade ejection must use a host-authoritative kernel");
+        Assert(typeof(PatternProviderService).GetMethod(nameof(PatternProviderService.ApplyInsertPatternSlot))?.ReturnType == typeof(StructuralActionResult), "remote pattern insertion must use a host-authoritative kernel");
+        Assert(typeof(PatternProviderService).GetMethod(nameof(PatternProviderService.ApplyEjectPatternSlot))?.ReturnType == typeof(StructuralActionResult), "remote pattern ejection must use a host-authoritative kernel");
+        Assert(typeof(PatternProviderService).GetMethod(nameof(PatternProviderService.ApplyMovePatternSlot))?.ReturnType == typeof(StructuralActionResult), "remote pattern order changes must use a host-authoritative kernel");
+        Assert(typeof(PatternProviderService).GetMethod(nameof(PatternProviderService.ApplyAdjustPriority))?.ReturnType == typeof(StructuralActionResult), "remote provider priority changes must use a host-authoritative kernel");
+        Assert(Enum.IsDefined(typeof(StructuralActionKind), StructuralActionKind.StorageDriveInsertSlot), "structural action enum must include targeted storage drive slot insertion");
         Assert(Enum.IsDefined(typeof(StructuralActionKind), StructuralActionKind.StorageDriveEjectSlot), "structural action enum must include storage drive slot ejection");
         Assert(Enum.IsDefined(typeof(StructuralActionKind), StructuralActionKind.TransferBusSetFilterSlot), "structural action enum must include transfer bus filter slot edits");
+        Assert(Enum.IsDefined(typeof(StructuralActionKind), StructuralActionKind.TransferBusInsertUpgradeSlot), "structural action enum must include transfer bus upgrade insertion");
+        Assert(Enum.IsDefined(typeof(StructuralActionKind), StructuralActionKind.TransferBusEjectUpgradeSlot), "structural action enum must include transfer bus upgrade ejection");
+        Assert(Enum.IsDefined(typeof(StructuralActionKind), StructuralActionKind.PatternProviderInsertSlot), "structural action enum must include targeted pattern insertion");
+        Assert(Enum.IsDefined(typeof(StructuralActionKind), StructuralActionKind.PatternProviderEjectSlot), "structural action enum must include targeted pattern ejection");
+        Assert(Enum.IsDefined(typeof(StructuralActionKind), StructuralActionKind.PatternProviderMoveSlot), "structural action enum must include deterministic pattern order changes");
+        Assert(Enum.IsDefined(typeof(StructuralActionKind), StructuralActionKind.PatternProviderAdjustPriority), "structural action enum must include provider priority changes");
     }
 
     private void TestRemoteLocalizedSnapshotContract()
     {
         Assert(typeof(RemoteCraftingRecipeMessage).GetProperty(nameof(RemoteCraftingRecipeMessage.MissingIngredients)) is not null, "remote crafting recipes must carry structured missing ingredients for client-local rendering");
+        Assert(typeof(RemoteCraftingRecipeMessage).GetProperty(nameof(RemoteCraftingRecipeMessage.Ingredients))?.PropertyType == typeof(List<CraftingIngredientAvailability>), "remote crafting recipes must carry every expected ingredient with available and required counts");
+        Assert(typeof(CraftingIngredientAvailability).GetProperty(nameof(CraftingIngredientAvailability.IsSufficient))?.PropertyType == typeof(bool), "crafting ingredient rows must expose a stable red/green sufficiency state");
         Assert(typeof(RemoteCraftingJobMessage).GetProperty(nameof(RemoteCraftingJobMessage.Pattern)) is not null, "remote monitor jobs must carry pattern data for client-local names");
         Assert(typeof(RemoteProductionPipelineMessage).GetProperty(nameof(RemoteProductionPipelineMessage.Pattern)) is not null, "remote monitor pipelines must carry pattern data for client-local names");
         Assert(Enum.IsDefined(typeof(CraftingMonitorActionKind), CraftingMonitorActionKind.PreviewQueueJob), "remote CPU monitor must request a host-side queue preview before queueing");
@@ -706,6 +752,12 @@ internal sealed class RuntimeSelfTestService
         Assert(typeof(PatternTerminalMenu).GetField("searchInput", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "pattern terminal search must use TextBox input");
         Assert(typeof(RemoteNetworkTerminalMenu).GetField("searchInput", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "remote terminal search must use TextBox input");
         Assert(typeof(RemoteCraftingTerminalMenu).GetField("searchInput", BindingFlags.Instance | BindingFlags.NonPublic) is not null, "remote crafting search must use TextBox input");
+        Assert(typeof(NetworkTerminalMenu).GetMethod("update", BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly) is not null, "local network terminal must refresh while another player mutates the network");
+        Assert(typeof(RemoteNetworkTerminalMenu).GetMethod("update", BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly) is not null, "remote network terminal must poll host snapshots while open");
+        Assert(typeof(RemoteCraftingTerminalMenu).GetMethod("update", BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly) is not null, "remote crafting terminal must poll host snapshots while open");
+        Assert(typeof(RemoteStorageDriveMenu).GetMethod("update", BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly) is not null, "remote storage drive must refresh byte and type usage while open");
+        Assert(typeof(RemoteTransferBusMenu).GetMethod("update", BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly) is not null, "remote transfer bus must refresh host configuration while open");
+        Assert(typeof(RemotePatternProviderMenu).GetMethod("update", BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly) is not null, "remote pattern provider must refresh host slot order and priority while open");
     }
 
     private void TestRemoteLockTargetsRequestItem()
@@ -987,6 +1039,13 @@ internal sealed class RuntimeSelfTestService
             Assert(directOre.Success && requestOre.Success, "ore dictionary card configuration must succeed on both paths");
             Assert(directOre.ConsumeHeldOne && requestOre.ConsumeHeldOne, "ore dictionary card must request one held-card consumption on both paths");
             Assert(SameModData(directBus, requestBus), "ore dictionary direct and request-equivalent kernels must write the same modData");
+            var upgradeSlots = this.transferBusService.GetUpgradeSlotViews(directBus);
+            Assert(upgradeSlots.Count == TransferBusService.UpgradeSlotCount, "transfer bus must expose a fixed physical upgrade-slot bank");
+            Assert(upgradeSlots.Count(slot => slot.Occupied) == 2, "speed and ore cards must remain installed as ejectable physical upgrades");
+            var ejectSpeed = this.transferBusService.ApplyEjectUpgradeSlot(directBus, 0);
+            Assert(ejectSpeed.Success && !string.IsNullOrWhiteSpace(ejectSpeed.ReturnedSerializedItem), "ejecting a transfer upgrade must return its serialized card");
+            var restoreSpeed = this.transferBusService.ApplyInsertUpgradeSlot(directBus, 0, speedCardId, ejectSpeed.ReturnedSerializedItem);
+            Assert(restoreSpeed.Success && restoreSpeed.ConsumeHeldOne, "an ejected transfer upgrade must be installable back into its selected slot");
             Assert(this.transferBusService.TrySetFilterSlot(directBus, 4, "(O)378", out _), "transfer bus 3x3 filter slot must accept a filter item");
             Assert(this.transferBusService.GetFilterSlotViews(directBus).Any(slot => slot.SlotIndex == 4 && slot.QualifiedItemId == "(O)378"), "transfer bus filter slot view must preserve the selected 3x3 slot");
             Assert(this.transferBusService.TrySetFacingDirection(directBus, 1, out _), "transfer bus direction control must accept right-facing direction");
@@ -1281,13 +1340,14 @@ internal sealed class RuntimeSelfTestService
         string heldSerializedItem,
         int slotIndex = -1,
         string filterQualifiedItemId = "",
-        int facingDirection = -1)
+        int facingDirection = -1,
+        int actionValue = 0)
     {
         var method = typeof(NetworkInteractionService).GetMethod("ApplyStructuralAction", BindingFlags.Instance | BindingFlags.NonPublic);
         Assert(method is not null, "ApplyStructuralAction reflection hook must exist");
         return (StructuralActionResult)(method!.Invoke(
             this.networkInteractionService,
-            new object[] { kind, target, location, tile, selectedNetworkId, heldQualifiedItemId, heldDisplayName, heldStack, heldSerializedItem, slotIndex, filterQualifiedItemId, facingDirection }) ?? StructuralActionResult.Fail("missing result"));
+            new object[] { kind, target, location, tile, selectedNetworkId, heldQualifiedItemId, heldDisplayName, heldStack, heldSerializedItem, slotIndex, filterQualifiedItemId, facingDirection, actionValue }) ?? StructuralActionResult.Fail("missing result"));
     }
 
     private void InvokeReconcileStructuralResult(

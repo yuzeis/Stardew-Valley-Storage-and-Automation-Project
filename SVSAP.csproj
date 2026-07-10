@@ -5,10 +5,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>SVSAP</AssemblyName>
     <RootNamespace>SVSAP</RootNamespace>
-    <Version>1.4.0-alpha.1</Version>
+    <Version>1.4.0-alpha.1.2</Version>
     <AssemblyVersion>1.4.0.0</AssemblyVersion>
     <FileVersion>1.4.0.0</FileVersion>
-    <InformationalVersion>1.4.0-alpha.1</InformationalVersion>
+    <InformationalVersion>1.4.0-alpha.1.2</InformationalVersion>
     <EnableModDeploy>false</EnableModDeploy>
     <EnableHarmony>true</EnableHarmony>
     <IgnoreModFilePaths>config.json, assets/items.png, assets/big_craftables.png</IgnoreModFilePaths>

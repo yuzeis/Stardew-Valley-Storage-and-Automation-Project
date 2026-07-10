@@ -7,6 +7,7 @@ using StardewModdingAPI.Events;
 using StardewValley;
 using StardewValley.Objects;
 using StardewValley.Tools;
+using System.Text.Json;
 using SObject = StardewValley.Object;
 
 namespace SVSAP.Services;
@@ -16,9 +17,15 @@ internal sealed class NetworkInteractionService
     internal const string SelectedNetworkIdKey = ModItemCatalog.UniqueId + "/SelectedNetworkId";
     private const int ActionResponseCacheLimit = 256;
     private const int ClientReconcileCacheLimit = 256;
+    private const int PendingRemoteDeliveryRetentionDays = 7;
+    private const int ClientEscrowResponseTimeoutTicks = 300;
+    private const int ClientEscrowRetryLimit = 3;
     private const int RemoteTerminalSnapshotDefaultEntryLimit = 512;
     private const int RemoteTerminalSnapshotMaxEntryLimit = 1024;
     private const int RemoteTerminalSnapshotLocationLimit = 32;
+    private const string ReconciledRemoteDeliveryModDataKey = ModItemCatalog.UniqueId + "/ReconciledRemoteDeliveries";
+    private const string DurableRemoteDeliveryModDataKey = ModItemCatalog.UniqueId + "/DurableRemoteDeliveries";
+    private const string DurableClientActionEscrowModDataKey = ModItemCatalog.UniqueId + "/PendingClientActionEscrows";
 
     private static readonly Vector2[] AdjacentOffsets =
     {
@@ -63,6 +70,9 @@ internal sealed class NetworkInteractionService
     private readonly Queue<Guid> reconciledRemoteDeliveryOrder = new();
     private readonly Dictionary<Guid, List<TerminalItemPayloadMessage>> pendingTerminalDepositItems = new();
     private readonly Dictionary<Guid, PendingStructuralHeldItem> pendingStructuralHeldItems = new();
+    private readonly Dictionary<Guid, TerminalActionRequestMessage> pendingTerminalEscrowRequests = new();
+    private readonly Dictionary<Guid, StructuralActionRequestMessage> pendingStructuralEscrowRequests = new();
+    private readonly Dictionary<Guid, ClientEscrowRetryState> clientEscrowRetryStates = new();
     private readonly Dictionary<long, string> blockedPeerActionMessages = new();
 
     internal event Action<StructuralActionResponseMessage>? StructuralActionResponseReceived;
@@ -178,7 +188,12 @@ internal sealed class NetworkInteractionService
         if (target.QualifiedItemId == "(BC)" + ModItemCatalog.PatternProvider)
         {
             if (Game1.player.CurrentItem is null)
-                this.OpenPatternProviderMenu(target);
+            {
+                if (Context.IsMainPlayer)
+                    this.OpenPatternProviderMenu(target);
+                else
+                    this.RequestRemoteStructuralSnapshot(StructuralSnapshotKind.PatternProvider, target, location, tile);
+            }
             else if (Context.IsMainPlayer)
                 this.RunStructuralLocally(StructuralActionKind.PatternProviderInteract, target, location, tile);
             else
@@ -319,6 +334,9 @@ internal sealed class NetworkInteractionService
         {
             this.pendingTerminalDepositItems.Clear();
             this.pendingStructuralHeldItems.Clear();
+            this.pendingTerminalEscrowRequests.Clear();
+            this.pendingStructuralEscrowRequests.Clear();
+            this.clientEscrowRetryStates.Clear();
         }
     }
 
@@ -351,6 +369,99 @@ internal sealed class NetworkInteractionService
                 this.monitor.Log($"Failed to resend pending SVSAP remote delivery {delivery.DeliveryId:N} to {playerId}: {ex.Message}", LogLevel.Trace);
             }
         }
+    }
+
+    public int PruneExpiredPendingRemoteDeliveries(int currentDay)
+    {
+        if (!Context.IsMainPlayer || currentDay <= 0)
+            return 0;
+
+        var changed = false;
+        var removed = 0;
+        var queued = 0;
+        foreach (var delivery in this.repository.Data.PendingRemoteDeliveries.ToList())
+        {
+            if (delivery.CreatedDay <= 0)
+            {
+                delivery.CreatedDay = currentDay;
+                delivery.CreatedTick = Game1.ticks;
+                changed = true;
+                continue;
+            }
+
+            if (currentDay - delivery.CreatedDay < PendingRemoteDeliveryRetentionDays)
+                continue;
+
+            if (PlayerHasPersistedReconciledRemoteDelivery(delivery.PlayerId, delivery.DeliveryId))
+            {
+                this.RemovePendingRemoteDelivery(delivery);
+                removed++;
+                changed = true;
+            }
+            else if (this.QueueDurableRemoteDeliveryForPlayer(delivery))
+            {
+                this.RemovePendingRemoteDelivery(delivery);
+                queued++;
+                changed = true;
+            }
+        }
+
+        if (!changed)
+            return 0;
+
+        this.repository.Save();
+        if (removed > 0 || queued > 0)
+            this.monitor.Log($"Pruned {removed:N0} confirmed and queued {queued:N0} expired SVSAP remote delivery record(s).", LogLevel.Info);
+
+        return removed + queued;
+    }
+
+    public int RestoreDurableRemoteDeliveries()
+    {
+        var player = Game1.player;
+        if (player is null)
+            return 0;
+
+        var records = ReadDurableRemoteDeliveryRecords(player);
+        if (records.Count == 0)
+            return 0;
+
+        var remaining = new List<DurableRemoteDeliveryRecord>();
+        var restored = 0;
+        var changed = false;
+        foreach (var record in records)
+        {
+            if (record.DeliveryId == Guid.Empty
+                || string.IsNullOrWhiteSpace(record.ReturnedSerializedItem)
+                || record.ReturnedCount <= 0)
+            {
+                changed = true;
+                continue;
+            }
+
+            try
+            {
+                var item = SerializedItemCodec.CreateItem(record.ReturnedSerializedItem, record.ReturnedCount);
+                this.RestoreItemsToFarmer(player, new[] { item }, Game1.currentLocation);
+                PersistReconciledRemoteDelivery(record.DeliveryId);
+                restored++;
+                changed = true;
+            }
+            catch (Exception ex)
+            {
+                remaining.Add(record);
+                this.monitor.Log($"Could not restore durable SVSAP remote delivery {record.DeliveryId:N}: {ex.Message}", LogLevel.Warn);
+            }
+        }
+
+        if (!changed)
+            return 0;
+
+        WriteDurableRemoteDeliveryRecords(player, remaining);
+        if (restored > 0)
+            this.monitor.Log($"Restored {restored:N0} durable SVSAP remote delivery item(s).", LogLevel.Warn);
+
+        return restored;
     }
 
     public void SetPeerActionBlock(long playerId, string? message)
@@ -568,6 +679,8 @@ internal sealed class NetworkInteractionService
                 MultiplayerMessageTypes.StructuralActionRequest,
                 modIDs: new[] { this.modManifest.UniqueID },
                 playerIDs: new[] { host.PlayerID });
+            if (this.pendingStructuralEscrowRequests.ContainsKey(request.TransactionId))
+                this.MarkClientEscrowSent(request.TransactionId);
         }
         catch (Exception ex)
         {
@@ -616,16 +729,24 @@ internal sealed class NetworkInteractionService
         }
     }
 
-    private void SendRemoteStorageDriveAction(StructuralSnapshotResponseMessage snapshot, int slotIndex)
+    private void SendRemoteStorageDriveAction(
+        StructuralSnapshotResponseMessage snapshot,
+        StructuralActionKind kind,
+        int slotIndex,
+        Item? heldItem)
     {
         this.SendStructuralRequest(new StructuralActionRequestMessage
         {
             TransactionId = Guid.NewGuid(),
-            Kind = StructuralActionKind.StorageDriveEjectSlot,
+            Kind = kind,
             LocationName = snapshot.LocationName,
             TileX = snapshot.TileX,
             TileY = snapshot.TileY,
-            SlotIndex = slotIndex
+            SlotIndex = slotIndex,
+            HeldQualifiedItemId = heldItem?.QualifiedItemId ?? string.Empty,
+            HeldDisplayName = heldItem?.DisplayName ?? string.Empty,
+            HeldStack = heldItem?.Stack ?? 0,
+            HeldSerializedItem = SerializeHeldItem(heldItem)
         });
     }
 
@@ -634,7 +755,8 @@ internal sealed class NetworkInteractionService
         StructuralActionKind kind,
         int slotIndex = -1,
         string filterQualifiedItemId = "",
-        int facingDirection = -1)
+        int facingDirection = -1,
+        Item? heldItem = null)
     {
         this.SendStructuralRequest(new StructuralActionRequestMessage
         {
@@ -645,7 +767,34 @@ internal sealed class NetworkInteractionService
             TileY = snapshot.TileY,
             SlotIndex = slotIndex,
             FilterQualifiedItemId = filterQualifiedItemId,
-            FacingDirection = facingDirection
+            FacingDirection = facingDirection,
+            HeldQualifiedItemId = heldItem?.QualifiedItemId ?? string.Empty,
+            HeldDisplayName = heldItem?.DisplayName ?? string.Empty,
+            HeldStack = heldItem?.Stack ?? 0,
+            HeldSerializedItem = SerializeHeldItem(heldItem)
+        });
+    }
+
+    private void SendRemotePatternProviderAction(
+        StructuralSnapshotResponseMessage snapshot,
+        StructuralActionKind kind,
+        int slotIndex = -1,
+        int actionValue = 0,
+        Item? heldItem = null)
+    {
+        this.SendStructuralRequest(new StructuralActionRequestMessage
+        {
+            TransactionId = Guid.NewGuid(),
+            Kind = kind,
+            LocationName = snapshot.LocationName,
+            TileX = snapshot.TileX,
+            TileY = snapshot.TileY,
+            SlotIndex = slotIndex,
+            ActionValue = actionValue,
+            HeldQualifiedItemId = heldItem?.QualifiedItemId ?? string.Empty,
+            HeldDisplayName = heldItem?.DisplayName ?? string.Empty,
+            HeldStack = heldItem?.Stack ?? 0,
+            HeldSerializedItem = SerializeHeldItem(heldItem)
         });
     }
 
@@ -682,7 +831,21 @@ internal sealed class NetworkInteractionService
             }
         }
 
-        this.pendingStructuralHeldItems[request.TransactionId] = new PendingStructuralHeldItem(held, escrowedItem);
+        var pending = new PendingStructuralHeldItem(held, escrowedItem);
+        this.pendingStructuralHeldItems[request.TransactionId] = pending;
+        if (escrowedItem is not null)
+        {
+            this.pendingStructuralEscrowRequests[request.TransactionId] = request;
+            if (!this.TrackDurableStructuralEscrow(request))
+            {
+                this.pendingStructuralHeldItems.Remove(request.TransactionId);
+                this.pendingStructuralEscrowRequests.Remove(request.TransactionId);
+                this.RestoreEscrowedStructuralItem(pending, Game1.currentLocation);
+                message = ModText.Get("network.structural.sendFailed");
+                return false;
+            }
+        }
+
         return true;
     }
 
@@ -690,15 +853,14 @@ internal sealed class NetworkInteractionService
     {
         return kind switch
         {
-            StructuralActionKind.StorageDriveInteract
+            StructuralActionKind.StorageDriveInteract or StructuralActionKind.StorageDriveInsertSlot
                 => ModItemCatalog.TryGetStorageCellTier(held.QualifiedItemId, out _),
-            StructuralActionKind.PatternProviderInteract
+            StructuralActionKind.PatternProviderInteract or StructuralActionKind.PatternProviderInsertSlot
                 => PatternCodec.IsPatternItem(held),
             StructuralActionKind.TransferBusConfigure
-                => held.QualifiedItemId is "(O)" + ModItemCatalog.FilterCard
-                    or "(O)" + ModItemCatalog.SpeedCard
-                    or "(O)" + ModItemCatalog.CapacityCard
-                    or "(O)" + ModItemCatalog.QualityCard,
+                => TransferBusService.IsConfigurationCard(held.QualifiedItemId),
+            StructuralActionKind.TransferBusInsertUpgradeSlot
+                => TransferBusService.IsUpgradeCard(held.QualifiedItemId),
             _ => false
         };
     }
@@ -749,7 +911,7 @@ internal sealed class NetworkInteractionService
             else
                 Game1.activeClickableMenu = new RemoteStorageDriveMenu(
                     response,
-                    slot => this.SendRemoteStorageDriveAction(response, slot),
+                    (kind, slot, held) => this.SendRemoteStorageDriveAction(response, kind, slot, held),
                     () => this.RequestRemoteStructuralSnapshot(response));
             return;
         }
@@ -761,7 +923,19 @@ internal sealed class NetworkInteractionService
             else
                 Game1.activeClickableMenu = new RemoteTransferBusMenu(
                     response,
-                    (kind, slotIndex, itemId, direction) => this.SendRemoteTransferBusAction(response, kind, slotIndex, itemId, direction),
+                    (kind, slotIndex, itemId, direction, held) => this.SendRemoteTransferBusAction(response, kind, slotIndex, itemId, direction, held),
+                    () => this.RequestRemoteStructuralSnapshot(response));
+            return;
+        }
+
+        if (response.Kind == StructuralSnapshotKind.PatternProvider && response.PatternProvider is not null)
+        {
+            if (Game1.activeClickableMenu is RemotePatternProviderMenu activeProvider)
+                activeProvider.ApplySnapshot(response);
+            else
+                Game1.activeClickableMenu = new RemotePatternProviderMenu(
+                    response,
+                    (kind, slotIndex, value, held) => this.SendRemotePatternProviderAction(response, kind, slotIndex, value, held),
                     () => this.RequestRemoteStructuralSnapshot(response));
         }
     }
@@ -848,9 +1022,21 @@ internal sealed class NetworkInteractionService
             response.TransferBus = new RemoteTransferBusSnapshotMessage
             {
                 IsExporter = target.QualifiedItemId == "(BC)" + ModItemCatalog.Exporter,
+                FilterBlacklist = this.transferBusService.IsFilterBlacklistModeEnabled(target),
                 OreDictionaryMode = this.transferBusService.IsOreDictionaryModeEnabled(target),
+                QualityStrategy = this.transferBusService.GetConfiguredQualityStrategy(target),
                 FacingDirection = this.transferBusService.GetFacingDirection(target),
                 ConfigurationLines = this.transferBusService.DescribeConfigurationLines(target).ToList(),
+                UpgradeSlotCapacity = TransferBusService.UpgradeSlotCount,
+                UpgradeSlots = this.transferBusService.GetUpgradeSlotViews(target)
+                    .Select(slot => new RemoteTransferUpgradeSlotMessage
+                    {
+                        SlotIndex = slot.SlotIndex,
+                        Occupied = slot.Occupied,
+                        QualifiedItemId = slot.QualifiedItemId,
+                        DisplayName = slot.DisplayName
+                    })
+                    .ToList(),
                 FilterSlots = this.transferBusService.GetFilterSlotViews(target)
                     .Select(slot => new RemoteTransferFilterSlotMessage
                     {
@@ -859,6 +1045,30 @@ internal sealed class NetworkInteractionService
                         QualifiedItemId = slot.QualifiedItemId,
                         DisplayName = slot.DisplayName,
                         OreGroups = slot.OreGroups.ToList()
+                    })
+                    .ToList()
+            };
+            return response;
+        }
+
+        if (request.Kind == StructuralSnapshotKind.PatternProvider)
+        {
+            if (target.QualifiedItemId != "(BC)" + ModItemCatalog.PatternProvider)
+            {
+                response.Message = ModText.Get("ui.patternProvider.notProvider");
+                return response;
+            }
+
+            response.Success = true;
+            response.PatternProvider = new RemotePatternProviderSnapshotMessage
+            {
+                Priority = this.patternProviderService.GetPriority(target),
+                Slots = this.patternProviderService.GetSlotViews(target)
+                    .Select(slot => new RemotePatternProviderSlotMessage
+                    {
+                        SlotIndex = slot.SlotIndex,
+                        SerializedItem = SerializedItemCodec.SerializePrototype(slot.Item),
+                        DisplayName = slot.Item.DisplayName
                     })
                     .ToList()
             };
@@ -992,6 +1202,56 @@ internal sealed class NetworkInteractionService
         this.repository.Save();
     }
 
+    private void RemovePendingRemoteDelivery(PendingRemoteDelivery delivery)
+    {
+        this.repository.Data.PendingRemoteDeliveries.Remove(delivery);
+        var key = (delivery.PlayerId, delivery.TransactionId);
+        this.terminalActionResponseCache.Remove(key);
+        this.structuralResponseCache.Remove(key);
+    }
+
+    private bool QueueDurableRemoteDeliveryForPlayer(PendingRemoteDelivery delivery)
+    {
+        if (delivery.DeliveryId == Guid.Empty
+            || delivery.PlayerId <= 0
+            || string.IsNullOrWhiteSpace(delivery.ReturnedSerializedItem)
+            || delivery.ReturnedCount <= 0)
+        {
+            return false;
+        }
+
+        var player = Game1.GetPlayer(delivery.PlayerId, onlyOnline: false);
+        if (player is null)
+            return false;
+
+        try
+        {
+            var records = ReadDurableRemoteDeliveryRecords(player)
+                .Where(record => record.DeliveryId != delivery.DeliveryId)
+                .ToList();
+            records.Add(new DurableRemoteDeliveryRecord
+            {
+                DeliveryId = delivery.DeliveryId,
+                TransactionId = delivery.TransactionId,
+                Message = delivery.Message,
+                ReturnedSerializedItem = delivery.ReturnedSerializedItem,
+                ReturnedCount = delivery.ReturnedCount,
+                CreatedDay = delivery.CreatedDay
+            });
+
+            while (records.Count > ClientReconcileCacheLimit)
+                records.RemoveAt(0);
+
+            WriteDurableRemoteDeliveryRecords(player, records);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            this.monitor.Log($"Failed to queue expired SVSAP remote delivery {delivery.DeliveryId:N} for player {delivery.PlayerId}: {ex.Message}", LogLevel.Warn);
+            return false;
+        }
+    }
+
     private bool TryGetCachedStructuralActionResponse(long playerId, Guid transactionId, out StructuralActionResponseMessage response)
     {
         response = null!;
@@ -1034,6 +1294,14 @@ internal sealed class NetworkInteractionService
             return;
 
         var response = e.ReadAs<StructuralActionResponseMessage>();
+        if (response.DeliveryId != Guid.Empty && this.IsRemoteDeliveryReconciled(response.DeliveryId))
+        {
+            this.SendRemoteDeliveryAck(response.DeliveryId, response.TransactionId);
+            this.FinalizeClientActionEscrow(response.TransactionId);
+            this.RefreshActiveRemoteStructuralMenu();
+            return;
+        }
+
         this.StructuralActionResponseReceived?.Invoke(response);
 
         if (response.TransactionId != Guid.Empty && !this.MarkClientTransactionReconciled(response.TransactionId, this.reconciledStructuralTx, this.reconciledStructuralTxOrder))
@@ -1051,6 +1319,7 @@ internal sealed class NetworkInteractionService
                 this.SendRemoteDeliveryAck(response.DeliveryId, response.TransactionId);
             }
 
+            this.FinalizeClientActionEscrow(response.TransactionId);
             this.RefreshActiveRemoteStructuralMenu();
             return;
         }
@@ -1067,6 +1336,7 @@ internal sealed class NetworkInteractionService
             if (pending is not null)
                 this.RestoreEscrowedStructuralItem(pending, Game1.currentLocation);
 
+            this.FinalizeClientActionEscrow(response.TransactionId);
             this.RefreshActiveRemoteStructuralMenu();
             return;
         }
@@ -1095,6 +1365,7 @@ internal sealed class NetworkInteractionService
             this.SendRemoteDeliveryAck(response.DeliveryId, response.TransactionId);
         }
 
+        this.FinalizeClientActionEscrow(response.TransactionId);
         this.RefreshActiveRemoteStructuralMenu();
     }
 
@@ -1104,6 +1375,8 @@ internal sealed class NetworkInteractionService
             this.RequestRemoteStructuralSnapshot(storageMenu.Snapshot);
         else if (Game1.activeClickableMenu is RemoteTransferBusMenu transferMenu)
             this.RequestRemoteStructuralSnapshot(transferMenu.Snapshot);
+        else if (Game1.activeClickableMenu is RemotePatternProviderMenu providerMenu)
+            this.RequestRemoteStructuralSnapshot(providerMenu.Snapshot);
     }
 
     private StructuralActionResponseMessage ExecuteStructuralAction(StructuralActionRequestMessage request, long fromPlayerId)
@@ -1148,7 +1421,8 @@ internal sealed class NetworkInteractionService
             heldSerializedItem,
             request.SlotIndex,
             request.FilterQualifiedItemId,
-            request.FacingDirection);
+            request.FacingDirection,
+            request.ActionValue);
 
         response.Success = result.Success;
         response.Message = result.Message;
@@ -1181,16 +1455,15 @@ internal sealed class NetworkInteractionService
 
         return request.Kind switch
         {
-            StructuralActionKind.StorageDriveInteract
+            StructuralActionKind.StorageDriveInteract or StructuralActionKind.StorageDriveInsertSlot
                 => ModItemCatalog.TryGetStorageCellTier(request.HeldQualifiedItemId, out _),
-            StructuralActionKind.PatternProviderInteract
+            StructuralActionKind.PatternProviderInteract or StructuralActionKind.PatternProviderInsertSlot
                 => request.HeldQualifiedItemId is "(O)" + ModItemCatalog.CraftingPattern
                     or "(O)" + ModItemCatalog.ProcessingPattern,
             StructuralActionKind.TransferBusConfigure
-                => request.HeldQualifiedItemId is "(O)" + ModItemCatalog.FilterCard
-                    or "(O)" + ModItemCatalog.SpeedCard
-                    or "(O)" + ModItemCatalog.CapacityCard
-                    or "(O)" + ModItemCatalog.QualityCard,
+                => TransferBusService.IsConfigurationCard(request.HeldQualifiedItemId),
+            StructuralActionKind.TransferBusInsertUpgradeSlot
+                => TransferBusService.IsUpgradeCard(request.HeldQualifiedItemId),
             _ => false
         };
     }
@@ -1222,7 +1495,8 @@ internal sealed class NetworkInteractionService
         string heldSerializedItem,
         int slotIndex = -1,
         string filterQualifiedItemId = "",
-        int facingDirection = -1)
+        int facingDirection = -1,
+        int actionValue = 0)
     {
         return kind switch
         {
@@ -1231,7 +1505,12 @@ internal sealed class NetworkInteractionService
             StructuralActionKind.StorageDriveInteract => this.storageDriveService.ApplyInteract(target, location, tile, heldQualifiedItemId, heldSerializedItem),
             StructuralActionKind.PatternProviderInteract => this.patternProviderService.ApplyInteract(target, heldQualifiedItemId, heldSerializedItem),
             StructuralActionKind.TransferBusConfigure => this.transferBusService.ApplyConfigure(target, heldQualifiedItemId, heldDisplayName, heldStack),
+            StructuralActionKind.StorageDriveInsertSlot => this.storageDriveService.ApplyInsertCellSlot(target, slotIndex, heldQualifiedItemId, heldSerializedItem),
             StructuralActionKind.StorageDriveEjectSlot => this.storageDriveService.ApplyEjectCellSlot(target, slotIndex),
+            StructuralActionKind.PatternProviderInsertSlot => this.patternProviderService.ApplyInsertPatternSlot(target, slotIndex, heldQualifiedItemId, heldSerializedItem),
+            StructuralActionKind.PatternProviderEjectSlot => this.patternProviderService.ApplyEjectPatternSlot(target, slotIndex),
+            StructuralActionKind.PatternProviderMoveSlot => this.patternProviderService.ApplyMovePatternSlot(target, slotIndex, actionValue),
+            StructuralActionKind.PatternProviderAdjustPriority => this.patternProviderService.ApplyAdjustPriority(target, actionValue),
             StructuralActionKind.TransferBusToggleFilterMode => this.transferBusService.ApplyToggleFilterMode(target),
             StructuralActionKind.TransferBusToggleOreDictionary => this.transferBusService.ApplyToggleOreDictionaryMode(target),
             StructuralActionKind.TransferBusToggleQuality => this.transferBusService.ApplyToggleQualityStrategy(target),
@@ -1239,6 +1518,8 @@ internal sealed class NetworkInteractionService
             StructuralActionKind.TransferBusSetFacing => this.transferBusService.ApplySetFacingDirection(target, facingDirection),
             StructuralActionKind.TransferBusSetFilterSlot => this.transferBusService.ApplySetFilterSlot(target, slotIndex, filterQualifiedItemId),
             StructuralActionKind.TransferBusClearFilterSlot => this.transferBusService.ApplyClearFilterSlot(target, slotIndex),
+            StructuralActionKind.TransferBusInsertUpgradeSlot => this.transferBusService.ApplyInsertUpgradeSlot(target, slotIndex, heldQualifiedItemId, heldSerializedItem),
+            StructuralActionKind.TransferBusEjectUpgradeSlot => this.transferBusService.ApplyEjectUpgradeSlot(target, slotIndex),
             _ => StructuralActionResult.Fail(ModText.Get("network.structural.unknownAction"))
         };
     }
@@ -1384,10 +1665,274 @@ internal sealed class NetworkInteractionService
             : SerializedItemCodec.SerializePrototype(held);
     }
 
+    private bool TrackDurableTerminalEscrow(TerminalActionRequestMessage request)
+    {
+        return this.TrackDurableClientEscrow(new DurableClientActionEscrowRecord
+        {
+            TransactionId = request.TransactionId,
+            Kind = DurableClientActionEscrowRecord.TerminalKind,
+            TerminalRequest = request
+        });
+    }
+
+    private bool TrackDurableStructuralEscrow(StructuralActionRequestMessage request)
+    {
+        return this.TrackDurableClientEscrow(new DurableClientActionEscrowRecord
+        {
+            TransactionId = request.TransactionId,
+            Kind = DurableClientActionEscrowRecord.StructuralKind,
+            StructuralRequest = request
+        });
+    }
+
+    private bool TrackDurableClientEscrow(DurableClientActionEscrowRecord record)
+    {
+        var player = Game1.player;
+        if (player is null || record.TransactionId == Guid.Empty)
+            return false;
+
+        try
+        {
+            if (!this.TryReadDurableClientEscrows(player, out var existing))
+                return false;
+
+            var records = existing
+                .Where(candidate => candidate.TransactionId != record.TransactionId)
+                .ToList();
+            records.Add(record);
+            this.WriteDurableClientEscrows(player, records);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            this.monitor.Log($"Failed to persist SVSAP client action escrow {record.TransactionId:N}: {ex.Message}", LogLevel.Warn);
+            return false;
+        }
+    }
+
+    public int RehydrateDurableClientEscrows()
+    {
+        if (Context.IsMainPlayer || Game1.player is not Farmer player)
+            return 0;
+
+        if (!this.TryReadDurableClientEscrows(player, out var records))
+            return 0;
+
+        var loaded = 0;
+        foreach (var record in records)
+        {
+            if (record.TransactionId == Guid.Empty)
+                continue;
+
+            try
+            {
+                if (string.Equals(record.Kind, DurableClientActionEscrowRecord.TerminalKind, StringComparison.Ordinal)
+                    && record.TerminalRequest is { } terminalRequest
+                    && terminalRequest.TransactionId == record.TransactionId
+                    && terminalRequest.DepositItems.Count > 0)
+                {
+                    this.pendingTerminalDepositItems[record.TransactionId] = CloneTerminalPayloads(terminalRequest.DepositItems);
+                    this.pendingTerminalEscrowRequests[record.TransactionId] = terminalRequest;
+                    this.clientEscrowRetryStates[record.TransactionId] = ClientEscrowRetryState.CreateReadyForRetry();
+                    loaded++;
+                    continue;
+                }
+
+                if (string.Equals(record.Kind, DurableClientActionEscrowRecord.StructuralKind, StringComparison.Ordinal)
+                    && record.StructuralRequest is { } structuralRequest
+                    && structuralRequest.TransactionId == record.TransactionId
+                    && !string.IsNullOrWhiteSpace(structuralRequest.HeldSerializedItem))
+                {
+                    var item = SerializedItemCodec.CreateItem(structuralRequest.HeldSerializedItem, 1);
+                    this.pendingStructuralHeldItems[record.TransactionId] = new PendingStructuralHeldItem(item, item);
+                    this.pendingStructuralEscrowRequests[record.TransactionId] = structuralRequest;
+                    this.clientEscrowRetryStates[record.TransactionId] = ClientEscrowRetryState.CreateReadyForRetry();
+                    loaded++;
+                    continue;
+                }
+
+                this.monitor.Log($"Durable SVSAP client action escrow {record.TransactionId:N} has no replayable request and remains quarantined.", LogLevel.Warn);
+            }
+            catch (Exception ex)
+            {
+                this.monitor.Log($"Failed to rehydrate SVSAP client action escrow {record.TransactionId:N}: {ex.Message}", LogLevel.Warn);
+            }
+        }
+
+        if (loaded > 0)
+            this.monitor.Log($"Rehydrated {loaded:N0} durable SVSAP client action escrow(s) for host reconciliation.", LogLevel.Warn);
+
+        return loaded;
+    }
+
+    public void RetryDurableClientEscrows()
+    {
+        this.RetryDurableClientEscrows(force: true);
+    }
+
+    public void OnUpdateTicked(object? sender, UpdateTickedEventArgs e)
+    {
+        if (Context.IsMainPlayer || !Context.IsWorldReady || !e.IsMultipleOf(30))
+            return;
+
+        this.RetryDurableClientEscrows(force: false);
+    }
+
+    private void RetryDurableClientEscrows(bool force)
+    {
+        if (this.pendingTerminalEscrowRequests.Count == 0 && this.pendingStructuralEscrowRequests.Count == 0)
+            return;
+
+        var host = this.multiplayerHelper.GetConnectedPlayers().FirstOrDefault(peer => peer.IsHost);
+        var hostMod = host?.HasSmapi == true ? host.GetMod(this.modManifest.UniqueID) : null;
+        if (host is null
+            || hostMod is null
+            || !string.Equals(hostMod.Version.ToString(), this.modManifest.Version.ToString(), StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        foreach (var pair in this.pendingTerminalEscrowRequests.ToList())
+            this.RetryClientEscrowRequest(pair.Key, pair.Value, MultiplayerMessageTypes.TerminalActionRequest, host.PlayerID, force);
+
+        foreach (var pair in this.pendingStructuralEscrowRequests.ToList())
+            this.RetryClientEscrowRequest(pair.Key, pair.Value, MultiplayerMessageTypes.StructuralActionRequest, host.PlayerID, force);
+    }
+
+    private void RetryClientEscrowRequest<TRequest>(Guid transactionId, TRequest request, string messageType, long hostPlayerId, bool force)
+    {
+        if (!this.clientEscrowRetryStates.TryGetValue(transactionId, out var retry))
+        {
+            retry = ClientEscrowRetryState.CreateReadyForRetry();
+            this.clientEscrowRetryStates[transactionId] = retry;
+        }
+
+        var tick = Game1.ticks;
+        if (force)
+        {
+            retry.RetryCount = 0;
+            retry.RetryLimitNotified = false;
+            retry.LastSentTick = tick - ClientEscrowResponseTimeoutTicks;
+        }
+
+        var elapsed = tick >= retry.LastSentTick
+            ? tick - retry.LastSentTick
+            : ClientEscrowResponseTimeoutTicks;
+        if (elapsed < ClientEscrowResponseTimeoutTicks)
+            return;
+
+        if (retry.RetryCount >= ClientEscrowRetryLimit)
+        {
+            if (!retry.RetryLimitNotified)
+            {
+                retry.RetryLimitNotified = true;
+                Game1.addHUDMessage(new HUDMessage(ModText.Get("multiplayer.escrowReconcilePending"), HUDMessage.error_type));
+            }
+            return;
+        }
+
+        try
+        {
+            this.multiplayerHelper.SendMessage(
+                request,
+                messageType,
+                modIDs: new[] { this.modManifest.UniqueID },
+                playerIDs: new[] { hostPlayerId });
+        }
+        catch (Exception ex)
+        {
+            this.monitor.Log($"Failed to retry SVSAP client action escrow {transactionId:N}: {ex.Message}", LogLevel.Trace);
+        }
+        finally
+        {
+            retry.LastSentTick = tick;
+            retry.RetryCount++;
+        }
+    }
+
+    private void MarkClientEscrowSent(Guid transactionId)
+    {
+        if (transactionId == Guid.Empty)
+            return;
+
+        this.clientEscrowRetryStates[transactionId] = new ClientEscrowRetryState
+        {
+            LastSentTick = Game1.ticks
+        };
+    }
+
+    private void FinalizeClientActionEscrow(Guid transactionId)
+    {
+        if (transactionId == Guid.Empty)
+            return;
+
+        this.pendingTerminalDepositItems.Remove(transactionId);
+        this.pendingStructuralHeldItems.Remove(transactionId);
+        this.pendingTerminalEscrowRequests.Remove(transactionId);
+        this.pendingStructuralEscrowRequests.Remove(transactionId);
+        this.clientEscrowRetryStates.Remove(transactionId);
+        this.RemoveDurableClientEscrow(transactionId);
+    }
+
+    private void RemoveDurableClientEscrow(Guid transactionId)
+    {
+        var player = Game1.player;
+        if (player is null || transactionId == Guid.Empty)
+            return;
+
+        try
+        {
+            if (!this.TryReadDurableClientEscrows(player, out var existing))
+                return;
+
+            var records = existing.Where(record => record.TransactionId != transactionId).ToList();
+            this.WriteDurableClientEscrows(player, records);
+        }
+        catch (Exception ex)
+        {
+            this.monitor.Log($"Failed to clear SVSAP client action escrow {transactionId:N}: {ex.Message}", LogLevel.Trace);
+        }
+    }
+
+    private bool TryReadDurableClientEscrows(Farmer player, out List<DurableClientActionEscrowRecord> records)
+    {
+        records = new List<DurableClientActionEscrowRecord>();
+        if (!player.modData.TryGetValue(DurableClientActionEscrowModDataKey, out var raw)
+            || string.IsNullOrWhiteSpace(raw))
+        {
+            return true;
+        }
+
+        try
+        {
+            records = JsonSerializer.Deserialize<List<DurableClientActionEscrowRecord>>(raw) ?? new List<DurableClientActionEscrowRecord>();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            this.monitor.Log($"Could not parse durable SVSAP client action escrows; payload remains quarantined: {ex.Message}", LogLevel.Warn);
+            return false;
+        }
+    }
+
+    private void WriteDurableClientEscrows(Farmer player, IReadOnlyCollection<DurableClientActionEscrowRecord> records)
+    {
+        if (records.Count == 0)
+        {
+            player.modData.Remove(DurableClientActionEscrowModDataKey);
+            return;
+        }
+
+        player.modData[DurableClientActionEscrowModDataKey] = JsonSerializer.Serialize(records);
+    }
+
     private void RestorePendingStructuralHeldItems()
     {
-        foreach (var pending in this.pendingStructuralHeldItems.Values.ToList())
-            this.RestoreEscrowedStructuralItem(pending, Game1.currentLocation);
+        foreach (var pair in this.pendingStructuralHeldItems.ToList())
+        {
+            this.RestoreEscrowedStructuralItem(pair.Value, Game1.currentLocation);
+            this.FinalizeClientActionEscrow(pair.Key);
+        }
 
         this.pendingStructuralHeldItems.Clear();
     }
@@ -1398,12 +1943,16 @@ internal sealed class NetworkInteractionService
             return;
 
         this.RestoreEscrowedStructuralItem(pending, Game1.currentLocation);
+        this.FinalizeClientActionEscrow(transactionId);
     }
 
     private void RestorePendingTerminalDepositItems()
     {
-        foreach (var payloads in this.pendingTerminalDepositItems.Values.ToList())
-            this.RestoreTerminalDepositPayloads(payloads, Game1.currentLocation);
+        foreach (var pair in this.pendingTerminalDepositItems.ToList())
+        {
+            this.RestoreTerminalDepositPayloads(pair.Value, Game1.currentLocation);
+            this.FinalizeClientActionEscrow(pair.Key);
+        }
 
         this.pendingTerminalDepositItems.Clear();
     }
@@ -1413,10 +1962,12 @@ internal sealed class NetworkInteractionService
         if (transactionId != Guid.Empty && this.pendingTerminalDepositItems.Remove(transactionId, out var pending))
         {
             this.RestoreTerminalDepositPayloads(pending, Game1.currentLocation);
+            this.FinalizeClientActionEscrow(transactionId);
             return;
         }
 
         this.RestoreTerminalDepositPayloads(fallbackPayloads, Game1.currentLocation);
+        this.FinalizeClientActionEscrow(transactionId);
     }
 
     private void RestoreEscrowedStructuralItem(PendingStructuralHeldItem pending, GameLocation? location)
@@ -1550,17 +2101,99 @@ internal sealed class NetworkInteractionService
 
     private bool IsRemoteDeliveryReconciled(Guid deliveryId)
     {
-        return deliveryId != Guid.Empty && this.reconciledRemoteDeliveries.Contains(deliveryId);
+        return deliveryId != Guid.Empty
+            && (this.reconciledRemoteDeliveries.Contains(deliveryId) || HasPersistedReconciledRemoteDelivery(deliveryId));
     }
 
     private void MarkRemoteDeliveryReconciled(Guid deliveryId)
     {
-        if (deliveryId == Guid.Empty || !this.reconciledRemoteDeliveries.Add(deliveryId))
+        if (deliveryId == Guid.Empty)
             return;
 
-        this.reconciledRemoteDeliveryOrder.Enqueue(deliveryId);
-        while (this.reconciledRemoteDeliveryOrder.Count > ClientReconcileCacheLimit)
-            this.reconciledRemoteDeliveries.Remove(this.reconciledRemoteDeliveryOrder.Dequeue());
+        if (this.reconciledRemoteDeliveries.Add(deliveryId))
+        {
+            this.reconciledRemoteDeliveryOrder.Enqueue(deliveryId);
+            while (this.reconciledRemoteDeliveryOrder.Count > ClientReconcileCacheLimit)
+                this.reconciledRemoteDeliveries.Remove(this.reconciledRemoteDeliveryOrder.Dequeue());
+        }
+
+        PersistReconciledRemoteDelivery(deliveryId);
+    }
+
+    private static bool HasPersistedReconciledRemoteDelivery(Guid deliveryId)
+    {
+        return ReadPersistedReconciledRemoteDeliveries(Game1.player).Contains(deliveryId);
+    }
+
+    private static bool PlayerHasPersistedReconciledRemoteDelivery(long playerId, Guid deliveryId)
+    {
+        return ReadPersistedReconciledRemoteDeliveries(Game1.GetPlayer(playerId, onlyOnline: false)).Contains(deliveryId);
+    }
+
+    private static void PersistReconciledRemoteDelivery(Guid deliveryId)
+    {
+        var player = Game1.player;
+        if (player is null || deliveryId == Guid.Empty)
+            return;
+
+        var deliveries = ReadPersistedReconciledRemoteDeliveries(player);
+        if (deliveries.Contains(deliveryId))
+            return;
+
+        deliveries.Add(deliveryId);
+        while (deliveries.Count > ClientReconcileCacheLimit)
+            deliveries.RemoveAt(0);
+
+        player.modData[ReconciledRemoteDeliveryModDataKey] = string.Join("|", deliveries.Select(id => id.ToString("N")));
+    }
+
+    private static List<Guid> ReadPersistedReconciledRemoteDeliveries(Farmer? player)
+    {
+        if (player is null
+            || !player.modData.TryGetValue(ReconciledRemoteDeliveryModDataKey, out var raw)
+            || string.IsNullOrWhiteSpace(raw))
+        {
+            return new List<Guid>();
+        }
+
+        var deliveries = new List<Guid>();
+        foreach (var piece in raw.Split('|', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (Guid.TryParse(piece.Trim(), out var parsed))
+                deliveries.Add(parsed);
+        }
+
+        return deliveries;
+    }
+
+    private static List<DurableRemoteDeliveryRecord> ReadDurableRemoteDeliveryRecords(Farmer? player)
+    {
+        if (player is null
+            || !player.modData.TryGetValue(DurableRemoteDeliveryModDataKey, out var raw)
+            || string.IsNullOrWhiteSpace(raw))
+        {
+            return new List<DurableRemoteDeliveryRecord>();
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<List<DurableRemoteDeliveryRecord>>(raw) ?? new List<DurableRemoteDeliveryRecord>();
+        }
+        catch
+        {
+            return new List<DurableRemoteDeliveryRecord>();
+        }
+    }
+
+    private static void WriteDurableRemoteDeliveryRecords(Farmer player, IReadOnlyCollection<DurableRemoteDeliveryRecord> records)
+    {
+        if (records.Count == 0)
+        {
+            player.modData.Remove(DurableRemoteDeliveryModDataKey);
+            return;
+        }
+
+        player.modData[DurableRemoteDeliveryModDataKey] = JsonSerializer.Serialize(records);
     }
 
     private void MoveEndpointStateToNetwork(Guid? previousNetworkId, Guid selectedNetworkId, Guid endpointId)
@@ -1635,22 +2268,7 @@ internal sealed class NetworkInteractionService
 
     private void OpenPatternProviderMenu(SObject provider)
     {
-        var actions = this.patternProviderService.GetOccupiedSlotIndexes(provider)
-            .Select(slotIndex => new SVSAPMenuAction(
-                ModText.Format("ui.status.action.ejectSlot", slotIndex + 1),
-                () =>
-                {
-                    return this.patternProviderService.TryEjectPatternSlot(provider, slotIndex, out var message)
-                        ? message
-                        : message;
-                },
-                () => this.patternProviderService.HasPatternSlot(provider, slotIndex)))
-            .ToList();
-
-        Game1.activeClickableMenu = new SVSAPStatusMenu(
-            provider.DisplayName,
-            () => this.patternProviderService.DescribeProvider(provider),
-            actions);
+        Game1.activeClickableMenu = new PatternProviderMenu(provider, this.patternProviderService);
     }
 
     private void OpenTransferBusMenu(SObject bus)
@@ -1856,7 +2474,7 @@ internal sealed class NetworkInteractionService
         if (response.PushUpdate)
         {
             if (Game1.activeClickableMenu is RemoteNetworkTerminalMenu pushMenu && pushMenu.MatchesNetwork(response.NetworkId))
-                pushMenu.ApplySnapshot(response);
+                pushMenu.ApplyPushUpdate(response);
 
             return;
         }
@@ -1891,7 +2509,17 @@ internal sealed class NetworkInteractionService
         }
 
         if (request.TransactionId != Guid.Empty && request.DepositItems.Count > 0)
+        {
             this.pendingTerminalDepositItems[request.TransactionId] = CloneTerminalPayloads(request.DepositItems);
+            this.pendingTerminalEscrowRequests[request.TransactionId] = request;
+            if (!this.TrackDurableTerminalEscrow(request))
+            {
+                this.pendingTerminalEscrowRequests.Remove(request.TransactionId);
+                this.RestorePendingTerminalDepositItems(request.TransactionId, request.DepositItems);
+                Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteTerminal.sendFailed"), HUDMessage.error_type));
+                return false;
+            }
+        }
 
         try
         {
@@ -1900,6 +2528,8 @@ internal sealed class NetworkInteractionService
                 MultiplayerMessageTypes.TerminalActionRequest,
                 modIDs: new[] { this.modManifest.UniqueID },
                 playerIDs: new[] { host.PlayerID });
+            if (this.pendingTerminalEscrowRequests.ContainsKey(request.TransactionId))
+                this.MarkClientEscrowSent(request.TransactionId);
         }
         catch (Exception ex)
         {
@@ -2009,12 +2639,8 @@ internal sealed class NetworkInteractionService
             NetworkName = snapshot.NetworkName,
             SourceCount = snapshot.SourceCount,
             TotalEntryCount = snapshot.TotalEntryCount,
-            EntryOffset = snapshot.EntryOffset,
-            EntryLimit = snapshot.EntryLimit,
-            Truncated = snapshot.Truncated,
             StorageSummary = snapshot.StorageSummary,
-            LockedQualifiedItemIds = snapshot.LockedQualifiedItemIds,
-            Entries = snapshot.Entries
+            LockedQualifiedItemIds = snapshot.LockedQualifiedItemIds
         };
 
         try
@@ -2094,6 +2720,7 @@ internal sealed class NetworkInteractionService
         delivery.Message = response.Message;
         delivery.ReturnedSerializedItem = response.ReturnedSerializedItem;
         delivery.ReturnedCount = response.ReturnedCount;
+        StampPendingRemoteDelivery(delivery);
         response.DeliveryId = delivery.DeliveryId;
         return true;
     }
@@ -2114,6 +2741,7 @@ internal sealed class NetworkInteractionService
         delivery.Message = response.Message;
         delivery.ReturnedSerializedItem = response.ReturnedSerializedItem;
         delivery.ReturnedCount = 1;
+        StampPendingRemoteDelivery(delivery);
         response.DeliveryId = delivery.DeliveryId;
         return true;
     }
@@ -2130,8 +2758,18 @@ internal sealed class NetworkInteractionService
             TransactionId = transactionId,
             Kind = kind
         };
+        StampPendingRemoteDelivery(delivery);
         this.repository.Data.PendingRemoteDeliveries.Add(delivery);
         return delivery;
+    }
+
+    private static void StampPendingRemoteDelivery(PendingRemoteDelivery delivery)
+    {
+        if (delivery.CreatedDay <= 0 && Context.IsWorldReady)
+            delivery.CreatedDay = Game1.Date.TotalDays;
+
+        if (delivery.CreatedTick <= 0)
+            delivery.CreatedTick = Game1.ticks;
     }
 
     private void RememberTerminalActionResponse(long playerId, Guid transactionId, TerminalActionResponseMessage response)
@@ -2155,6 +2793,13 @@ internal sealed class NetworkInteractionService
             return;
 
         var response = e.ReadAs<TerminalActionResponseMessage>();
+        if (response.DeliveryId != Guid.Empty && this.IsRemoteDeliveryReconciled(response.DeliveryId))
+        {
+            this.SendRemoteDeliveryAck(response.DeliveryId, response.TransactionId);
+            this.FinalizeClientActionEscrow(response.TransactionId);
+            return;
+        }
+
         if (response.TransactionId != Guid.Empty && !this.MarkClientTransactionReconciled(response.TransactionId, this.reconciledTerminalTx, this.reconciledTerminalTxOrder))
         {
             if (this.IsRemoteDeliveryReconciled(response.DeliveryId))
@@ -2167,6 +2812,7 @@ internal sealed class NetworkInteractionService
                 this.SendRemoteDeliveryAck(response.DeliveryId, response.TransactionId);
             }
 
+            this.FinalizeClientActionEscrow(response.TransactionId);
             return;
         }
 
@@ -2195,6 +2841,8 @@ internal sealed class NetworkInteractionService
         Game1.addHUDMessage(new HUDMessage(
             LocalizeRemoteResponse(response.Success, response.Message, "remoteTerminal.actionSucceeded", "SVSAP terminal action completed.", "remoteTerminal.actionFailed", "SVSAP terminal action failed; please retry."),
             response.Success ? HUDMessage.newQuest_type : HUDMessage.error_type));
+
+        this.FinalizeClientActionEscrow(response.TransactionId);
 
         if (Game1.activeClickableMenu is RemoteNetworkTerminalMenu remoteMenu && remoteMenu.MatchesNetwork(response.NetworkId))
         {
@@ -2232,7 +2880,7 @@ internal sealed class NetworkInteractionService
         if (response.PushUpdate)
         {
             if (Game1.activeClickableMenu is RemoteCraftingTerminalMenu pushMenu && pushMenu.MatchesNetwork(response.NetworkId))
-                pushMenu.ApplySnapshot(response);
+                pushMenu.ApplyPushUpdate(response);
 
             return;
         }
@@ -2333,10 +2981,7 @@ internal sealed class NetworkInteractionService
             Success = snapshot.Success,
             Message = snapshot.Message,
             NetworkName = snapshot.NetworkName,
-            NetworkItemTypes = snapshot.NetworkItemTypes,
-            Batches = snapshot.Batches,
-            QualityStrategy = snapshot.QualityStrategy,
-            Recipes = snapshot.Recipes
+            NetworkItemTypes = snapshot.NetworkItemTypes
         };
 
         try
@@ -3068,6 +3713,7 @@ internal sealed class NetworkInteractionService
                     OutputSerializedItemPrototype = SerializedItemCodec.SerializePrototype(recipe.OutputPrototype.getOne()),
                     OutputCount = recipe.OutputCount,
                     CanCraft = availability.CanCraft,
+                    Ingredients = availability.Ingredients,
                     IngredientLines = availability.IngredientLines,
                     MissingLines = availability.MissingLines,
                     MissingIngredients = availability.MissingIngredients
@@ -3563,6 +4209,42 @@ internal sealed class NetworkInteractionService
     private static string Quote(string? value)
     {
         return "\"" + (value ?? string.Empty).Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+    }
+
+    private sealed class DurableRemoteDeliveryRecord
+    {
+        public Guid DeliveryId { get; set; }
+        public Guid TransactionId { get; set; }
+        public string Message { get; set; } = string.Empty;
+        public string ReturnedSerializedItem { get; set; } = string.Empty;
+        public int ReturnedCount { get; set; }
+        public int CreatedDay { get; set; }
+    }
+
+    private sealed class DurableClientActionEscrowRecord
+    {
+        public const string TerminalKind = "terminal";
+        public const string StructuralKind = "structural";
+
+        public Guid TransactionId { get; set; }
+        public string Kind { get; set; } = string.Empty;
+        public TerminalActionRequestMessage? TerminalRequest { get; set; }
+        public StructuralActionRequestMessage? StructuralRequest { get; set; }
+    }
+
+    private sealed class ClientEscrowRetryState
+    {
+        public int LastSentTick { get; set; }
+        public int RetryCount { get; set; }
+        public bool RetryLimitNotified { get; set; }
+
+        public static ClientEscrowRetryState CreateReadyForRetry()
+        {
+            return new ClientEscrowRetryState
+            {
+                LastSentTick = Game1.ticks - ClientEscrowResponseTimeoutTicks
+            };
+        }
     }
 
     private sealed record PendingStructuralHeldItem(Item ActingItem, Item? EscrowedItem);

@@ -59,6 +59,7 @@ internal sealed class CraftingRecipeService
     {
         var requests = Scale(recipe.Ingredients, batches);
         var ingredientLines = new List<string>();
+        var ingredients = new List<CraftingIngredientAvailability>();
         var missing = new List<CraftingMissingIngredient>();
         foreach (var request in requests)
         {
@@ -68,6 +69,12 @@ internal sealed class CraftingRecipeService
                 qualityStrategy: qualityStrategy,
                 autoConsumableOnly: true);
             ingredientLines.Add(ItemDisplayService.FormatIngredientLine(request, available, request.Count));
+            ingredients.Add(new CraftingIngredientAvailability
+            {
+                Request = request,
+                AvailableCount = available,
+                RequiredCount = request.Count
+            });
             if (available < request.Count)
             {
                 missing.Add(new CraftingMissingIngredient
@@ -82,6 +89,7 @@ internal sealed class CraftingRecipeService
         return new CraftingAvailability
         {
             CanCraft = missing.Count == 0,
+            Ingredients = ingredients,
             IngredientLines = ingredientLines,
             MissingIngredients = missing,
             MissingLines = missing.Select(line => ItemDisplayService.FormatIngredientLine(line.Request, line.AvailableCount, line.RequiredCount)).ToList()
