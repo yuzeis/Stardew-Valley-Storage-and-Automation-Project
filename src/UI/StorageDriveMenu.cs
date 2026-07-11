@@ -10,14 +10,14 @@ namespace SVSAP.UI;
 
 internal sealed class StorageDriveMenu : IClickableMenu
 {
-    private const int Pad = 28;
+    private const int Pad = SVSAPMenuWidgets.Pad;
     private const int SlotCount = 10;
     private const int MaxSlotColumns = 5;
     private const int MinSlotColumns = 3;
     private const int SummaryMinWidth = 180;
     private const int SummaryGap = 32;
     private const int InventoryCell = 48;
-    private const int InventoryColumns = 12;
+    private const int MaxInventoryColumns = 12;
     private const int ViewRefreshTicks = 30;
 
     private readonly SObject drive;
@@ -26,6 +26,7 @@ internal sealed class StorageDriveMenu : IClickableMenu
     private readonly StorageDriveService storageDriveService;
     private readonly int slotColumns;
     private readonly int slotRows;
+    private readonly int inventoryColumns;
     private Rectangle slotArea;
     private readonly Rectangle inventoryArea;
     private IReadOnlyList<StorageDriveSlotView> cachedViews = Array.Empty<StorageDriveSlotView>();
@@ -48,18 +49,20 @@ internal sealed class StorageDriveMenu : IClickableMenu
         var layout = CalculateLayoutShape(this.width);
         this.slotColumns = layout.Columns;
         this.slotRows = layout.Rows;
+        this.inventoryColumns = Math.Clamp((this.width - Pad * 2) / InventoryCell, 4, MaxInventoryColumns);
+        var inventoryRows = Math.Max(3, (int)Math.Ceiling(Game1.player.Items.Count / (double)this.inventoryColumns));
         this.slotArea = new Rectangle(this.xPositionOnScreen + Pad, this.yPositionOnScreen + 112, this.slotColumns * SVSAPMenuWidgets.Cell, this.slotRows * SVSAPMenuWidgets.Cell);
         this.inventoryArea = new Rectangle(
-            this.xPositionOnScreen + (this.width - InventoryColumns * InventoryCell) / 2,
-            this.yPositionOnScreen + this.height - Pad - 3 * InventoryCell,
-            InventoryColumns * InventoryCell,
-            3 * InventoryCell);
+            this.xPositionOnScreen + (this.width - this.inventoryColumns * InventoryCell) / 2,
+            this.yPositionOnScreen + this.height - Pad - inventoryRows * InventoryCell,
+            this.inventoryColumns * InventoryCell,
+            inventoryRows * InventoryCell);
         SVSAPMenuWidgets.PositionCloseButton(this.upperRightCloseButton, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
     }
 
-    private static int GetMenuWidth() => Math.Min(760, Math.Max(520, Game1.uiViewport.Width - 48));
+    private static int GetMenuWidth() => Math.Max(1, Math.Min(760, Game1.uiViewport.Width - 48));
 
-    private static int GetMenuHeight() => Math.Min(640, Math.Max(560, Game1.uiViewport.Height - 48));
+    private static int GetMenuHeight() => Math.Max(1, Math.Min(640, Game1.uiViewport.Height - 48));
 
     internal static StorageDriveMenuLayoutShape CalculateLayoutShape(int menuWidth)
     {
@@ -81,7 +84,11 @@ internal sealed class StorageDriveMenu : IClickableMenu
     public override void draw(SpriteBatch b)
     {
         SVSAPMenuWidgets.DrawStardewAE2Frame(b, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
-        Utility.drawTextWithShadow(b, this.drive.DisplayName, Game1.dialogueFont, new Vector2(this.xPositionOnScreen + Pad + 12, this.yPositionOnScreen + 26), Game1.textColor);
+        SVSAPMenuWidgets.DrawFittedTitle(
+            b,
+            this.drive.DisplayName,
+            new Rectangle(this.xPositionOnScreen + Pad + 12, this.yPositionOnScreen + 18, this.width - Pad * 2 - 70, 52),
+            Game1.textColor);
 
         this.RefreshCachedViews();
         this.DrawSlots(b, this.cachedViews);
@@ -94,6 +101,12 @@ internal sealed class StorageDriveMenu : IClickableMenu
 
     public override void receiveLeftClick(int x, int y, bool playSound = true)
     {
+        if (this.upperRightCloseButton?.containsPoint(x, y) == true)
+        {
+            base.receiveLeftClick(x, y, playSound);
+            return;
+        }
+
         base.receiveLeftClick(x, y, playSound);
 
         var slotIndex = this.HitSlot(x, y);
@@ -126,8 +139,15 @@ internal sealed class StorageDriveMenu : IClickableMenu
         }
 
         var targetSlot = this.storageDriveService.HasCellSlot(this.drive, this.selectedSlot)
-            ? Enumerable.Range(0, SlotCount).FirstOrDefault(index => !this.storageDriveService.HasCellSlot(this.drive, index))
+            ? Enumerable.Range(0, SlotCount).FirstOrDefault(index => !this.storageDriveService.HasCellSlot(this.drive, index), -1)
             : this.selectedSlot;
+        if (targetSlot < 0)
+        {
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("ui.storageDrive.full"), HUDMessage.error_type));
+            Game1.playSound("cancel");
+            return;
+        }
+
         this.RunInsert(targetSlot, item);
     }
 
@@ -147,15 +167,7 @@ internal sealed class StorageDriveMenu : IClickableMenu
             if (view?.Item is null)
                 continue;
 
-            view.Item.drawInMenu(
-                b,
-                new Vector2(cell.X + SVSAPMenuWidgets.IconInset, cell.Y + SVSAPMenuWidgets.IconInset),
-                1f,
-                1f,
-                0.86f,
-                StackDrawType.Hide,
-                Color.White,
-                true);
+            SVSAPMenuWidgets.DrawItemInSlot(b, view.Item, cell, 1);
 
             var ratio = view.CapacityMax <= 0 ? 0f : Math.Clamp(view.CapacityUsed / (float)view.CapacityMax, 0f, 1f);
             var bar = new Rectangle(cell.X + 6, cell.Bottom - 9, cell.Width - 12, 4);
@@ -171,28 +183,22 @@ internal sealed class StorageDriveMenu : IClickableMenu
         var maxWidth = this.xPositionOnScreen + this.width - Pad - x;
         foreach (var line in lines.Take(10))
         {
-            var text = line.Length > 48 ? line[..48] + "..." : line;
-            b.DrawString(Game1.smallFont, text, new Vector2(x, y), Game1.textColor);
+            SVSAPMenuWidgets.DrawFittedLine(b, line, new Rectangle(x, y, Math.Max(1, maxWidth), 26), Game1.textColor, horizontalPadding: 0);
             y += 28;
             if (y > this.inventoryArea.Y - 56)
                 break;
         }
-
-        SVSAPMenuWidgets.DrawFittedLine(
-            b,
-            ModText.Get("ui.storageDrive.guiHelp"),
-            new Rectangle(this.xPositionOnScreen + Pad, this.inventoryArea.Y - 42, this.width - Pad * 2, 28),
-            Color.DimGray);
     }
 
     private void DrawInventory(SpriteBatch b)
     {
         b.Draw(Game1.staminaRect, new Rectangle(this.inventoryArea.X, this.inventoryArea.Y - 10, this.inventoryArea.Width, 2), Color.SaddleBrown * 0.45f);
-        for (var index = 0; index < Math.Min(36, Game1.player.Items.Count); index++)
+        for (var index = 0; index < Game1.player.Items.Count; index++)
         {
             var bounds = this.GetInventorySlotBounds(index);
             SVSAPMenuWidgets.DrawSlotBackground(b, bounds, Game1.player.Items[index] is null);
-            Game1.player.Items[index]?.drawInMenu(b, new Vector2(bounds.X + 4, bounds.Y + 4), 0.68f, 1f, 0.86f, StackDrawType.Draw, Color.White, true);
+            var item = Game1.player.Items[index];
+            SVSAPMenuWidgets.DrawItemInSlot(b, item, bounds, item?.Stack ?? 0, 0.68f);
         }
     }
 
@@ -283,15 +289,15 @@ internal sealed class StorageDriveMenu : IClickableMenu
     {
         if (!this.inventoryArea.Contains(x, y))
             return -1;
-        var index = (y - this.inventoryArea.Y) / InventoryCell * InventoryColumns + (x - this.inventoryArea.X) / InventoryCell;
-        return index >= 0 && index < Math.Min(36, Game1.player.Items.Count) ? index : -1;
+        var index = (y - this.inventoryArea.Y) / InventoryCell * this.inventoryColumns + (x - this.inventoryArea.X) / InventoryCell;
+        return index >= 0 && index < Game1.player.Items.Count ? index : -1;
     }
 
     private Rectangle GetInventorySlotBounds(int index)
     {
         return new Rectangle(
-            this.inventoryArea.X + index % InventoryColumns * InventoryCell,
-            this.inventoryArea.Y + index / InventoryColumns * InventoryCell,
+            this.inventoryArea.X + index % this.inventoryColumns * InventoryCell,
+            this.inventoryArea.Y + index / this.inventoryColumns * InventoryCell,
             InventoryCell - 4,
             InventoryCell - 4);
     }

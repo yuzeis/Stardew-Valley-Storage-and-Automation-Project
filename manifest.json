@@ -1,7 +1,7 @@
 {
   "Name": "Stardew Valley Storage and Automation Project",
   "Author": "Koizumi",
-  "Version": "1.4.0-alpha.1.2",
+  "Version": "1.4.1-rc1.0",
   "Description": "Networked storage, digital item cells, transfer buses, remote terminals, and automated crafting for Stardew Valley.",
   "UniqueID": "Koizumi.SVSAP",
   "EntryDll": "SVSAP.dll",

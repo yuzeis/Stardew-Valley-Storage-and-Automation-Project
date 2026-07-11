@@ -224,6 +224,59 @@ internal sealed class TransferBusService
         };
     }
 
+    public TransferBusRuntimeStatus GetRuntimeStatus(SObject bus)
+    {
+        if (!Guid.TryParse(bus.modData.GetValueOrDefault(EndpointIdentityService.NetworkIdKey), out var networkId)
+            || !Guid.TryParse(bus.modData.GetValueOrDefault(EndpointIdentityService.EndpointIdKey), out var endpointId))
+        {
+            return new TransferBusRuntimeStatus(false, false, false, 0, ModText.Get("ui.transferBus.runtime.unlinked"));
+        }
+
+        if (!this.repository.TryGetNetwork(networkId, out var network))
+            return new TransferBusRuntimeStatus(true, false, false, 0, ModText.Get("ui.transferBus.runtime.offline"));
+
+        var endpoint = network.Endpoints.FirstOrDefault(candidate => candidate.EndpointId == endpointId);
+        if (endpoint is null || !endpoint.Active)
+            return new TransferBusRuntimeStatus(true, false, false, 0, ModText.Get("ui.transferBus.runtime.offline"));
+
+        var busData = this.GetOrCreateBusData(network, endpoint);
+        if (!busData.Enabled)
+            return new TransferBusRuntimeStatus(true, false, false, 0, ModText.Get("ui.transferBus.runtime.disabled"));
+
+        var location = Game1.getLocationFromName(endpoint.LocationName)
+            ?? Game1.locations.FirstOrDefault(candidate => candidate.NameOrUniqueName == endpoint.LocationName);
+        if (location is null)
+            return new TransferBusRuntimeStatus(true, false, false, 0, ModText.Get("ui.transferBus.runtime.offline"));
+
+        var targetCount = this.GetAdjacentObjects(location, endpoint, busData).Count();
+        if (targetCount <= 0)
+        {
+            return new TransferBusRuntimeStatus(
+                true,
+                true,
+                false,
+                0,
+                ModText.Format("ui.transferBus.runtime.noTarget", FormatFacingDirection(busData.FacingDirection)));
+        }
+
+        if (endpoint.Type == EndpointType.Exporter && busData.FilterQualifiedItemIds.Count == 0)
+        {
+            return new TransferBusRuntimeStatus(
+                true,
+                true,
+                false,
+                targetCount,
+                ModText.Get("ui.transferBus.runtime.filterRequired"));
+        }
+
+        return new TransferBusRuntimeStatus(
+            true,
+            true,
+            true,
+            targetCount,
+            ModText.Format("ui.transferBus.runtime.ready", targetCount));
+    }
+
     public bool TryClearFilter(SObject bus, out string message)
     {
         if (bus.QualifiedItemId is not ("(BC)" + ModItemCatalog.Importer) and not ("(BC)" + ModItemCatalog.Exporter))
@@ -763,6 +816,27 @@ internal sealed class TransferBusService
 
         this.operationBudget.SetUsed(e.Ticks, operations, maxOperations);
     }
+
+#if DEBUG
+    internal bool RunEndpointForE2E(NetworkData network, NetworkEndpoint endpoint)
+    {
+        var bus = this.GetOrCreateBusData(network, endpoint);
+        return endpoint.Type == EndpointType.Importer
+            ? this.TryRunImporter(network, endpoint, bus)
+            : endpoint.Type == EndpointType.Exporter && this.TryRunExporter(network, endpoint, bus);
+    }
+
+    internal bool RunChestImporterForSelfTest(NetworkData network, Chest source, TransferBusData bus)
+    {
+        return this.TryImportFromChest(network, source, bus);
+    }
+
+    internal bool RunChestExporterForSelfTest(NetworkData network, Chest target, TransferBusData bus)
+    {
+        return bus.FilterQualifiedItemIds.Count > 0
+            && this.TryExportToChest(network, null!, Vector2.Zero, target, bus);
+    }
+#endif
 
     private bool TryRunImporter(NetworkData network, NetworkEndpoint endpoint, TransferBusData bus)
     {
@@ -1465,6 +1539,13 @@ internal sealed class TransferBusService
         };
     }
 }
+
+internal readonly record struct TransferBusRuntimeStatus(
+    bool Linked,
+    bool Active,
+    bool Ready,
+    int TargetCount,
+    string Message);
 
 internal sealed class TransferFilterSlotView
 {

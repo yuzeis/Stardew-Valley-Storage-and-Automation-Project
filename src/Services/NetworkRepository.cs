@@ -6,7 +6,7 @@ namespace SVSAP.Services;
 internal sealed class NetworkRepository
 {
     private const string SaveKey = "networks";
-    private const int CurrentSchemaVersion = 1;
+    private const int CurrentSchemaVersion = 3;
 
     private readonly IModHelper helper;
     private readonly IMonitor monitor;
@@ -77,15 +77,30 @@ internal sealed class NetworkRepository
             changed = true;
         }
 
+        loaded.Networks ??= new();
+        loaded.PendingTransactions ??= new();
+        loaded.PendingRemoteDeliveries ??= new();
+        loaded.ExecutedTerminalDeposits ??= new();
+        loaded.ExecutedStructuralConsumptions ??= new();
+        changed |= ExecutedRemoteActionLedger.NormalizeTerminal(loaded.ExecutedTerminalDeposits);
+        changed |= ExecutedRemoteActionLedger.NormalizeStructural(loaded.ExecutedStructuralConsumptions);
+
+        // Chests are storage targets of an adjacent Storage Interface, not
+        // wireless endpoints of their own. Remove legacy direct links so one
+        // network can no longer expose every chest that was linked on the map.
+        foreach (var network in loaded.Networks.Values)
+        {
+            network.Endpoints ??= new();
+            if (network.Endpoints.RemoveAll(endpoint => endpoint.Type == EndpointType.Chest) > 0)
+                changed = true;
+        }
+
         if (loaded.SchemaVersion < CurrentSchemaVersion)
         {
             loaded.SchemaVersion = CurrentSchemaVersion;
             changed = true;
         }
 
-        loaded.Networks ??= new();
-        loaded.PendingTransactions ??= new();
-        loaded.PendingRemoteDeliveries ??= new();
         var removedRemoteDeliveries = loaded.PendingRemoteDeliveries.RemoveAll(delivery =>
             delivery.DeliveryId == Guid.Empty
             || delivery.PlayerId <= 0

@@ -73,6 +73,8 @@ internal enum StructuralSnapshotKind
 
 internal sealed class TerminalSnapshotRequestMessage
 {
+    public Guid MenuSessionId { get; set; }
+    public long RequestSequence { get; set; }
     public Guid NetworkId { get; set; }
     public Guid EndpointId { get; set; }
     public bool Crafting { get; set; }
@@ -82,10 +84,13 @@ internal sealed class TerminalSnapshotRequestMessage
 
 internal sealed class TerminalSnapshotResponseMessage
 {
+    public Guid MenuSessionId { get; set; }
+    public long RequestSequence { get; set; }
     public Guid NetworkId { get; set; }
     public Guid EndpointId { get; set; }
     public bool Crafting { get; set; }
     public bool PushUpdate { get; set; }
+    public long PushSequence { get; set; }
     public bool Success { get; set; }
     public string Message { get; set; } = string.Empty;
     public string NetworkName { get; set; } = string.Empty;
@@ -130,8 +135,12 @@ internal sealed class RemoteItemStackLocationMessage
 internal sealed class TerminalActionRequestMessage
 {
     public Guid TransactionId { get; set; }
+    public Guid MenuSessionId { get; set; }
+    public long RequestSequence { get; set; }
     public Guid NetworkId { get; set; }
     public Guid EndpointId { get; set; }
+    public int EntryOffset { get; set; }
+    public int EntryLimit { get; set; }
     public TerminalActionKind Action { get; set; }
     public ItemKey? ItemKey { get; set; }
     public int Amount { get; set; }
@@ -145,6 +154,8 @@ internal sealed class TerminalActionRequestMessage
 internal sealed class TerminalActionResponseMessage
 {
     public Guid TransactionId { get; set; }
+    public Guid MenuSessionId { get; set; }
+    public long RequestSequence { get; set; }
     public Guid NetworkId { get; set; }
     public bool Success { get; set; }
     public string Message { get; set; } = string.Empty;
@@ -163,6 +174,8 @@ internal sealed class TerminalItemPayloadMessage
 
 internal sealed class CraftingSnapshotRequestMessage
 {
+    public Guid MenuSessionId { get; set; }
+    public long RequestSequence { get; set; }
     public Guid NetworkId { get; set; }
     public Guid EndpointId { get; set; }
     public int Batches { get; set; } = 1;
@@ -171,9 +184,12 @@ internal sealed class CraftingSnapshotRequestMessage
 
 internal sealed class CraftingSnapshotResponseMessage
 {
+    public Guid MenuSessionId { get; set; }
+    public long RequestSequence { get; set; }
     public Guid NetworkId { get; set; }
     public Guid EndpointId { get; set; }
     public bool PushUpdate { get; set; }
+    public long PushSequence { get; set; }
     public bool Success { get; set; }
     public string Message { get; set; } = string.Empty;
     public string NetworkName { get; set; } = string.Empty;
@@ -200,6 +216,8 @@ internal sealed class RemoteCraftingRecipeMessage
 internal sealed class CraftingActionRequestMessage
 {
     public Guid TransactionId { get; set; }
+    public Guid MenuSessionId { get; set; }
+    public long RequestSequence { get; set; }
     public Guid NetworkId { get; set; }
     public Guid EndpointId { get; set; }
     public string RecipeName { get; set; } = string.Empty;
@@ -210,6 +228,8 @@ internal sealed class CraftingActionRequestMessage
 internal sealed class CraftingActionResponseMessage
 {
     public Guid TransactionId { get; set; }
+    public Guid MenuSessionId { get; set; }
+    public long RequestSequence { get; set; }
     public Guid NetworkId { get; set; }
     public bool Success { get; set; }
     public string Message { get; set; } = string.Empty;
@@ -218,6 +238,8 @@ internal sealed class CraftingActionResponseMessage
 
 internal sealed class CraftingMonitorSnapshotRequestMessage
 {
+    public Guid MenuSessionId { get; set; }
+    public long RequestSequence { get; set; }
     public Guid NetworkId { get; set; }
     public Guid EndpointId { get; set; }
     public PatternData? HeldPattern { get; set; }
@@ -226,6 +248,8 @@ internal sealed class CraftingMonitorSnapshotRequestMessage
 
 internal sealed class CraftingMonitorSnapshotResponseMessage
 {
+    public Guid MenuSessionId { get; set; }
+    public long RequestSequence { get; set; }
     public Guid NetworkId { get; set; }
     public Guid EndpointId { get; set; }
     public bool Success { get; set; }
@@ -270,6 +294,8 @@ internal sealed class RemoteProductionPipelineMessage
 internal sealed class CraftingMonitorActionRequestMessage
 {
     public Guid TransactionId { get; set; }
+    public Guid MenuSessionId { get; set; }
+    public long RequestSequence { get; set; }
     public Guid NetworkId { get; set; }
     public Guid EndpointId { get; set; }
     public CraftingMonitorActionKind Action { get; set; }
@@ -285,6 +311,8 @@ internal sealed class CraftingMonitorActionRequestMessage
 internal sealed class CraftingMonitorActionResponseMessage
 {
     public Guid TransactionId { get; set; }
+    public Guid MenuSessionId { get; set; }
+    public long RequestSequence { get; set; }
     public Guid NetworkId { get; set; }
     public bool Success { get; set; }
     public bool RequiresConfirmation { get; set; }
@@ -298,6 +326,8 @@ internal sealed class CraftingMonitorActionResponseMessage
 internal sealed class StructuralActionRequestMessage
 {
     public Guid TransactionId { get; set; }
+    public Guid MenuSessionId { get; set; }
+    public long RequestSequence { get; set; }
     public StructuralActionKind Kind { get; set; }
     public string LocationName { get; set; } = string.Empty;
     public int TileX { get; set; }
@@ -316,6 +346,8 @@ internal sealed class StructuralActionRequestMessage
 internal sealed class StructuralActionResponseMessage
 {
     public Guid TransactionId { get; set; }
+    public Guid MenuSessionId { get; set; }
+    public long RequestSequence { get; set; }
     public StructuralActionKind Kind { get; set; }
     public bool Success { get; set; }
     public string Message { get; set; } = string.Empty;
@@ -327,6 +359,8 @@ internal sealed class StructuralActionResponseMessage
 
 internal sealed class StructuralSnapshotRequestMessage
 {
+    public Guid MenuSessionId { get; set; }
+    public long RequestSequence { get; set; }
     public StructuralSnapshotKind Kind { get; set; }
     public string LocationName { get; set; } = string.Empty;
     public int TileX { get; set; }
@@ -335,6 +369,8 @@ internal sealed class StructuralSnapshotRequestMessage
 
 internal sealed class StructuralSnapshotResponseMessage
 {
+    public Guid MenuSessionId { get; set; }
+    public long RequestSequence { get; set; }
     public StructuralSnapshotKind Kind { get; set; }
     public bool Success { get; set; }
     public string Message { get; set; } = string.Empty;

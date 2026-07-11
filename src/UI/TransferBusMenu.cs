@@ -10,11 +10,12 @@ namespace SVSAP.UI;
 
 internal sealed class TransferBusMenu : IClickableMenu
 {
-    private const int Pad = 28;
+    private const int Pad = SVSAPMenuWidgets.Pad;
+    private const int FilterCell = 64;
     private const int FilterColumns = 3;
     private const int FilterRows = 3;
-    private const int UpgradeColumns = 4;
-    private const int UpgradeRows = 2;
+    private const int UpgradeColumns = 8;
+    private const int UpgradeRows = 1;
     private const int UpgradeCell = 46;
     private const int ControlButtonWidth = 150;
     private const int ControlButtonHeight = 42;
@@ -26,7 +27,7 @@ internal sealed class TransferBusMenu : IClickableMenu
 
     private readonly SObject bus;
     private readonly TransferBusService transferBusService;
-    private const int BackpackCell = 52;
+    private const int BackpackCell = 48;
     private readonly SVSAPBackpackGrid backpackGrid = new(BackpackCell);
     private readonly List<ClickableComponent> directionButtons = new();
     private ClickableComponent modeButton = null!;
@@ -53,18 +54,18 @@ internal sealed class TransferBusMenu : IClickableMenu
         SVSAPMenuWidgets.PositionCloseButton(this.upperRightCloseButton, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
     }
 
-    private static int GetMenuWidth() => Math.Min(1040, Game1.uiViewport.Width - 80);
+    private static int GetMenuWidth() => Math.Max(1, Math.Min(1040, Game1.uiViewport.Width - 48));
 
-    private static int GetMenuHeight() => Math.Min(760, Game1.uiViewport.Height - 80);
+    private static int GetMenuHeight() => Math.Max(1, Math.Min(760, Game1.uiViewport.Height - 48));
 
     private void BuildLayout()
     {
         var innerX = this.xPositionOnScreen + Pad;
         var innerW = this.width - Pad * 2;
-        var top = this.yPositionOnScreen + 24;
+        var contentTop = this.yPositionOnScreen + SVSAPMenuWidgets.ContentTopOffset;
 
-        this.filterArea = new Rectangle(innerX, top + 92, FilterColumns * SVSAPMenuWidgets.Cell, FilterRows * SVSAPMenuWidgets.Cell);
-        this.upgradeArea = new Rectangle(innerX, this.filterArea.Bottom + 14, UpgradeColumns * UpgradeCell, UpgradeRows * UpgradeCell);
+        this.filterArea = new Rectangle(innerX, contentTop + 56, FilterColumns * FilterCell, FilterRows * FilterCell);
+        this.upgradeArea = new Rectangle(innerX, contentTop, UpgradeColumns * UpgradeCell, UpgradeRows * UpgradeCell);
         var controlsX = this.filterArea.Right + 34;
         var controlsY = this.filterArea.Y;
         var controlsAvailable = Math.Max(1, this.xPositionOnScreen + this.width - Pad - controlsX);
@@ -101,19 +102,29 @@ internal sealed class TransferBusMenu : IClickableMenu
         this.backpackGrid.SetBounds(this.invArea);
     }
 
-    internal static bool LayoutFits(int menuWidth)
+    internal static bool LayoutFits(int menuWidth, int menuHeight = 640, int inventorySlotCount = 36)
     {
-        var controlsX = Pad + FilterColumns * SVSAPMenuWidgets.Cell + 34;
+        var controlsX = Pad + FilterColumns * FilterCell + 34;
         var controlsAvailable = menuWidth - Pad - controlsX;
         var controlColumns = CalculateControlColumns(controlsAvailable);
         var controlWidth = CalculateControlButtonWidth(controlsAvailable, controlColumns);
         var directionWidth = CalculateDirectionButtonWidth(controlsAvailable);
-        var filterRight = Pad + FilterColumns * SVSAPMenuWidgets.Cell;
+        var filterRight = Pad + FilterColumns * FilterCell;
+        var upgradeRight = Pad + UpgradeColumns * UpgradeCell;
         var controlRight = controlsX + Math.Min(controlColumns, 3) * controlWidth + Math.Max(0, Math.Min(controlColumns, 3) - 1) * ControlButtonGap;
         var directionRight = controlsX + 5 * directionWidth + 4 * DirectionButtonGap;
+        var backpackColumns = SVSAPBackpackGrid.GetColumnCount(menuWidth - Pad * 2, BackpackCell);
+        var backpackRows = Math.Max(1, (int)Math.Ceiling(Math.Max(1, inventorySlotCount) / (double)backpackColumns));
+        var inventoryTop = menuHeight - Pad - backpackRows * BackpackCell;
+        var filterTop = SVSAPMenuWidgets.ContentTopOffset + 56;
+        var filterBottom = filterTop + FilterRows * FilterCell;
+        var upgradeBottom = SVSAPMenuWidgets.ContentTopOffset + UpgradeRows * UpgradeCell;
         return filterRight <= menuWidth - Pad
+            && upgradeRight <= menuWidth - Pad
             && controlRight <= menuWidth - Pad
             && directionRight <= menuWidth - Pad
+            && upgradeBottom + 10 <= filterTop
+            && filterBottom + 12 <= inventoryTop
             && controlColumns >= 1
             && directionWidth >= DirectionButtonMinWidth;
     }
@@ -158,7 +169,11 @@ internal sealed class TransferBusMenu : IClickableMenu
     public override void draw(SpriteBatch b)
     {
         SVSAPMenuWidgets.DrawStardewAE2Frame(b, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
-        Utility.drawTextWithShadow(b, this.bus.DisplayName, Game1.dialogueFont, new Vector2(this.xPositionOnScreen + Pad + 12, this.yPositionOnScreen + 26), Game1.textColor);
+        SVSAPMenuWidgets.DrawFittedTitle(
+            b,
+            this.bus.DisplayName,
+            new Rectangle(this.xPositionOnScreen + Pad + 12, this.yPositionOnScreen + 18, this.width - Pad * 2 - 70, 36),
+            Game1.textColor);
 
         var slots = this.transferBusService.GetFilterSlotViews(this.bus);
         var upgrades = this.transferBusService.GetUpgradeSlotViews(this.bus);
@@ -174,6 +189,12 @@ internal sealed class TransferBusMenu : IClickableMenu
 
     public override void receiveLeftClick(int x, int y, bool playSound = true)
     {
+        if (this.upperRightCloseButton?.containsPoint(x, y) == true)
+        {
+            base.receiveLeftClick(x, y, playSound);
+            return;
+        }
+
         base.receiveLeftClick(x, y, playSound);
 
         if (this.modeButton.containsPoint(x, y))
@@ -303,15 +324,7 @@ internal sealed class TransferBusMenu : IClickableMenu
             if (selected)
                 DrawSelection(b, cell);
 
-            view?.Item?.drawInMenu(
-                b,
-                new Vector2(cell.X + SVSAPMenuWidgets.IconInset, cell.Y + SVSAPMenuWidgets.IconInset),
-                1f,
-                1f,
-                0.86f,
-                StackDrawType.Hide,
-                Color.White * 0.58f,
-                true);
+            SVSAPMenuWidgets.DrawItemInSlot(b, view?.Item, cell, 1, tint: Color.White * 0.58f);
         }
     }
 
@@ -326,7 +339,7 @@ internal sealed class TransferBusMenu : IClickableMenu
             if (index == this.selectedUpgradeSlot)
                 DrawSelection(b, bounds);
             if (view?.Item is not null)
-                view.Item.drawInMenu(b, new Vector2(bounds.X + 2, bounds.Y + 2), 0.58f, 1f, 0.86f, StackDrawType.Hide, Color.White, true);
+                SVSAPMenuWidgets.DrawItemInSlot(b, view.Item, bounds, 1, 0.58f);
             else
                 SVSAPMenuWidgets.DrawGhostUpgradeSlot(b, bounds, "module");
         }
@@ -360,6 +373,21 @@ internal sealed class TransferBusMenu : IClickableMenu
         var lines = this.transferBusService.DescribeConfigurationLines(this.bus).ToList();
         var x = this.filterArea.Right + 34;
         var y = this.filterArea.Bottom + 18;
+        var runtime = this.transferBusService.GetRuntimeStatus(this.bus);
+        var runtimeStatus = !runtime.Linked
+            ? PixelStatus.Warning
+            : !runtime.Active
+                ? PixelStatus.Offline
+                : runtime.Ready
+                    ? PixelStatus.Ready
+                    : PixelStatus.Warning;
+        SVSAPMenuWidgets.DrawPixelStatusLight(b, x + 2, y + 7, runtimeStatus);
+        SVSAPMenuWidgets.DrawFittedLine(
+            b,
+            runtime.Message,
+            new Rectangle(x + 22, y, this.xPositionOnScreen + this.width - Pad - x - 22, 22),
+            runtime.Ready ? Game1.textColor : Color.DarkRed);
+        y += 28;
         var maxLines = Math.Max(0, (this.invArea.Y - 18 - y) / 24);
         foreach (var line in lines.Take(maxLines))
         {
@@ -485,8 +513,8 @@ internal sealed class TransferBusMenu : IClickableMenu
         if (!this.filterArea.Contains(x, y))
             return -1;
 
-        var column = (x - this.filterArea.X) / SVSAPMenuWidgets.Cell;
-        var row = (y - this.filterArea.Y) / SVSAPMenuWidgets.Cell;
+        var column = (x - this.filterArea.X) / FilterCell;
+        var row = (y - this.filterArea.Y) / FilterCell;
         if (column < 0 || column >= FilterColumns || row < 0 || row >= FilterRows)
             return -1;
 
@@ -498,10 +526,10 @@ internal sealed class TransferBusMenu : IClickableMenu
         var column = index % FilterColumns;
         var row = index / FilterColumns;
         return new Rectangle(
-            this.filterArea.X + column * SVSAPMenuWidgets.Cell,
-            this.filterArea.Y + row * SVSAPMenuWidgets.Cell,
-            SVSAPMenuWidgets.Cell - 4,
-            SVSAPMenuWidgets.Cell - 4);
+            this.filterArea.X + column * FilterCell,
+            this.filterArea.Y + row * FilterCell,
+            FilterCell - 4,
+            FilterCell - 4);
     }
 
     private int HitUpgradeSlot(int x, int y)

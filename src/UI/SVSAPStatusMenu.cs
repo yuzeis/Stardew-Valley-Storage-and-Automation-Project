@@ -7,7 +7,7 @@ namespace SVSAP.UI;
 
 internal sealed class SVSAPStatusMenu : IClickableMenu
 {
-    private const int Pad = 28;
+    private const int Pad = SVSAPMenuWidgets.Pad;
     private const int LineHeight = 28;
     private const int ButtonHeight = 42;
 
@@ -45,7 +45,7 @@ internal sealed class SVSAPStatusMenu : IClickableMenu
         this.xPositionOnScreen + Pad,
         this.yPositionOnScreen + 92,
         this.width - Pad * 2,
-        this.height - 128 - this.ActionRows * 52);
+        this.height - 144 - this.ActionRows * 52);
 
     private void BuildLayout()
     {
@@ -55,7 +55,7 @@ internal sealed class SVSAPStatusMenu : IClickableMenu
 
         var columns = Math.Min(3, Math.Max(1, this.actions.Count));
         var buttonWidth = Math.Max(120, (this.width - Pad * 2 - (columns - 1) * 12) / columns);
-        var startY = this.yPositionOnScreen + this.height - 28 - this.ActionRows * 52;
+        var startY = this.yPositionOnScreen + this.height - Pad - this.ActionRows * 52;
         for (var i = 0; i < this.actions.Count; i++)
         {
             var column = i % columns;
@@ -101,7 +101,11 @@ internal sealed class SVSAPStatusMenu : IClickableMenu
     {
         var panel = new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height);
         SVSAPMenuWidgets.DrawStardewAE2Frame(b, panel);
-        Utility.drawTextWithShadow(b, this.title, Game1.dialogueFont, new Vector2(this.xPositionOnScreen + Pad + 12, this.yPositionOnScreen + 28), Game1.textColor);
+        SVSAPMenuWidgets.DrawFittedTitle(
+            b,
+            this.title,
+            new Rectangle(this.xPositionOnScreen + Pad + 12, this.yPositionOnScreen + 20, this.width - Pad * 2 - 70, 52),
+            Game1.textColor);
 
         var content = this.ContentBounds;
         SVSAPMenuWidgets.DrawInsetBox(b, content);

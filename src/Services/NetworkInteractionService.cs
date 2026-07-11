@@ -20,6 +20,7 @@ internal sealed class NetworkInteractionService
     private const int PendingRemoteDeliveryRetentionDays = 7;
     private const int ClientEscrowResponseTimeoutTicks = 300;
     private const int ClientEscrowRetryLimit = 3;
+    private const int RemoteMenuOpenTimeoutTicks = 300;
     private const int RemoteTerminalSnapshotDefaultEntryLimit = 512;
     private const int RemoteTerminalSnapshotMaxEntryLimit = 1024;
     private const int RemoteTerminalSnapshotLocationLimit = 32;
@@ -74,8 +75,59 @@ internal sealed class NetworkInteractionService
     private readonly Dictionary<Guid, StructuralActionRequestMessage> pendingStructuralEscrowRequests = new();
     private readonly Dictionary<Guid, ClientEscrowRetryState> clientEscrowRetryStates = new();
     private readonly Dictionary<long, string> blockedPeerActionMessages = new();
+    private readonly Dictionary<Guid, long> terminalPushSequences = new();
+    private readonly Dictionary<Guid, long> craftingPushSequences = new();
+    private Guid pendingRemoteMenuOpenSession;
+    private int pendingRemoteMenuOpenAtTick;
+    private long remoteSnapshotRequestSequence;
 
     internal event Action<StructuralActionResponseMessage>? StructuralActionResponseReceived;
+
+    private Guid BeginRemoteMenuOpen()
+    {
+        this.pendingRemoteMenuOpenSession = Guid.NewGuid();
+        this.pendingRemoteMenuOpenAtTick = Game1.ticks;
+        return this.pendingRemoteMenuOpenSession;
+    }
+
+    private long NextRemoteSnapshotRequestSequence()
+    {
+        if (this.remoteSnapshotRequestSequence == long.MaxValue)
+            this.remoteSnapshotRequestSequence = 0;
+
+        return ++this.remoteSnapshotRequestSequence;
+    }
+
+    private static long NextPushSequence(Dictionary<Guid, long> sequences, Guid networkId)
+    {
+        sequences.TryGetValue(networkId, out var current);
+        var next = current == long.MaxValue ? 1 : current + 1;
+        sequences[networkId] = next;
+        return next;
+    }
+
+    private bool IsPendingRemoteMenuOpen(Guid menuSessionId)
+    {
+        if (!RemoteSnapshotSessionRules.Matches(this.pendingRemoteMenuOpenSession, menuSessionId))
+            return false;
+
+        if (!RemoteSnapshotSessionRules.HasTimedOut(this.pendingRemoteMenuOpenAtTick, Game1.ticks, RemoteMenuOpenTimeoutTicks))
+            return true;
+
+        this.pendingRemoteMenuOpenSession = Guid.Empty;
+        this.pendingRemoteMenuOpenAtTick = 0;
+        return false;
+    }
+
+    private bool ConsumePendingRemoteMenuOpen(Guid menuSessionId)
+    {
+        if (!this.IsPendingRemoteMenuOpen(menuSessionId))
+            return false;
+
+        this.pendingRemoteMenuOpenSession = Guid.Empty;
+        this.pendingRemoteMenuOpenAtTick = 0;
+        return true;
+    }
 
     public NetworkInteractionService(
         NetworkRepository repository,
@@ -233,11 +285,22 @@ internal sealed class NetworkInteractionService
 
     public void RebuildPlacedEndpointCache()
     {
+        var clearedLegacyChestLinks = 0;
         foreach (var location in Game1.locations)
         {
             foreach (var pair in location.objects.Pairs)
             {
                 var placedObject = pair.Value;
+                if (placedObject is Chest)
+                {
+                    var removedNetwork = placedObject.modData.Remove(EndpointIdentityService.NetworkIdKey);
+                    var removedEndpoint = placedObject.modData.Remove(EndpointIdentityService.EndpointIdKey);
+                    if (removedNetwork || removedEndpoint)
+                        clearedLegacyChestLinks++;
+
+                    continue;
+                }
+
                 if (!Guid.TryParse(placedObject.modData.GetValueOrDefault(EndpointIdentityService.NetworkIdKey), out var networkId))
                     continue;
 
@@ -251,6 +314,9 @@ internal sealed class NetworkInteractionService
                 this.repository.UpsertEndpoint(networkId, this.CreateEndpoint(endpointId, location, pair.Key, type.Value));
             }
         }
+
+        if (clearedLegacyChestLinks > 0)
+            this.monitor.Log($"Cleared {clearedLegacyChestLinks:N0} legacy direct chest link(s); chests now require an adjacent Storage Interface.", LogLevel.Info);
 
         this.RefreshEndpointConnectivity();
     }
@@ -307,6 +373,11 @@ internal sealed class NetworkInteractionService
 
     private void ClearActionResponseCaches(bool restorePendingItems)
     {
+        this.pendingRemoteMenuOpenSession = Guid.Empty;
+        this.pendingRemoteMenuOpenAtTick = 0;
+        this.remoteSnapshotRequestSequence = 0;
+        this.terminalPushSequences.Clear();
+        this.craftingPushSequences.Clear();
         this.terminalActionResponseCache.Clear();
         this.terminalActionResponseOrder.Clear();
         this.craftingActionResponseCache.Clear();
@@ -653,23 +724,23 @@ internal sealed class NetworkInteractionService
         this.SendStructuralRequest(request);
     }
 
-    private void SendStructuralRequest(StructuralActionRequestMessage request)
+    private bool SendStructuralRequest(StructuralActionRequestMessage request)
     {
         if (Context.IsMainPlayer)
-            return;
+            return false;
 
         var host = this.multiplayerHelper.GetConnectedPlayers().FirstOrDefault(peer => peer.IsHost);
         if (host is null || !host.HasSmapi || host.GetMod(this.modManifest.UniqueID) is null)
         {
             Game1.addHUDMessage(new HUDMessage(ModText.Get("multiplayer.hostNeedsSVSAP"), HUDMessage.error_type));
-            return;
+            return false;
         }
 
         if (!this.TrackStructuralActingItem(request, out var trackingMessage))
         {
             Game1.addHUDMessage(new HUDMessage(trackingMessage, HUDMessage.error_type));
             Game1.playSound("cancel");
-            return;
+            return false;
         }
 
         try
@@ -687,10 +758,11 @@ internal sealed class NetworkInteractionService
             this.RestorePendingStructuralHeldItem(request.TransactionId);
             this.monitor.Log($"Failed to send SVSAP structural request {request.TransactionId:N}: {ex.Message}", LogLevel.Warn);
             Game1.addHUDMessage(new HUDMessage(ModText.Get("network.structural.sendFailed"), HUDMessage.error_type));
-            return;
+            return false;
         }
 
         this.LogGameplay($"action=structural_request result=sent player={DescribePlayer(Game1.player)} host={host.PlayerID} kind={request.Kind} location={Quote(request.LocationName)} tile=({request.TileX:0},{request.TileY:0}) tx={ShortId(request.TransactionId)}");
+        return true;
     }
 
     private void RequestRemoteStructuralSnapshot(StructuralSnapshotKind kind, SObject target, GameLocation location, Vector2 tile)
@@ -705,8 +777,11 @@ internal sealed class NetworkInteractionService
             return;
         }
 
+        var menuSessionId = this.BeginRemoteMenuOpen();
         var request = new StructuralSnapshotRequestMessage
         {
+            MenuSessionId = menuSessionId,
+            RequestSequence = this.NextRemoteSnapshotRequestSequence(),
             Kind = kind,
             LocationName = location.NameOrUniqueName,
             TileX = (int)tile.X,
@@ -724,20 +799,23 @@ internal sealed class NetworkInteractionService
         }
         catch (Exception ex)
         {
+            this.ConsumePendingRemoteMenuOpen(menuSessionId);
             this.monitor.Log($"Failed to request SVSAP structural snapshot for {target.QualifiedItemId}: {ex.Message}", LogLevel.Warn);
             Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteTerminal.sendFailed"), HUDMessage.error_type));
         }
     }
 
-    private void SendRemoteStorageDriveAction(
+    private bool SendRemoteStorageDriveAction(
         StructuralSnapshotResponseMessage snapshot,
         StructuralActionKind kind,
         int slotIndex,
         Item? heldItem)
     {
-        this.SendStructuralRequest(new StructuralActionRequestMessage
+        return this.SendStructuralRequest(new StructuralActionRequestMessage
         {
             TransactionId = Guid.NewGuid(),
+            MenuSessionId = snapshot.MenuSessionId,
+            RequestSequence = this.NextRemoteSnapshotRequestSequence(),
             Kind = kind,
             LocationName = snapshot.LocationName,
             TileX = snapshot.TileX,
@@ -750,7 +828,7 @@ internal sealed class NetworkInteractionService
         });
     }
 
-    private void SendRemoteTransferBusAction(
+    private bool SendRemoteTransferBusAction(
         StructuralSnapshotResponseMessage snapshot,
         StructuralActionKind kind,
         int slotIndex = -1,
@@ -758,9 +836,11 @@ internal sealed class NetworkInteractionService
         int facingDirection = -1,
         Item? heldItem = null)
     {
-        this.SendStructuralRequest(new StructuralActionRequestMessage
+        return this.SendStructuralRequest(new StructuralActionRequestMessage
         {
             TransactionId = Guid.NewGuid(),
+            MenuSessionId = snapshot.MenuSessionId,
+            RequestSequence = this.NextRemoteSnapshotRequestSequence(),
             Kind = kind,
             LocationName = snapshot.LocationName,
             TileX = snapshot.TileX,
@@ -775,16 +855,18 @@ internal sealed class NetworkInteractionService
         });
     }
 
-    private void SendRemotePatternProviderAction(
+    private bool SendRemotePatternProviderAction(
         StructuralSnapshotResponseMessage snapshot,
         StructuralActionKind kind,
         int slotIndex = -1,
         int actionValue = 0,
         Item? heldItem = null)
     {
-        this.SendStructuralRequest(new StructuralActionRequestMessage
+        return this.SendStructuralRequest(new StructuralActionRequestMessage
         {
             TransactionId = Guid.NewGuid(),
+            MenuSessionId = snapshot.MenuSessionId,
+            RequestSequence = this.NextRemoteSnapshotRequestSequence(),
             Kind = kind,
             LocationName = snapshot.LocationName,
             TileX = snapshot.TileX,
@@ -898,74 +980,121 @@ internal sealed class NetworkInteractionService
         var response = e.ReadAs<StructuralSnapshotResponseMessage>();
         if (!response.Success)
         {
-            Game1.addHUDMessage(new HUDMessage(
-                LocalizeRemoteResponse(false, response.Message, "network.structural.succeeded", "Structure action completed.", "network.structural.failed", "Structure action failed; please retry."),
-                HUDMessage.error_type));
+            if (Game1.activeClickableMenu is RemoteStorageDriveMenu failedStorage && failedStorage.MatchesSnapshotContext(response))
+                failedStorage.MarkSnapshotRequestFailed(response.RequestSequence);
+            else if (Game1.activeClickableMenu is RemoteTransferBusMenu failedTransfer && failedTransfer.MatchesSnapshotContext(response))
+                failedTransfer.MarkSnapshotRequestFailed(response.RequestSequence);
+            else if (Game1.activeClickableMenu is RemotePatternProviderMenu failedProvider && failedProvider.MatchesSnapshotContext(response))
+                failedProvider.MarkSnapshotRequestFailed(response.RequestSequence);
+            else if (this.ConsumePendingRemoteMenuOpen(response.MenuSessionId))
+            {
+                Game1.addHUDMessage(new HUDMessage(
+                    LocalizeRemoteResponse(false, response.Message, "network.structural.succeeded", "Structure action completed.", "network.structural.failed", "Structure action failed; please retry."),
+                    HUDMessage.error_type));
+            }
+
             return;
         }
 
         if (response.Kind == StructuralSnapshotKind.StorageDrive && response.StorageDrive is not null)
         {
-            if (Game1.activeClickableMenu is RemoteStorageDriveMenu activeStorage)
-                activeStorage.ApplySnapshot(response);
-            else
-                Game1.activeClickableMenu = new RemoteStorageDriveMenu(
-                    response,
-                    (kind, slot, held) => this.SendRemoteStorageDriveAction(response, kind, slot, held),
-                    () => this.RequestRemoteStructuralSnapshot(response));
+            if (Game1.activeClickableMenu is RemoteStorageDriveMenu activeStorage && activeStorage.MatchesSnapshotContext(response))
+            {
+                activeStorage.TryApplyRefreshSnapshot(response);
+                return;
+            }
+
+            var consumedPendingSession = this.ConsumePendingRemoteMenuOpen(response.MenuSessionId);
+            if (!RemoteSnapshotSessionRules.ShouldOpenMenu(consumedPendingSession, Game1.activeClickableMenu is not null))
+                return;
+
+            Game1.activeClickableMenu = new RemoteStorageDriveMenu(
+                response,
+                (kind, slot, held) => this.SendRemoteStorageDriveAction(response, kind, slot, held),
+                () => this.RequestRemoteStructuralSnapshot(response));
+            Game1.playSound("bigSelect");
             return;
         }
 
         if (response.Kind == StructuralSnapshotKind.TransferBus && response.TransferBus is not null)
         {
-            if (Game1.activeClickableMenu is RemoteTransferBusMenu activeTransfer)
-                activeTransfer.ApplySnapshot(response);
-            else
-                Game1.activeClickableMenu = new RemoteTransferBusMenu(
-                    response,
-                    (kind, slotIndex, itemId, direction, held) => this.SendRemoteTransferBusAction(response, kind, slotIndex, itemId, direction, held),
-                    () => this.RequestRemoteStructuralSnapshot(response));
+            if (Game1.activeClickableMenu is RemoteTransferBusMenu activeTransfer && activeTransfer.MatchesSnapshotContext(response))
+            {
+                activeTransfer.TryApplyRefreshSnapshot(response);
+                return;
+            }
+
+            var consumedPendingSession = this.ConsumePendingRemoteMenuOpen(response.MenuSessionId);
+            if (!RemoteSnapshotSessionRules.ShouldOpenMenu(consumedPendingSession, Game1.activeClickableMenu is not null))
+                return;
+
+            Game1.activeClickableMenu = new RemoteTransferBusMenu(
+                response,
+                (kind, slotIndex, itemId, direction, held) => this.SendRemoteTransferBusAction(response, kind, slotIndex, itemId, direction, held),
+                () => this.RequestRemoteStructuralSnapshot(response));
+            Game1.playSound("bigSelect");
             return;
         }
 
         if (response.Kind == StructuralSnapshotKind.PatternProvider && response.PatternProvider is not null)
         {
-            if (Game1.activeClickableMenu is RemotePatternProviderMenu activeProvider)
-                activeProvider.ApplySnapshot(response);
-            else
-                Game1.activeClickableMenu = new RemotePatternProviderMenu(
-                    response,
-                    (kind, slotIndex, value, held) => this.SendRemotePatternProviderAction(response, kind, slotIndex, value, held),
-                    () => this.RequestRemoteStructuralSnapshot(response));
+            if (Game1.activeClickableMenu is RemotePatternProviderMenu activeProvider && activeProvider.MatchesSnapshotContext(response))
+            {
+                activeProvider.TryApplyRefreshSnapshot(response);
+                return;
+            }
+
+            var consumedPendingSession = this.ConsumePendingRemoteMenuOpen(response.MenuSessionId);
+            if (!RemoteSnapshotSessionRules.ShouldOpenMenu(consumedPendingSession, Game1.activeClickableMenu is not null))
+                return;
+
+            Game1.activeClickableMenu = new RemotePatternProviderMenu(
+                response,
+                (kind, slotIndex, value, held) => this.SendRemotePatternProviderAction(response, kind, slotIndex, value, held),
+                () => this.RequestRemoteStructuralSnapshot(response));
+            Game1.playSound("bigSelect");
         }
     }
 
-    private void RequestRemoteStructuralSnapshot(StructuralSnapshotResponseMessage snapshot)
+    private bool RequestRemoteStructuralSnapshot(StructuralSnapshotResponseMessage snapshot)
     {
         if (Context.IsMainPlayer)
-            return;
+            return false;
 
         var host = this.multiplayerHelper.GetConnectedPlayers().FirstOrDefault(peer => peer.IsHost);
         if (host is null || !host.HasSmapi || host.GetMod(this.modManifest.UniqueID) is null)
-            return;
+            return false;
 
-        this.multiplayerHelper.SendMessage(
-            new StructuralSnapshotRequestMessage
-            {
-                Kind = snapshot.Kind,
-                LocationName = snapshot.LocationName,
-                TileX = snapshot.TileX,
-                TileY = snapshot.TileY
-            },
-            MultiplayerMessageTypes.StructuralSnapshotRequest,
-            modIDs: new[] { this.modManifest.UniqueID },
-            playerIDs: new[] { host.PlayerID });
+        try
+        {
+            this.multiplayerHelper.SendMessage(
+                new StructuralSnapshotRequestMessage
+                {
+                    MenuSessionId = snapshot.MenuSessionId,
+                    RequestSequence = this.NextRemoteSnapshotRequestSequence(),
+                    Kind = snapshot.Kind,
+                    LocationName = snapshot.LocationName,
+                    TileX = snapshot.TileX,
+                    TileY = snapshot.TileY
+                },
+                MultiplayerMessageTypes.StructuralSnapshotRequest,
+                modIDs: new[] { this.modManifest.UniqueID },
+                playerIDs: new[] { host.PlayerID });
+            return true;
+        }
+        catch (Exception ex)
+        {
+            this.monitor.Log($"Failed to send SVSAP structural snapshot request: {ex.Message}", LogLevel.Warn);
+            return false;
+        }
     }
 
     private StructuralSnapshotResponseMessage CreateStructuralSnapshotResponse(StructuralSnapshotRequestMessage request)
     {
         var response = new StructuralSnapshotResponseMessage
         {
+            MenuSessionId = request.MenuSessionId,
+            RequestSequence = request.RequestSequence,
             Kind = request.Kind,
             LocationName = request.LocationName,
             TileX = request.TileX,
@@ -1110,7 +1239,16 @@ internal sealed class NetworkInteractionService
                 return;
             }
 
+            if (this.TryCreateExecutedStructuralReplay(e.FromPlayerID, request, out var executedReplay))
+            {
+                this.RememberStructuralActionResponse(e.FromPlayerID, request.TransactionId, executedReplay);
+                this.SendStructuralResponse(executedReplay, e.FromPlayerID);
+                return;
+            }
+
             var response = this.ExecuteStructuralAction(request, e.FromPlayerID);
+            if (response.Success && response.ConsumeHeldOne)
+                this.RememberExecutedStructuralConsumption(e.FromPlayerID, request, response);
             this.RememberStructuralActionResponse(e.FromPlayerID, request.TransactionId, response);
             this.SendStructuralResponse(response, e.FromPlayerID);
         }
@@ -1139,6 +1277,8 @@ internal sealed class NetworkInteractionService
         return new StructuralActionResponseMessage
         {
             TransactionId = request.TransactionId,
+            MenuSessionId = request.MenuSessionId,
+            RequestSequence = request.RequestSequence,
             Kind = request.Kind,
             Message = message ?? ModText.Get("network.structural.failedRestored")
         };
@@ -1264,6 +1404,8 @@ internal sealed class NetworkInteractionService
         return new StructuralActionResponseMessage
         {
             TransactionId = delivery.TransactionId,
+            MenuSessionId = delivery.MenuSessionId,
+            RequestSequence = delivery.RequestSequence,
             Kind = delivery.StructuralKind,
             Success = true,
             Message = delivery.Message,
@@ -1298,7 +1440,7 @@ internal sealed class NetworkInteractionService
         {
             this.SendRemoteDeliveryAck(response.DeliveryId, response.TransactionId);
             this.FinalizeClientActionEscrow(response.TransactionId);
-            this.RefreshActiveRemoteStructuralMenu();
+            this.RefreshActiveRemoteStructuralMenu(response);
             return;
         }
 
@@ -1320,7 +1462,7 @@ internal sealed class NetworkInteractionService
             }
 
             this.FinalizeClientActionEscrow(response.TransactionId);
-            this.RefreshActiveRemoteStructuralMenu();
+            this.RefreshActiveRemoteStructuralMenu(response);
             return;
         }
 
@@ -1337,7 +1479,7 @@ internal sealed class NetworkInteractionService
                 this.RestoreEscrowedStructuralItem(pending, Game1.currentLocation);
 
             this.FinalizeClientActionEscrow(response.TransactionId);
-            this.RefreshActiveRemoteStructuralMenu();
+            this.RefreshActiveRemoteStructuralMenu(response);
             return;
         }
 
@@ -1366,17 +1508,23 @@ internal sealed class NetworkInteractionService
         }
 
         this.FinalizeClientActionEscrow(response.TransactionId);
-        this.RefreshActiveRemoteStructuralMenu();
+        this.RefreshActiveRemoteStructuralMenu(response);
     }
 
-    private void RefreshActiveRemoteStructuralMenu()
+    private void RefreshActiveRemoteStructuralMenu(StructuralActionResponseMessage response)
     {
         if (Game1.activeClickableMenu is RemoteStorageDriveMenu storageMenu)
-            this.RequestRemoteStructuralSnapshot(storageMenu.Snapshot);
+        {
+            storageMenu.TryMarkActionComplete(response);
+        }
         else if (Game1.activeClickableMenu is RemoteTransferBusMenu transferMenu)
-            this.RequestRemoteStructuralSnapshot(transferMenu.Snapshot);
+        {
+            transferMenu.TryMarkActionComplete(response);
+        }
         else if (Game1.activeClickableMenu is RemotePatternProviderMenu providerMenu)
-            this.RequestRemoteStructuralSnapshot(providerMenu.Snapshot);
+        {
+            providerMenu.TryMarkActionComplete(response);
+        }
     }
 
     private StructuralActionResponseMessage ExecuteStructuralAction(StructuralActionRequestMessage request, long fromPlayerId)
@@ -1384,6 +1532,8 @@ internal sealed class NetworkInteractionService
         var response = new StructuralActionResponseMessage
         {
             TransactionId = request.TransactionId,
+            MenuSessionId = request.MenuSessionId,
+            RequestSequence = request.RequestSequence,
             Kind = request.Kind
         };
 
@@ -1546,6 +1696,9 @@ internal sealed class NetworkInteractionService
     {
         if (selectedNetworkId == Guid.Empty)
             return StructuralActionResult.Fail(ModText.Get("network.link.selectCoreFirst"));
+
+        if (target is Chest)
+            return StructuralActionResult.Fail(ModText.Get("network.link.chestRequiresInterface"));
 
         var endpointType = this.GetEndpointType(target);
         if (endpointType is null)
@@ -2311,23 +2464,42 @@ internal sealed class NetworkInteractionService
             return;
         }
 
-        this.SendRemoteTerminalSnapshotRequest(networkId, endpointId, entryOffset: 0, entryLimit: RemoteTerminalSnapshotDefaultEntryLimit);
+        var menuSessionId = this.BeginRemoteMenuOpen();
+        if (!this.SendRemoteTerminalSnapshotRequest(
+            networkId,
+            endpointId,
+            entryOffset: 0,
+            entryLimit: RemoteTerminalSnapshotDefaultEntryLimit,
+            menuSessionId,
+            notify: true))
+        {
+            this.ConsumePendingRemoteMenuOpen(menuSessionId);
+        }
     }
 
-    private void SendRemoteTerminalSnapshotRequest(Guid networkId, Guid endpointId, int entryOffset, int entryLimit)
+    private bool SendRemoteTerminalSnapshotRequest(
+        Guid networkId,
+        Guid endpointId,
+        int entryOffset,
+        int entryLimit,
+        Guid menuSessionId,
+        bool notify)
     {
         if (Context.IsMainPlayer)
-            return;
+            return false;
 
         var host = this.multiplayerHelper.GetConnectedPlayers().FirstOrDefault(peer => peer.IsHost);
         if (host is null || !host.HasSmapi || host.GetMod(this.modManifest.UniqueID) is null)
         {
-            Game1.addHUDMessage(new HUDMessage(ModText.Get("multiplayer.hostNeedsSVSAPTerminal"), HUDMessage.error_type));
-            return;
+            if (notify)
+                Game1.addHUDMessage(new HUDMessage(ModText.Get("multiplayer.hostNeedsSVSAPTerminal"), HUDMessage.error_type));
+            return false;
         }
 
         var request = new TerminalSnapshotRequestMessage
         {
+            MenuSessionId = menuSessionId,
+            RequestSequence = this.NextRemoteSnapshotRequestSequence(),
             NetworkId = networkId,
             EndpointId = endpointId,
             Crafting = false,
@@ -2335,13 +2507,26 @@ internal sealed class NetworkInteractionService
             EntryLimit = NormalizeTerminalSnapshotEntryLimit(entryLimit)
         };
 
-        this.multiplayerHelper.SendMessage(
-            request,
-            MultiplayerMessageTypes.TerminalSnapshotRequest,
-            modIDs: new[] { this.modManifest.UniqueID },
-            playerIDs: new[] { host.PlayerID });
+        try
+        {
+            this.multiplayerHelper.SendMessage(
+                request,
+                MultiplayerMessageTypes.TerminalSnapshotRequest,
+                modIDs: new[] { this.modManifest.UniqueID },
+                playerIDs: new[] { host.PlayerID });
+        }
+        catch (Exception ex)
+        {
+            this.monitor.Log($"Failed to send SVSAP terminal snapshot request: {ex.Message}", LogLevel.Warn);
+            if (notify)
+                Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteTerminal.sendFailed"), HUDMessage.error_type));
+            return false;
+        }
 
-        Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteTerminal.snapshotRequested"), HUDMessage.newQuest_type));
+        if (notify)
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteTerminal.snapshotRequested"), HUDMessage.newQuest_type));
+
+        return true;
     }
 
     private void RequestRemoteCraftingSnapshot(SObject terminal)
@@ -2352,7 +2537,17 @@ internal sealed class NetworkInteractionService
             return;
         }
 
-        this.SendRemoteCraftingSnapshotRequest(networkId, endpointId, batches: 1, MaterialQualityStrategy.LowQualityFirst);
+        var menuSessionId = this.BeginRemoteMenuOpen();
+        if (!this.SendRemoteCraftingSnapshotRequest(
+            networkId,
+            endpointId,
+            batches: 1,
+            MaterialQualityStrategy.LowQualityFirst,
+            menuSessionId,
+            notify: true))
+        {
+            this.ConsumePendingRemoteMenuOpen(menuSessionId);
+        }
     }
 
     private void RequestRemoteCraftingMonitorSnapshot(SObject monitorObject)
@@ -2363,71 +2558,105 @@ internal sealed class NetworkInteractionService
             return;
         }
 
-        this.SendRemoteCraftingMonitorSnapshotRequest(networkId, endpointId);
+        var menuSessionId = this.BeginRemoteMenuOpen();
+        if (!this.SendRemoteCraftingMonitorSnapshotRequest(networkId, endpointId, menuSessionId, notify: true))
+            this.ConsumePendingRemoteMenuOpen(menuSessionId);
     }
 
-    private void SendRemoteCraftingSnapshotRequest(Guid networkId, int batches, MaterialQualityStrategy qualityStrategy)
-    {
-        this.SendRemoteCraftingSnapshotRequest(networkId, Guid.Empty, batches, qualityStrategy);
-    }
-
-    private void SendRemoteCraftingSnapshotRequest(Guid networkId, Guid endpointId, int batches, MaterialQualityStrategy qualityStrategy)
+    private bool SendRemoteCraftingSnapshotRequest(
+        Guid networkId,
+        Guid endpointId,
+        int batches,
+        MaterialQualityStrategy qualityStrategy,
+        Guid menuSessionId,
+        bool notify)
     {
         if (Context.IsMainPlayer)
-            return;
+            return false;
 
         var host = this.multiplayerHelper.GetConnectedPlayers().FirstOrDefault(peer => peer.IsHost);
         if (host is null || !host.HasSmapi || host.GetMod(this.modManifest.UniqueID) is null)
         {
-            Game1.addHUDMessage(new HUDMessage(ModText.Get("multiplayer.hostNeedsSVSAPCrafting"), HUDMessage.error_type));
-            return;
+            if (notify)
+                Game1.addHUDMessage(new HUDMessage(ModText.Get("multiplayer.hostNeedsSVSAPCrafting"), HUDMessage.error_type));
+            return false;
         }
 
-        this.multiplayerHelper.SendMessage(
-            new CraftingSnapshotRequestMessage
-            {
-                NetworkId = networkId,
-                EndpointId = endpointId,
-                Batches = Math.Max(1, batches),
-                QualityStrategy = qualityStrategy
-            },
-            MultiplayerMessageTypes.CraftingSnapshotRequest,
-            modIDs: new[] { this.modManifest.UniqueID },
-            playerIDs: new[] { host.PlayerID });
+        try
+        {
+            this.multiplayerHelper.SendMessage(
+                new CraftingSnapshotRequestMessage
+                {
+                    MenuSessionId = menuSessionId,
+                    RequestSequence = this.NextRemoteSnapshotRequestSequence(),
+                    NetworkId = networkId,
+                    EndpointId = endpointId,
+                    Batches = Math.Max(1, batches),
+                    QualityStrategy = qualityStrategy
+                },
+                MultiplayerMessageTypes.CraftingSnapshotRequest,
+                modIDs: new[] { this.modManifest.UniqueID },
+                playerIDs: new[] { host.PlayerID });
+        }
+        catch (Exception ex)
+        {
+            this.monitor.Log($"Failed to send SVSAP crafting snapshot request: {ex.Message}", LogLevel.Warn);
+            if (notify)
+                Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteCrafting.sendFailed"), HUDMessage.error_type));
+            return false;
+        }
 
-        Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteCrafting.snapshotRequested"), HUDMessage.newQuest_type));
+        if (notify)
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteCrafting.snapshotRequested"), HUDMessage.newQuest_type));
+
+        return true;
     }
 
-    private void SendRemoteCraftingMonitorSnapshotRequest(Guid networkId)
-    {
-        this.SendRemoteCraftingMonitorSnapshotRequest(networkId, Guid.Empty);
-    }
-
-    private void SendRemoteCraftingMonitorSnapshotRequest(Guid networkId, Guid endpointId)
+    private bool SendRemoteCraftingMonitorSnapshotRequest(
+        Guid networkId,
+        Guid endpointId,
+        Guid menuSessionId,
+        bool notify)
     {
         if (Context.IsMainPlayer)
-            return;
+            return false;
 
         var host = this.multiplayerHelper.GetConnectedPlayers().FirstOrDefault(peer => peer.IsHost);
         if (host is null || !host.HasSmapi || host.GetMod(this.modManifest.UniqueID) is null)
         {
-            Game1.addHUDMessage(new HUDMessage(ModText.Get("multiplayer.hostNeedsSVSAPMonitor"), HUDMessage.error_type));
-            return;
+            if (notify)
+                Game1.addHUDMessage(new HUDMessage(ModText.Get("multiplayer.hostNeedsSVSAPMonitor"), HUDMessage.error_type));
+            return false;
         }
 
-        this.multiplayerHelper.SendMessage(
-            new CraftingMonitorSnapshotRequestMessage
-            {
-                NetworkId = networkId,
-                EndpointId = endpointId,
-                HeldPattern = GetHeldPattern(),
-                HeldCaskItemPrototype = this.GetHeldCaskPipelineItemPrototype()
-            },
-            MultiplayerMessageTypes.CraftingMonitorSnapshotRequest,
-            modIDs: new[] { this.modManifest.UniqueID },
-            playerIDs: new[] { host.PlayerID });
+        try
+        {
+            this.multiplayerHelper.SendMessage(
+                new CraftingMonitorSnapshotRequestMessage
+                {
+                    MenuSessionId = menuSessionId,
+                    RequestSequence = this.NextRemoteSnapshotRequestSequence(),
+                    NetworkId = networkId,
+                    EndpointId = endpointId,
+                    HeldPattern = GetHeldPattern(),
+                    HeldCaskItemPrototype = this.GetHeldCaskPipelineItemPrototype()
+                },
+                MultiplayerMessageTypes.CraftingMonitorSnapshotRequest,
+                modIDs: new[] { this.modManifest.UniqueID },
+                playerIDs: new[] { host.PlayerID });
+        }
+        catch (Exception ex)
+        {
+            this.monitor.Log($"Failed to send SVSAP crafting monitor snapshot request: {ex.Message}", LogLevel.Warn);
+            if (notify)
+                Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteMonitor.sendFailed"), HUDMessage.error_type));
+            return false;
+        }
 
-        Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteMonitor.snapshotRequested"), HUDMessage.newQuest_type));
+        if (notify)
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteMonitor.snapshotRequested"), HUDMessage.newQuest_type));
+
+        return true;
     }
 
     private void HandleTerminalSnapshotRequest(ModMessageReceivedEventArgs e)
@@ -2439,7 +2668,13 @@ internal sealed class NetworkInteractionService
         if (request.Crafting)
         {
             var craftingResponse = this.CreateCraftingSnapshotResponse(
-                new CraftingSnapshotRequestMessage { NetworkId = request.NetworkId, EndpointId = request.EndpointId },
+                new CraftingSnapshotRequestMessage
+                {
+                    MenuSessionId = request.MenuSessionId,
+                    RequestSequence = request.RequestSequence,
+                    NetworkId = request.NetworkId,
+                    EndpointId = request.EndpointId
+                },
                 e.FromPlayerID);
 
             this.multiplayerHelper.SendMessage(
@@ -2467,7 +2702,11 @@ internal sealed class NetworkInteractionService
         var response = e.ReadAs<TerminalSnapshotResponseMessage>();
         if (!response.Success)
         {
-            Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteTerminal.snapshotFailed", "SVSAP terminal snapshot failed; please retry."), HUDMessage.error_type));
+            if (Game1.activeClickableMenu is RemoteNetworkTerminalMenu failedMenu && failedMenu.MatchesSnapshotContext(response))
+                failedMenu.MarkSnapshotRequestFailed(response.RequestSequence);
+            else if (this.ConsumePendingRemoteMenuOpen(response.MenuSessionId))
+                Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteTerminal.snapshotFailed", "SVSAP terminal snapshot failed; please retry."), HUDMessage.error_type));
+
             return;
         }
 
@@ -2479,11 +2718,17 @@ internal sealed class NetworkInteractionService
             return;
         }
 
-        if (Game1.activeClickableMenu is RemoteNetworkTerminalMenu remoteMenu && remoteMenu.MatchesNetwork(response.NetworkId))
-            remoteMenu.ApplySnapshot(response);
-        else
-            Game1.activeClickableMenu = this.CreateRemoteTerminalMenu(response);
+        if (Game1.activeClickableMenu is RemoteNetworkTerminalMenu remoteMenu && remoteMenu.MatchesSnapshotContext(response))
+        {
+            remoteMenu.TryApplyRefreshSnapshot(response);
+            return;
+        }
 
+        var consumedPendingSession = this.ConsumePendingRemoteMenuOpen(response.MenuSessionId);
+        if (!RemoteSnapshotSessionRules.ShouldOpenMenu(consumedPendingSession, Game1.activeClickableMenu is not null))
+            return;
+
+        Game1.activeClickableMenu = this.CreateRemoteTerminalMenu(response);
         Game1.playSound("bigSelect");
     }
 
@@ -2492,13 +2737,21 @@ internal sealed class NetworkInteractionService
         return new RemoteNetworkTerminalMenu(
             snapshot,
             this.SendRemoteTerminalActionRequest,
-            this.SendRemoteTerminalSnapshotRequest);
+            (networkId, endpointId, entryOffset, entryLimit) => this.SendRemoteTerminalSnapshotRequest(
+                networkId,
+                endpointId,
+                entryOffset,
+                entryLimit,
+                snapshot.MenuSessionId,
+                notify: false));
     }
 
     private bool SendRemoteTerminalActionRequest(TerminalActionRequestMessage request, TerminalSnapshotResponseMessage snapshot)
     {
         if (Context.IsMainPlayer)
             return false;
+
+        request.RequestSequence = this.NextRemoteSnapshotRequestSequence();
 
         var host = this.multiplayerHelper.GetConnectedPlayers().FirstOrDefault(peer => peer.IsHost);
         if (host is null || !host.HasSmapi || host.GetMod(this.modManifest.UniqueID) is null)
@@ -2569,13 +2822,22 @@ internal sealed class NetworkInteractionService
 
             if (this.TryGetPendingRemoteDelivery(e.FromPlayerID, request.TransactionId, RemoteDeliveryKind.TerminalWithdraw, out var pendingDelivery))
             {
-                var pendingResponse = this.CreateTerminalResponse(pendingDelivery);
+                var pendingResponse = this.CreateTerminalResponse(pendingDelivery, request);
                 this.RememberTerminalActionResponse(e.FromPlayerID, request.TransactionId, pendingResponse);
                 this.SendTerminalActionResponse(pendingResponse, e.FromPlayerID);
                 return;
             }
 
+            if (this.TryCreateExecutedTerminalReplay(e.FromPlayerID, request, out var executedReplay))
+            {
+                this.RememberTerminalActionResponse(e.FromPlayerID, request.TransactionId, executedReplay);
+                this.SendTerminalActionResponse(executedReplay, e.FromPlayerID);
+                return;
+            }
+
             var response = this.ExecuteTerminalActionRequest(request, e.FromPlayerID);
+            if (response.Success && IsTerminalDepositAction(request.Action))
+                this.RememberExecutedTerminalDeposit(e.FromPlayerID, request, response);
             this.RememberTerminalActionResponse(e.FromPlayerID, request.TransactionId, response);
 
             this.SendTerminalActionResponse(response, e.FromPlayerID);
@@ -2607,10 +2869,135 @@ internal sealed class NetworkInteractionService
         return new TerminalActionResponseMessage
         {
             TransactionId = request.TransactionId,
+            MenuSessionId = request.MenuSessionId,
+            RequestSequence = request.RequestSequence,
             NetworkId = request.NetworkId,
             Message = message ?? ModText.Get("remoteTerminal.actionFailed"),
             ReturnedDepositItems = CloneTerminalPayloads(request.DepositItems)
         };
+    }
+
+    private bool TryCreateExecutedTerminalReplay(
+        long playerId,
+        TerminalActionRequestMessage request,
+        out TerminalActionResponseMessage response)
+    {
+        if (!ExecutedRemoteActionLedger.TryGetTerminal(
+                this.repository.Data.ExecutedTerminalDeposits,
+                playerId,
+                request.TransactionId,
+                out var executed))
+        {
+            response = null!;
+            return false;
+        }
+
+        if (executed.NetworkId != request.NetworkId
+            || executed.EndpointId != request.EndpointId
+            || !string.Equals(executed.ActionKind, request.Action.ToString(), StringComparison.Ordinal))
+        {
+            response = CreateTerminalFailureResponse(request, ModText.Get("remoteTransaction.mismatch"));
+            return true;
+        }
+
+        response = new TerminalActionResponseMessage
+        {
+            TransactionId = request.TransactionId,
+            MenuSessionId = request.MenuSessionId,
+            RequestSequence = request.RequestSequence,
+            NetworkId = request.NetworkId,
+            Success = true,
+            Message = executed.Message,
+            ReturnedDepositItems = CloneTerminalPayloads(executed.ReturnedDepositItems),
+            Snapshot = this.CreateTerminalSnapshotResponse(CreateSnapshotRequest(request))
+        };
+        return true;
+    }
+
+    private void RememberExecutedTerminalDeposit(
+        long playerId,
+        TerminalActionRequestMessage request,
+        TerminalActionResponseMessage response)
+    {
+        var entry = new ExecutedTerminalDeposit
+        {
+            PlayerId = playerId,
+            TransactionId = request.TransactionId,
+            NetworkId = request.NetworkId,
+            EndpointId = request.EndpointId,
+            ActionKind = request.Action.ToString(),
+            Message = response.Message,
+            CreatedDay = Context.IsWorldReady ? Game1.Date.TotalDays : 0,
+            CreatedTick = Game1.ticks,
+            ReturnedDepositItems = CloneTerminalPayloads(response.ReturnedDepositItems)
+        };
+        if (ExecutedRemoteActionLedger.RememberTerminal(this.repository.Data.ExecutedTerminalDeposits, entry))
+            this.repository.Save();
+    }
+
+    private static bool IsTerminalDepositAction(TerminalActionKind action)
+    {
+        return action is TerminalActionKind.DepositSlot or TerminalActionKind.DepositSame or TerminalActionKind.DepositAll;
+    }
+
+    private bool TryCreateExecutedStructuralReplay(
+        long playerId,
+        StructuralActionRequestMessage request,
+        out StructuralActionResponseMessage response)
+    {
+        if (!ExecutedRemoteActionLedger.TryGetStructural(
+                this.repository.Data.ExecutedStructuralConsumptions,
+                playerId,
+                request.TransactionId,
+                out var executed))
+        {
+            response = null!;
+            return false;
+        }
+
+        if (!string.Equals(executed.LocationName, request.LocationName, StringComparison.Ordinal)
+            || executed.TileX != request.TileX
+            || executed.TileY != request.TileY
+            || !string.Equals(executed.ActionKind, request.Kind.ToString(), StringComparison.Ordinal))
+        {
+            response = CreateStructuralFailureResponse(request, ModText.Get("remoteTransaction.mismatch"));
+            return true;
+        }
+
+        response = new StructuralActionResponseMessage
+        {
+            TransactionId = request.TransactionId,
+            MenuSessionId = request.MenuSessionId,
+            RequestSequence = request.RequestSequence,
+            Kind = request.Kind,
+            Success = true,
+            Message = executed.Message,
+            ConsumeHeldOne = true,
+            ResultNetworkId = executed.ResultNetworkId
+        };
+        return true;
+    }
+
+    private void RememberExecutedStructuralConsumption(
+        long playerId,
+        StructuralActionRequestMessage request,
+        StructuralActionResponseMessage response)
+    {
+        var entry = new ExecutedStructuralConsumption
+        {
+            PlayerId = playerId,
+            TransactionId = request.TransactionId,
+            LocationName = request.LocationName,
+            TileX = request.TileX,
+            TileY = request.TileY,
+            ActionKind = request.Kind.ToString(),
+            Message = response.Message,
+            ResultNetworkId = response.ResultNetworkId,
+            CreatedDay = Context.IsWorldReady ? Game1.Date.TotalDays : 0,
+            CreatedTick = Game1.ticks
+        };
+        if (ExecutedRemoteActionLedger.RememberStructural(this.repository.Data.ExecutedStructuralConsumptions, entry))
+            this.repository.Save();
     }
 
     private void SendTerminalActionResponse(TerminalActionResponseMessage response, long playerId)
@@ -2634,6 +3021,7 @@ internal sealed class NetworkInteractionService
             EndpointId = snapshot.EndpointId,
             Crafting = snapshot.Crafting,
             PushUpdate = true,
+            PushSequence = NextPushSequence(this.terminalPushSequences, snapshot.NetworkId),
             Success = snapshot.Success,
             Message = snapshot.Message,
             NetworkName = snapshot.NetworkName,
@@ -2664,11 +3052,13 @@ internal sealed class NetworkInteractionService
             && this.terminalActionResponseCache.TryGetValue((playerId, transactionId), out response!);
     }
 
-    private TerminalActionResponseMessage CreateTerminalResponse(PendingRemoteDelivery delivery)
+    private TerminalActionResponseMessage CreateTerminalResponse(PendingRemoteDelivery delivery, TerminalActionRequestMessage? request = null)
     {
         var response = new TerminalActionResponseMessage
         {
             TransactionId = delivery.TransactionId,
+            MenuSessionId = request?.MenuSessionId ?? Guid.Empty,
+            RequestSequence = request?.RequestSequence ?? 0,
             NetworkId = delivery.NetworkId,
             Success = true,
             Message = delivery.Message,
@@ -2677,12 +3067,16 @@ internal sealed class NetworkInteractionService
             ReturnedCount = delivery.ReturnedCount
         };
 
-        if (this.repository.TryGetNetwork(delivery.NetworkId, out _))
+        if (request is not null && this.repository.TryGetNetwork(delivery.NetworkId, out _))
         {
             response.Snapshot = this.CreateTerminalSnapshotResponse(new TerminalSnapshotRequestMessage
             {
+                MenuSessionId = request.MenuSessionId,
+                RequestSequence = request.RequestSequence,
                 NetworkId = delivery.NetworkId,
-                EndpointId = delivery.EndpointId
+                EndpointId = delivery.EndpointId,
+                EntryOffset = request.EntryOffset,
+                EntryLimit = request.EntryLimit
             });
         }
 
@@ -2737,6 +3131,8 @@ internal sealed class NetworkInteractionService
 
         var delivery = this.GetOrCreatePendingRemoteDelivery(playerId, request.TransactionId, RemoteDeliveryKind.StructuralReturnedItem);
         delivery.StructuralKind = request.Kind;
+        delivery.MenuSessionId = request.MenuSessionId;
+        delivery.RequestSequence = request.RequestSequence;
         delivery.ResultNetworkId = response.ResultNetworkId;
         delivery.Message = response.Message;
         delivery.ReturnedSerializedItem = response.ReturnedSerializedItem;
@@ -2846,7 +3242,7 @@ internal sealed class NetworkInteractionService
 
         if (Game1.activeClickableMenu is RemoteNetworkTerminalMenu remoteMenu && remoteMenu.MatchesNetwork(response.NetworkId))
         {
-            remoteMenu.MarkActionComplete(response.Snapshot);
+            remoteMenu.MarkActionComplete(response);
         }
     }
 
@@ -2873,7 +3269,11 @@ internal sealed class NetworkInteractionService
         var response = e.ReadAs<CraftingSnapshotResponseMessage>();
         if (!response.Success)
         {
-            Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteCrafting.snapshotFailed", "SVSAP crafting snapshot failed; please retry."), HUDMessage.error_type));
+            if (Game1.activeClickableMenu is RemoteCraftingTerminalMenu failedMenu && failedMenu.MatchesSnapshotContext(response))
+                failedMenu.MarkSnapshotRequestFailed(response.RequestSequence);
+            else if (this.ConsumePendingRemoteMenuOpen(response.MenuSessionId))
+                Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteCrafting.snapshotFailed", "SVSAP crafting snapshot failed; please retry."), HUDMessage.error_type));
+
             return;
         }
 
@@ -2885,11 +3285,17 @@ internal sealed class NetworkInteractionService
             return;
         }
 
-        if (Game1.activeClickableMenu is RemoteCraftingTerminalMenu remoteMenu && remoteMenu.MatchesNetwork(response.NetworkId))
-            remoteMenu.ApplySnapshot(response);
-        else
-            Game1.activeClickableMenu = this.CreateRemoteCraftingMenu(response);
+        if (Game1.activeClickableMenu is RemoteCraftingTerminalMenu remoteMenu && remoteMenu.MatchesSnapshotContext(response))
+        {
+            remoteMenu.TryApplyRefreshSnapshot(response);
+            return;
+        }
 
+        var consumedPendingSession = this.ConsumePendingRemoteMenuOpen(response.MenuSessionId);
+        if (!RemoteSnapshotSessionRules.ShouldOpenMenu(consumedPendingSession, Game1.activeClickableMenu is not null))
+            return;
+
+        Game1.activeClickableMenu = this.CreateRemoteCraftingMenu(response);
         Game1.playSound("bigSelect");
     }
 
@@ -2897,6 +3303,8 @@ internal sealed class NetworkInteractionService
     {
         if (Context.IsMainPlayer)
             return false;
+
+        request.RequestSequence = this.NextRemoteSnapshotRequestSequence();
 
         var host = this.multiplayerHelper.GetConnectedPlayers().FirstOrDefault(peer => peer.IsHost);
         if (host is null || !host.HasSmapi || host.GetMod(this.modManifest.UniqueID) is null)
@@ -2936,6 +3344,8 @@ internal sealed class NetworkInteractionService
             var blocked = new CraftingActionResponseMessage
             {
                 TransactionId = request.TransactionId,
+                MenuSessionId = request.MenuSessionId,
+                RequestSequence = request.RequestSequence,
                 NetworkId = request.NetworkId,
                 Message = blockMessage
             };
@@ -2978,6 +3388,7 @@ internal sealed class NetworkInteractionService
             NetworkId = snapshot.NetworkId,
             EndpointId = snapshot.EndpointId,
             PushUpdate = true,
+            PushSequence = NextPushSequence(this.craftingPushSequences, snapshot.NetworkId),
             Success = snapshot.Success,
             Message = snapshot.Message,
             NetworkName = snapshot.NetworkName,
@@ -3050,7 +3461,7 @@ internal sealed class NetworkInteractionService
 
         if (Game1.activeClickableMenu is RemoteCraftingTerminalMenu remoteMenu && remoteMenu.MatchesNetwork(response.NetworkId))
         {
-            remoteMenu.MarkActionComplete(response.Snapshot);
+            remoteMenu.MarkActionComplete(response);
         }
     }
 
@@ -3059,7 +3470,13 @@ internal sealed class NetworkInteractionService
         return new RemoteCraftingTerminalMenu(
             snapshot,
             this.SendRemoteCraftingActionRequest,
-            (batches, qualityStrategy) => this.SendRemoteCraftingSnapshotRequest(snapshot.NetworkId, snapshot.EndpointId, batches, qualityStrategy));
+            (batches, qualityStrategy) => this.SendRemoteCraftingSnapshotRequest(
+                snapshot.NetworkId,
+                snapshot.EndpointId,
+                batches,
+                qualityStrategy,
+                snapshot.MenuSessionId,
+                notify: false));
     }
 
     private void HandleCraftingMonitorSnapshotRequest(ModMessageReceivedEventArgs e)
@@ -3085,15 +3502,25 @@ internal sealed class NetworkInteractionService
         var response = e.ReadAs<CraftingMonitorSnapshotResponseMessage>();
         if (!response.Success)
         {
-            Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteMonitor.snapshotFailed", "SVSAP monitor snapshot failed; please retry."), HUDMessage.error_type));
+            if (Game1.activeClickableMenu is RemoteCraftingMonitorMenu failedMenu && failedMenu.MatchesSnapshotContext(response))
+                failedMenu.MarkSnapshotRequestFailed(response.RequestSequence);
+            else if (this.ConsumePendingRemoteMenuOpen(response.MenuSessionId))
+                Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteMonitor.snapshotFailed", "SVSAP monitor snapshot failed; please retry."), HUDMessage.error_type));
+
             return;
         }
 
-        if (Game1.activeClickableMenu is RemoteCraftingMonitorMenu remoteMenu && remoteMenu.MatchesNetwork(response.NetworkId))
-            remoteMenu.ApplySnapshot(response);
-        else
-            Game1.activeClickableMenu = this.CreateRemoteCraftingMonitorMenu(response);
+        if (Game1.activeClickableMenu is RemoteCraftingMonitorMenu remoteMenu && remoteMenu.MatchesSnapshotContext(response))
+        {
+            remoteMenu.TryApplyRefreshSnapshot(response);
+            return;
+        }
 
+        var consumedPendingSession = this.ConsumePendingRemoteMenuOpen(response.MenuSessionId);
+        if (!RemoteSnapshotSessionRules.ShouldOpenMenu(consumedPendingSession, Game1.activeClickableMenu is not null))
+            return;
+
+        Game1.activeClickableMenu = this.CreateRemoteCraftingMonitorMenu(response);
         Game1.playSound("bigSelect");
     }
 
@@ -3101,6 +3528,8 @@ internal sealed class NetworkInteractionService
     {
         if (Context.IsMainPlayer)
             return false;
+
+        request.RequestSequence = this.NextRemoteSnapshotRequestSequence();
 
         var host = this.multiplayerHelper.GetConnectedPlayers().FirstOrDefault(peer => peer.IsHost);
         if (host is null || !host.HasSmapi || host.GetMod(this.modManifest.UniqueID) is null)
@@ -3140,6 +3569,8 @@ internal sealed class NetworkInteractionService
             var blocked = new CraftingMonitorActionResponseMessage
             {
                 TransactionId = request.TransactionId,
+                MenuSessionId = request.MenuSessionId,
+                RequestSequence = request.RequestSequence,
                 NetworkId = request.NetworkId,
                 Message = blockMessage
             };
@@ -3206,8 +3637,8 @@ internal sealed class NetworkInteractionService
 
         if (Game1.activeClickableMenu is RemoteCraftingMonitorMenu remoteMenu && remoteMenu.MatchesNetwork(response.NetworkId))
         {
-            remoteMenu.MarkActionComplete(response.Snapshot);
-            remoteMenu.ApplyActionResult(response);
+            if (remoteMenu.MarkActionComplete(response))
+                remoteMenu.ApplyActionResult(response);
         }
     }
 
@@ -3216,7 +3647,50 @@ internal sealed class NetworkInteractionService
         return new RemoteCraftingMonitorMenu(
             snapshot,
             this.SendRemoteCraftingMonitorActionRequest,
-            this.SendRemoteCraftingMonitorSnapshotRequest);
+            (networkId, endpointId) => this.SendRemoteCraftingMonitorSnapshotRequest(
+                networkId,
+                endpointId,
+                snapshot.MenuSessionId,
+                notify: false));
+    }
+
+    private static TerminalSnapshotRequestMessage CreateSnapshotRequest(TerminalActionRequestMessage request)
+    {
+        return new TerminalSnapshotRequestMessage
+        {
+            MenuSessionId = request.MenuSessionId,
+            RequestSequence = request.RequestSequence,
+            NetworkId = request.NetworkId,
+            EndpointId = request.EndpointId,
+            EntryOffset = request.EntryOffset,
+            EntryLimit = request.EntryLimit
+        };
+    }
+
+    private static CraftingSnapshotRequestMessage CreateSnapshotRequest(CraftingActionRequestMessage request)
+    {
+        return new CraftingSnapshotRequestMessage
+        {
+            MenuSessionId = request.MenuSessionId,
+            RequestSequence = request.RequestSequence,
+            NetworkId = request.NetworkId,
+            EndpointId = request.EndpointId,
+            Batches = request.Batches,
+            QualityStrategy = request.QualityStrategy
+        };
+    }
+
+    private static CraftingMonitorSnapshotRequestMessage CreateSnapshotRequest(CraftingMonitorActionRequestMessage request)
+    {
+        return new CraftingMonitorSnapshotRequestMessage
+        {
+            MenuSessionId = request.MenuSessionId,
+            RequestSequence = request.RequestSequence,
+            NetworkId = request.NetworkId,
+            EndpointId = request.EndpointId,
+            HeldPattern = request.QueuePattern,
+            HeldCaskItemPrototype = request.CaskPipelineItemPrototype
+        };
     }
 
     private TerminalActionResponseMessage ExecuteTerminalActionRequest(TerminalActionRequestMessage request, long fromPlayerId)
@@ -3224,6 +3698,8 @@ internal sealed class NetworkInteractionService
         var response = new TerminalActionResponseMessage
         {
             TransactionId = request.TransactionId,
+            MenuSessionId = request.MenuSessionId,
+            RequestSequence = request.RequestSequence,
             NetworkId = request.NetworkId,
             ReturnedDepositItems = CloneTerminalPayloads(request.DepositItems)
         };
@@ -3240,7 +3716,7 @@ internal sealed class NetworkInteractionService
         {
             response.Success = false;
             response.Message = ModText.Get("multiplayer.requestPlayerOffline");
-            response.Snapshot = this.CreateTerminalSnapshotResponse(new TerminalSnapshotRequestMessage { NetworkId = request.NetworkId, EndpointId = request.EndpointId });
+            response.Snapshot = this.CreateTerminalSnapshotResponse(CreateSnapshotRequest(request));
             return response;
         }
 
@@ -3248,7 +3724,7 @@ internal sealed class NetworkInteractionService
         {
             response.Success = false;
             response.Message = endpointMessage;
-            response.Snapshot = this.CreateTerminalSnapshotResponse(new TerminalSnapshotRequestMessage { NetworkId = request.NetworkId, EndpointId = request.EndpointId });
+            response.Snapshot = this.CreateTerminalSnapshotResponse(CreateSnapshotRequest(request));
             return response;
         }
 
@@ -3290,7 +3766,7 @@ internal sealed class NetworkInteractionService
             this.transactionService.SaveNetworkState();
 
         this.LogGameplay($"action=terminal_action result={(success ? "success" : "fail")} player={DescribePlayer(player)} network={ShortId(request.NetworkId)} endpoint={ShortId(request.EndpointId)} requestAction={request.Action} amount={request.Amount:N0} tx={ShortId(request.TransactionId)} message={Quote(actionMessage)}");
-        response.Snapshot = this.CreateTerminalSnapshotResponse(new TerminalSnapshotRequestMessage { NetworkId = request.NetworkId, EndpointId = request.EndpointId });
+        response.Snapshot = this.CreateTerminalSnapshotResponse(CreateSnapshotRequest(request));
         return response;
     }
 
@@ -3428,6 +3904,8 @@ internal sealed class NetworkInteractionService
         var response = new CraftingActionResponseMessage
         {
             TransactionId = request.TransactionId,
+            MenuSessionId = request.MenuSessionId,
+            RequestSequence = request.RequestSequence,
             NetworkId = request.NetworkId
         };
 
@@ -3443,9 +3921,7 @@ internal sealed class NetworkInteractionService
         {
             response.Success = false;
             response.Message = ModText.Get("multiplayer.requestPlayerOffline");
-            response.Snapshot = this.CreateCraftingSnapshotResponse(
-                new CraftingSnapshotRequestMessage { NetworkId = request.NetworkId, EndpointId = request.EndpointId, Batches = request.Batches, QualityStrategy = request.QualityStrategy },
-                fromPlayerId);
+            response.Snapshot = this.CreateCraftingSnapshotResponse(CreateSnapshotRequest(request), fromPlayerId);
             return response;
         }
 
@@ -3453,9 +3929,7 @@ internal sealed class NetworkInteractionService
         {
             response.Success = false;
             response.Message = endpointMessage;
-            response.Snapshot = this.CreateCraftingSnapshotResponse(
-                new CraftingSnapshotRequestMessage { NetworkId = request.NetworkId, EndpointId = request.EndpointId, Batches = request.Batches, QualityStrategy = request.QualityStrategy },
-                fromPlayerId);
+            response.Snapshot = this.CreateCraftingSnapshotResponse(CreateSnapshotRequest(request), fromPlayerId);
             return response;
         }
 
@@ -3467,9 +3941,7 @@ internal sealed class NetworkInteractionService
         {
             response.Success = false;
             response.Message = ModText.Get("remoteCrafting.recipeUnknown");
-            response.Snapshot = this.CreateCraftingSnapshotResponse(
-                new CraftingSnapshotRequestMessage { NetworkId = request.NetworkId, EndpointId = request.EndpointId, Batches = request.Batches, QualityStrategy = request.QualityStrategy },
-                fromPlayerId);
+            response.Snapshot = this.CreateCraftingSnapshotResponse(CreateSnapshotRequest(request), fromPlayerId);
             return response;
         }
 
@@ -3481,9 +3953,7 @@ internal sealed class NetworkInteractionService
             request.QualityStrategy,
             out var actionMessage);
         response.Message = actionMessage;
-        response.Snapshot = this.CreateCraftingSnapshotResponse(
-            new CraftingSnapshotRequestMessage { NetworkId = request.NetworkId, EndpointId = request.EndpointId, Batches = request.Batches, QualityStrategy = request.QualityStrategy },
-            fromPlayerId);
+        response.Snapshot = this.CreateCraftingSnapshotResponse(CreateSnapshotRequest(request), fromPlayerId);
         this.LogGameplay($"action=crafting_terminal_action result={(response.Success ? "success" : "fail")} player={DescribePlayer(player)} network={ShortId(request.NetworkId)} endpoint={ShortId(request.EndpointId)} recipe={Quote(request.RecipeName)} batches={request.Batches:N0} quality={request.QualityStrategy} tx={ShortId(request.TransactionId)} message={Quote(actionMessage)}");
         return response;
     }
@@ -3493,6 +3963,8 @@ internal sealed class NetworkInteractionService
         var response = new CraftingMonitorActionResponseMessage
         {
             TransactionId = request.TransactionId,
+            MenuSessionId = request.MenuSessionId,
+            RequestSequence = request.RequestSequence,
             NetworkId = request.NetworkId
         };
 
@@ -3507,7 +3979,7 @@ internal sealed class NetworkInteractionService
         {
             response.Success = false;
             response.Message = endpointMessage;
-            response.Snapshot = this.CreateCraftingMonitorSnapshotResponse(new CraftingMonitorSnapshotRequestMessage { NetworkId = request.NetworkId, EndpointId = request.EndpointId });
+            response.Snapshot = this.CreateCraftingMonitorSnapshotResponse(CreateSnapshotRequest(request));
             return response;
         }
 
@@ -3545,13 +4017,7 @@ internal sealed class NetworkInteractionService
                     response.Success = false;
                     response.RequiresConfirmation = true;
                     response.Message = ModText.Get("craftingMonitor.longJob.confirmHud");
-                    response.Snapshot = this.CreateCraftingMonitorSnapshotResponse(new CraftingMonitorSnapshotRequestMessage
-                    {
-                        NetworkId = request.NetworkId,
-                        EndpointId = request.EndpointId,
-                        HeldPattern = request.QueuePattern,
-                        HeldCaskItemPrototype = request.CaskPipelineItemPrototype
-                    });
+                    response.Snapshot = this.CreateCraftingMonitorSnapshotResponse(CreateSnapshotRequest(request));
                     return response;
                 }
 
@@ -3573,13 +4039,7 @@ internal sealed class NetworkInteractionService
 
         response.Success = success;
         response.Message = actionMessage;
-        response.Snapshot = this.CreateCraftingMonitorSnapshotResponse(new CraftingMonitorSnapshotRequestMessage
-        {
-            NetworkId = request.NetworkId,
-            EndpointId = request.EndpointId,
-            HeldPattern = request.QueuePattern,
-            HeldCaskItemPrototype = request.CaskPipelineItemPrototype
-        });
+        response.Snapshot = this.CreateCraftingMonitorSnapshotResponse(CreateSnapshotRequest(request));
         var player = Game1.GetPlayer(fromPlayerId, onlyOnline: true);
         this.LogGameplay($"action=crafting_monitor_action result={(success ? "success" : "fail")} player={DescribePlayer(player, fromPlayerId)} network={ShortId(request.NetworkId)} endpoint={ShortId(request.EndpointId)} requestAction={request.Action} job={(request.JobId.HasValue ? ShortId(request.JobId.Value) : "none")} batches={request.Batches:N0} tx={ShortId(request.TransactionId)} message={Quote(actionMessage)}");
         return response;
@@ -3591,6 +4051,8 @@ internal sealed class NetworkInteractionService
         {
             return new TerminalSnapshotResponseMessage
             {
+                MenuSessionId = request.MenuSessionId,
+                RequestSequence = request.RequestSequence,
                 NetworkId = request.NetworkId,
                 EndpointId = request.EndpointId,
                 Success = false,
@@ -3602,6 +4064,8 @@ internal sealed class NetworkInteractionService
         {
             return new TerminalSnapshotResponseMessage
             {
+                MenuSessionId = request.MenuSessionId,
+                RequestSequence = request.RequestSequence,
                 NetworkId = request.NetworkId,
                 EndpointId = request.EndpointId,
                 Success = false,
@@ -3621,6 +4085,8 @@ internal sealed class NetworkInteractionService
 
         return new TerminalSnapshotResponseMessage
         {
+            MenuSessionId = request.MenuSessionId,
+            RequestSequence = request.RequestSequence,
             NetworkId = request.NetworkId,
             EndpointId = request.EndpointId,
             Success = true,
@@ -3669,6 +4135,8 @@ internal sealed class NetworkInteractionService
     {
         var response = new CraftingSnapshotResponseMessage
         {
+            MenuSessionId = request.MenuSessionId,
+            RequestSequence = request.RequestSequence,
             NetworkId = request.NetworkId,
             EndpointId = request.EndpointId,
             Batches = Math.Max(1, request.Batches),
@@ -3729,6 +4197,8 @@ internal sealed class NetworkInteractionService
         {
             return new CraftingMonitorSnapshotResponseMessage
             {
+                MenuSessionId = request.MenuSessionId,
+                RequestSequence = request.RequestSequence,
                 NetworkId = request.NetworkId,
                 EndpointId = request.EndpointId,
                 Success = false,
@@ -3740,6 +4210,8 @@ internal sealed class NetworkInteractionService
         {
             return new CraftingMonitorSnapshotResponseMessage
             {
+                MenuSessionId = request.MenuSessionId,
+                RequestSequence = request.RequestSequence,
                 NetworkId = request.NetworkId,
                 EndpointId = request.EndpointId,
                 Success = false,
@@ -3750,6 +4222,8 @@ internal sealed class NetworkInteractionService
         var caskItem = this.TryCreateCaskPipelineItem(request.HeldCaskItemPrototype);
         return new CraftingMonitorSnapshotResponseMessage
         {
+            MenuSessionId = request.MenuSessionId,
+            RequestSequence = request.RequestSequence,
             NetworkId = request.NetworkId,
             EndpointId = request.EndpointId,
             Success = true,
@@ -4123,8 +4597,8 @@ internal sealed class NetworkInteractionService
 
     private EndpointType? GetEndpointType(SObject target)
     {
-        if (target is Chest chest)
-            return IsSupportedNetworkChest(chest) ? EndpointType.Chest : null;
+        if (target is Chest)
+            return null;
 
         return target.QualifiedItemId switch
         {
@@ -4148,11 +4622,6 @@ internal sealed class NetworkInteractionService
             "(BC)" + ModItemCatalog.CraftingMonitor => EndpointType.CraftingMonitor,
             _ => target.bigCraftable.Value ? EndpointType.Machine : null
         };
-    }
-
-    private static bool IsSupportedNetworkChest(Chest chest)
-    {
-        return chest.SpecialChestType == Chest.SpecialChestTypes.None;
     }
 
     private NetworkEndpoint CreateEndpoint(Guid endpointId, GameLocation location, Vector2 tile, EndpointType type)

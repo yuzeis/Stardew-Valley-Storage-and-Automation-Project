@@ -9,7 +9,7 @@ namespace SVSAP.UI;
 
 internal sealed class CraftingConfirmationMenu : IClickableMenu
 {
-    private const int Pad = 28;
+    private const int Pad = SVSAPMenuWidgets.Pad;
     private const int LineHeight = 28;
 
     private readonly IClickableMenu parent;
@@ -21,6 +21,7 @@ internal sealed class CraftingConfirmationMenu : IClickableMenu
     private readonly ClickableComponent cancelButton;
     private readonly Rectangle contentBounds;
     private int scrollOffset;
+    private bool parentRestored;
 
     public CraftingConfirmationMenu(IClickableMenu parent, string title, IReadOnlyList<string> lines, Action onConfirm)
         : this(parent, title, lines.Select(line => new ConfirmationRow(line, PixelStatus.Idle)).ToList(), true, onConfirm)
@@ -44,10 +45,10 @@ internal sealed class CraftingConfirmationMenu : IClickableMenu
         bool canConfirm,
         Action onConfirm)
         : base(
-            x: Math.Max(0, (Game1.uiViewport.Width - 720) / 2),
-            y: Math.Max(0, (Game1.uiViewport.Height - 520) / 2),
-            width: 720,
-            height: 520,
+            x: Math.Max(0, (Game1.uiViewport.Width - GetMenuWidth()) / 2),
+            y: Math.Max(0, (Game1.uiViewport.Height - GetMenuHeight()) / 2),
+            width: GetMenuWidth(),
+            height: GetMenuHeight(),
             showUpperRightCloseButton: true)
     {
         this.parent = parent;
@@ -55,17 +56,32 @@ internal sealed class CraftingConfirmationMenu : IClickableMenu
         this.rows = rows;
         this.canConfirm = canConfirm;
         this.onConfirm = onConfirm;
-        this.contentBounds = new Rectangle(this.xPositionOnScreen + Pad, this.yPositionOnScreen + 92, this.width - Pad * 2, this.height - 168);
-        this.cancelButton = new ClickableComponent(new Rectangle(this.xPositionOnScreen + this.width - 296, this.yPositionOnScreen + this.height - 60, 120, 42), "cancel", ModText.Get("craftingTerminal.confirm.cancel"));
-        this.confirmButton = new ClickableComponent(new Rectangle(this.xPositionOnScreen + this.width - 164, this.yPositionOnScreen + this.height - 60, 120, 42), "confirm", ModText.Get("craftingTerminal.confirm.craft"));
+        var buttonY = this.yPositionOnScreen + this.height - Pad - 42;
+        this.contentBounds = new Rectangle(this.xPositionOnScreen + Pad, this.yPositionOnScreen + 116, this.width - Pad * 2, buttonY - this.yPositionOnScreen - 128);
+        this.cancelButton = new ClickableComponent(new Rectangle(this.xPositionOnScreen + this.width - Pad - 252, buttonY, 120, 42), "cancel", ModText.Get("craftingTerminal.confirm.cancel"));
+        this.confirmButton = new ClickableComponent(new Rectangle(this.xPositionOnScreen + this.width - Pad - 120, buttonY, 120, 42), "confirm", ModText.Get("craftingTerminal.confirm.craft"));
+        (this.parent as ISearchTextInputOwner)?.SuspendSearchInput();
         SVSAPMenuWidgets.PositionCloseButton(this.upperRightCloseButton, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
     }
+
+    private static int GetMenuWidth() => Math.Max(1, Math.Min(720, Game1.uiViewport.Width - 32));
+
+    private static int GetMenuHeight() => Math.Max(1, Math.Min(520, Game1.uiViewport.Height - 32));
 
     public override void draw(SpriteBatch b)
     {
         SVSAPMenuWidgets.DrawStardewAE2Frame(b, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
-        b.DrawString(Game1.dialogueFont, ModText.Get("craftingTerminal.confirm.title"), new Vector2(this.xPositionOnScreen + Pad + 12, this.yPositionOnScreen + 24), Game1.textColor);
-        b.DrawString(Game1.smallFont, this.title, new Vector2(this.xPositionOnScreen + Pad + 12, this.yPositionOnScreen + 62), Game1.textColor);
+        SVSAPMenuWidgets.DrawFittedTitle(
+            b,
+            ModText.Get("craftingTerminal.confirm.title"),
+            new Rectangle(this.xPositionOnScreen + Pad + 12, this.yPositionOnScreen + 18, this.width - Pad * 2 - 68, 40),
+            Game1.textColor);
+        SVSAPMenuWidgets.DrawFittedLine(
+            b,
+            this.title,
+            new Rectangle(this.xPositionOnScreen + Pad + 12, this.yPositionOnScreen + 80, this.width - Pad * 2 - 24, 24),
+            Game1.textColor,
+            horizontalPadding: 0);
 
         SVSAPMenuWidgets.DrawInsetBox(b, this.contentBounds);
         var maxLines = Math.Max(1, (this.contentBounds.Height - 20) / LineHeight);
@@ -106,6 +122,12 @@ internal sealed class CraftingConfirmationMenu : IClickableMenu
 
     public override void receiveLeftClick(int x, int y, bool playSound = true)
     {
+        if (this.upperRightCloseButton?.containsPoint(x, y) == true)
+        {
+            base.receiveLeftClick(x, y, playSound);
+            return;
+        }
+
         base.receiveLeftClick(x, y, playSound);
         if (this.cancelButton.containsPoint(x, y))
         {
@@ -159,13 +181,23 @@ internal sealed class CraftingConfirmationMenu : IClickableMenu
 
     protected override void cleanupBeforeExit()
     {
-        Game1.activeClickableMenu = this.parent;
+        this.RestoreParent();
     }
 
     private void CloseToParent(string sound)
     {
-        Game1.activeClickableMenu = this.parent;
+        this.RestoreParent();
         Game1.playSound(sound);
+    }
+
+    private void RestoreParent()
+    {
+        if (this.parentRestored)
+            return;
+
+        this.parentRestored = true;
+        Game1.activeClickableMenu = this.parent;
+        (this.parent as ISearchTextInputOwner)?.ResumeSearchInput();
     }
 
     private static IReadOnlyList<ConfirmationRow> BuildRows(

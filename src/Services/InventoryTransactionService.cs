@@ -870,25 +870,13 @@ internal sealed class InventoryTransactionService
     private IEnumerable<Chest> GetWritableChests(NetworkData network)
     {
         var yielded = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var endpoint in network.Endpoints.Where(endpoint => endpoint.Active && (endpoint.Type == EndpointType.Chest || endpoint.Type == EndpointType.StorageInterface)))
+        foreach (var endpoint in network.Endpoints.Where(endpoint => endpoint.Active && endpoint.Type == EndpointType.StorageInterface))
         {
             var location = this.scanner.GetLocation(endpoint.LocationName);
             if (location is null)
                 continue;
 
             var endpointTile = new Vector2(endpoint.TileX, endpoint.TileY);
-            if (endpoint.Type == EndpointType.Chest)
-            {
-                if (!TryGetWritableChest(location, endpointTile, out var chest))
-                    continue;
-
-                if (!yielded.Add(GetChestKey(location, endpointTile)))
-                    continue;
-
-                yield return chest;
-                continue;
-            }
-
             foreach (var chestInfo in GetAdjacentWritableChests(location, endpointTile))
             {
                 if (!yielded.Add(GetChestKey(location, chestInfo.Tile)))

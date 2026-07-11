@@ -52,7 +52,7 @@ internal static class ModItemCatalog
         new(AdvancedCircuit, "Advanced Circuit", "进阶电路", "中后期网络设备和合成矩阵的核心元件。", 1200, 337, -15, new[] { "item_material", "color_purple" }),
         new(EliteCircuit, "Elite Circuit", "高级电路", "终局设备的核心元件。", 5000, 74, -15, new[] { "item_material", "color_prismatic" }),
         new(NetworkCable, "Network Cable", "网络线缆", "连接网络核心、终端和接口的线缆。", 20, 338, -15, new[] { "item_material", "color_gray" }),
-        new(LinkTool, "Link Tool", "链接工具", "右键箱子或机器，将其绑定到指定网络。", 750, 787, -15, new[] { "item_tool", "color_blue" }),
+        new(LinkTool, "Link Tool", "链接工具", "右键网络设备或机器绑定网络；箱子需要放在存储接口旁边。", 750, 787, -15, new[] { "item_tool", "color_blue" }),
         new(BlankPattern, "Blank Pattern", "空白样板", "用于编码合成样板或处理样板。", 50, 771, -15, new[] { "item_material", "color_white" }),
         new(CraftingPattern, "Crafting Pattern", "合成样板", "保存一条普通合成配方。", 100, 771, -15, new[] { "item_material", "pattern_item" }),
         new(ProcessingPattern, "Processing Pattern", "处理样板", "保存一条机器处理配方。", 100, 771, -15, new[] { "item_material", "pattern_item" }),
@@ -63,9 +63,9 @@ internal static class ModItemCatalog
         new(StorageCell1024K, "1024K Item Storage Cell", "1024K 物品存储元件", "SVSAP 字节存储元件，容量 1,048,576 字节，单一物品约 8,388,544 件。", 120000, 337, -15, new[] { "item_material", "storage_item" }),
         new(StorageCell4096K, "4096K Item Storage Cell", "4096K 物品存储元件", "SVSAP 字节存储元件，容量 4,194,304 字节，单一物品约 33,554,368 件。", 400000, 74, -15, new[] { "item_material", "storage_item" }),
         new(FilterCard, "Filter Card", "物品过滤卡", "导入器和导出器的白名单/黑名单升级。", 150, 771, -15, new[] { "item_material", "upgrade_card" }),
-        new(CapacityCard, "Capacity Card", "容量升级卡", "提高导入/导出每次处理数量。", 800, 336, -15, new[] { "item_material", "upgrade_card" }),
-        new(SpeedCard, "Speed Card", "速度升级卡", "提高导入/导出频率。", 1200, 787, -15, new[] { "item_material", "upgrade_card" }),
-        new(QualityCard, "Quality Card", "品质控制卡", "控制普通、银、金、铱品质优先级。", 1200, 72, -15, new[] { "item_material", "upgrade_card" }),
+        new(CapacityCard, "Capacity Card", "容量升级卡", "提高物流搬运量，并为单方块处理机增加完成品缓冲容量。", 800, 336, -15, new[] { "item_material", "upgrade_card" }),
+        new(SpeedCard, "Speed Card", "速度升级卡", "提高物流频率，并加快单方块处理机的加工速度。", 1200, 787, -15, new[] { "item_material", "upgrade_card" }),
+        new(QualityCard, "Quality Card", "品质控制卡", "控制物流品质优先级；安装在单方块酒桶后，新装载的任务可保留原料品质。", 1200, 72, -15, new[] { "item_material", "upgrade_card" }),
         new(OreDictionaryCard, "Ore Dictionary Card", "矿典卡", "让导入器和导出器按矿典/标签等价规则匹配过滤物品。", 1600, 771, -15, new[] { "item_material", "upgrade_card", "ore_dictionary_card" })
     };
 

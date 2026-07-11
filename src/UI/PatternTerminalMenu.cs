@@ -18,6 +18,7 @@ internal sealed class PatternTerminalMenu : IClickableMenu
     private Rectangle gridArea;
     private string search = string.Empty;
     private readonly TextBox searchInput;
+    private readonly SVSAPItemIconCache itemIconCache = new();
 
     public PatternTerminalMenu(PatternEncodingService patternEncodingService)
         : base(
@@ -41,10 +42,10 @@ internal sealed class PatternTerminalMenu : IClickableMenu
     {
         var innerX = this.xPositionOnScreen + SVSAPMenuWidgets.Pad;
         var innerW = this.width - SVSAPMenuWidgets.Pad * 2;
-        var top = this.yPositionOnScreen + 24;
-        this.searchBox = new Rectangle(innerX, top + 48, 360, 40);
+        var top = this.yPositionOnScreen + SVSAPMenuWidgets.HeaderTopOffset;
+        this.searchBox = new Rectangle(innerX, top + 48, Math.Min(360, innerW), 40);
 
-        var buttonY = this.yPositionOnScreen + this.height - 54;
+        var buttonY = this.yPositionOnScreen + this.height - SVSAPMenuWidgets.Pad - 42;
         this.modeButtons.Add(new ClickableComponent(new Rectangle(innerX, buttonY, 120, 42), PatternKind.Crafting.ToString(), ModText.Get("patternTerminal.mode.crafting")));
         this.modeButtons.Add(new ClickableComponent(new Rectangle(innerX + 132, buttonY, 132, 42), PatternKind.Processing.ToString(), ModText.Get("patternTerminal.mode.processing")));
 
@@ -62,24 +63,29 @@ internal sealed class PatternTerminalMenu : IClickableMenu
         var patterns = this.GetVisiblePatterns();
         this.patternGrid.ClampScroll(patterns.Count);
         var innerX = this.xPositionOnScreen + SVSAPMenuWidgets.Pad;
-        var top = this.yPositionOnScreen + 24;
-        b.DrawString(Game1.dialogueFont, ModText.Format("patternTerminal.title", FormatPatternKind(this.mode), patterns.Count), new Vector2(innerX + 12, top), Game1.textColor);
+        var top = this.yPositionOnScreen + SVSAPMenuWidgets.HeaderTopOffset;
+        SVSAPMenuWidgets.DrawFittedTitle(
+            b,
+            ModText.Format("patternTerminal.title", FormatPatternKind(this.mode), patterns.Count),
+            new Rectangle(innerX + 12, top, this.width - SVSAPMenuWidgets.Pad * 2 - 68, 42),
+            Game1.textColor);
         SVSAPMenuWidgets.DrawSearchBox(b, this.searchBox, this.search);
-        b.DrawString(Game1.smallFont, ModText.Get("patternTerminal.help"), new Vector2(this.searchBox.Right + 24, this.searchBox.Y + 10), Game1.textColor);
 
         this.patternGrid.Draw(
             b,
             patterns,
-            pattern => SVSAPMenuWidgets.CreateIconItem(pattern.Outputs.FirstOrDefault(), pattern.Outputs.FirstOrDefault()?.Count ?? 1),
+            pattern => this.itemIconCache.GetOrCreate(
+                pattern.PatternId.ToString("N"),
+                () => SVSAPMenuWidgets.CreateIconItem(pattern.Outputs.FirstOrDefault(), pattern.Outputs.FirstOrDefault()?.Count ?? 1)),
             pattern => pattern.Outputs.FirstOrDefault()?.Count ?? 1,
             getBadge: pattern => pattern.Kind == PatternKind.Processing ? ModText.Get("patternTerminal.badge.processing") : null);
 
         if (patterns.Count == 0)
         {
-            b.DrawString(
-                Game1.smallFont,
+            SVSAPMenuWidgets.DrawFittedLine(
+                b,
                 ModText.Get("patternTerminal.empty"),
-                new Vector2(this.gridArea.X + 8, this.gridArea.Y + 8),
+                new Rectangle(this.gridArea.X + 8, this.gridArea.Y + 8, this.gridArea.Width - 16, 30),
                 Color.DarkSlateGray);
         }
 
@@ -93,6 +99,12 @@ internal sealed class PatternTerminalMenu : IClickableMenu
 
     public override void receiveLeftClick(int x, int y, bool playSound = true)
     {
+        if (this.upperRightCloseButton?.containsPoint(x, y) == true)
+        {
+            base.receiveLeftClick(x, y, playSound);
+            return;
+        }
+
         base.receiveLeftClick(x, y, playSound);
 
         foreach (var button in this.modeButtons)

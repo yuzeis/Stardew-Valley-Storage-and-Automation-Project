@@ -8,7 +8,7 @@ using StardewValley.Menus;
 
 namespace SVSAP.UI;
 
-internal sealed class CraftingTerminalMenu : IClickableMenu
+internal sealed class CraftingTerminalMenu : IClickableMenu, ISearchTextInputOwner
 {
     private const int ViewRefreshTicks = 30;
 
@@ -63,12 +63,12 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
     {
         var innerX = this.xPositionOnScreen + SVSAPMenuWidgets.Pad;
         var innerW = this.width - SVSAPMenuWidgets.Pad * 2;
-        var top = this.yPositionOnScreen + 24;
-        this.searchBox = new Rectangle(innerX, top + 48, 360, 40);
+        var top = this.yPositionOnScreen + SVSAPMenuWidgets.HeaderTopOffset;
+        this.searchBox = new Rectangle(innerX, top + 48, Math.Min(360, Math.Max(180, innerW - 260)), 40);
 
         var isTwoRow = this.width < 900;
-        var buttonY1 = this.yPositionOnScreen + this.height - (isTwoRow ? 98 : 54);
-        var buttonY2 = this.yPositionOnScreen + this.height - 54;
+        var buttonY2 = this.yPositionOnScreen + this.height - SVSAPMenuWidgets.Pad - 42;
+        var buttonY1 = isTwoRow ? buttonY2 - 44 : buttonY2;
 
         var buttonX = innerX;
         foreach (var amount in new[] { 1, 5, 10, 25, 100 })
@@ -107,30 +107,31 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
         this.recipeGrid.ClampScroll(visible.Count);
         var snapshot = this.GetCachedSnapshot();
         var innerX = this.xPositionOnScreen + SVSAPMenuWidgets.Pad;
-        var top = this.yPositionOnScreen + 24;
+        var top = this.yPositionOnScreen + SVSAPMenuWidgets.HeaderTopOffset;
         var title = ModText.Format("craftingTerminal.title", this.network.Name, visible.Count, snapshot.Entries.Count);
-        b.DrawString(Game1.dialogueFont, title, new Vector2(innerX + 12, top), Game1.textColor);
+        SVSAPMenuWidgets.DrawFittedTitle(b, title, new Rectangle(innerX + 12, top, this.width - SVSAPMenuWidgets.Pad * 2 - 68, 42), Game1.textColor);
 
         SVSAPMenuWidgets.DrawSearchBox(b, this.searchBox, this.search);
-        b.DrawString(
-            Game1.smallFont,
+        SVSAPMenuWidgets.DrawFittedLine(
+            b,
             ModText.Format("craftingTerminal.summary", this.batches, this.GetQualityStrategyLabel()),
-            new Vector2(this.searchBox.Right + 24, this.searchBox.Y + 10),
-            Game1.textColor);
+            new Rectangle(this.searchBox.Right + 16, this.searchBox.Y, Math.Max(1, this.xPositionOnScreen + this.width - SVSAPMenuWidgets.Pad - this.searchBox.Right - 16), this.searchBox.Height),
+            Game1.textColor,
+            horizontalPadding: 0);
 
         this.recipeGrid.Draw(
             b,
             visible,
             recipe => recipe.OutputPrototype,
-            _ => 0,
+            recipe => recipe.OutputCount,
             recipe => !this.GetAvailability(recipe).CanCraft);
 
         if (visible.Count == 0)
         {
-            b.DrawString(
-                Game1.smallFont,
+            SVSAPMenuWidgets.DrawFittedLine(
+                b,
                 ModText.Get("craftingTerminal.empty"),
-                new Vector2(this.gridArea.X + 8, this.gridArea.Y + 8),
+                new Rectangle(this.gridArea.X + 8, this.gridArea.Y + 8, this.gridArea.Width - 16, 30),
                 Color.DarkSlateGray);
         }
 
@@ -154,6 +155,12 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
 
     public override void receiveLeftClick(int x, int y, bool playSound = true)
     {
+        if (this.upperRightCloseButton?.containsPoint(x, y) == true)
+        {
+            base.receiveLeftClick(x, y, playSound);
+            return;
+        }
+
         base.receiveLeftClick(x, y, playSound);
 
         foreach (var button in this.amountButtons)
@@ -217,9 +224,13 @@ internal sealed class CraftingTerminalMenu : IClickableMenu
 
     protected override void cleanupBeforeExit()
     {
-        SVSAPMenuWidgets.ReleaseSearchTextBox(this.searchInput);
+        this.SuspendSearchInput();
         base.cleanupBeforeExit();
     }
+
+    public void SuspendSearchInput() => SVSAPMenuWidgets.ReleaseSearchTextBox(this.searchInput);
+
+    public void ResumeSearchInput() => SVSAPMenuWidgets.ActivateSearchTextBox(this.searchInput);
 
     public override void receiveScrollWheelAction(int direction)
     {

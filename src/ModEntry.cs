@@ -27,6 +27,7 @@ public sealed class ModEntry : Mod
 #if DEBUG
     private RuntimeSelfTestService runtimeSelfTestService = null!;
     private RouteSVSAPE2EService routeSVSAPE2EService = null!;
+    private GuiScreenshotE2EService guiScreenshotE2EService = null!;
 #endif
     private SvsapApi? api;
     private readonly HashSet<long> warnedMissingSVSAPPeers = new();
@@ -102,6 +103,17 @@ public sealed class ModEntry : Mod
             this.networkRepository,
             this.networkInteractionService,
             this.storageCellInitializer);
+        this.guiScreenshotE2EService = new GuiScreenshotE2EService(
+            helper,
+            this.Monitor,
+            inventoryScanner,
+            inventoryTransactionService,
+            craftingRecipeService,
+            patternEncodingService,
+            this.storageDriveService,
+            this.transferBusService,
+            this.patternProviderService,
+            this.patternExecutionService);
 #endif
 
         helper.Events.Content.AssetRequested += contentInjector.OnAssetRequested;
@@ -147,6 +159,7 @@ public sealed class ModEntry : Mod
 
 #if DEBUG
         this.routeSVSAPE2EService.Start();
+        this.guiScreenshotE2EService.Start();
 #endif
         this.Monitor.Log("Stardew Valley Storage and Automation Project loaded. Storage network, digital cells, transfer buses, processing pipelines, and autocrafting services are active.", LogLevel.Info);
     }

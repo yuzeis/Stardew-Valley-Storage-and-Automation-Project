@@ -1,13 +1,144 @@
 # SVSAP / SVSAPME 最新测试报告
 
-更新时间：2026-07-10 21:05 CST
+更新时间：2026-07-11 21:14 CST
 
-版本口径：`1.4.0-alpha.1.2`
-展示名：`Ver1.4.0Alpha1 Hotfix2`
+版本口径：`1.4.1-rc1.0`
+展示名：`Ver1.4.1-rc1.0`
 
 ## 总结
 
-当前为 Ver1.4.0 Alpha1 Hotfix2 的审计整改与发布候选。已修复远程物品 escrow 的丢失/复制窗口、主机异常无响应、多人终端状态串扰、菜单逐帧高开销解码，以及单方块农场生产路径测试失真；当前源码已重新通过 Debug/Release 构建、i18n、SMAPI 自测、FullMatrix、P0/P1 单人/多人和 SVSAP RouteA 多人门禁。自动门禁已全绿，最终视觉与操作手感仍由用户在实际存档中验收。
+当前进入 **Ver1.4.1-rc1.0 发布候选发布流程**。本轮已增加单格铲除与清空全部地块，两类破坏性操作均有本地/远程确认提示，明确不返还作物、肥料、生长进度与地块锁；清空操作保留输入缓冲、模块、过滤和 AutoPull 设置，并提示 AutoPull 可能重新播种。Fable 报告中可由源码确认的 P1/P2/P3 项已全部整改，包括跨会话持久化幂等账本、真实箱锁、咖啡与品质卡自动输入、畸形缓冲恢复、终端/扫描性能及响应缓存一致性。`1.4.1-rc1.0` 版本字段更新后，双项目 Debug/Release、i18n 与发布包静态检查已通过；用户于 2026-07-11 21:13 明确要求跳过本轮 SMAPI 自测、FullMatrix、P0/P1、RouteA 与 GUI 截图复跑并直接推送，因此不得把旧版本运行时证据表述为本版本的新验证结果。
+
+## 2026-07-11 21:14 RC1 发布门禁豁免记录
+
+| 项目 | 结果 | 说明 |
+|---|---|---|
+| Debug / Release | PASS | SVSAP 与 SVSAPME 两种配置均 0 warning / 0 error |
+| i18n parity | PASS | SVSAP `611/611`、SVSAPME `559/559`；missing/extra、placeholder mismatch、literal key missing 与 `en.json` 中文字符均为 0 |
+| Release zip 静态检查 | PASS | 两包均为单一正确 mod root，manifest/DLL/default+en i18n 完整，版本为 `1.4.1-rc1.0`，无 config、源码、构建、E2E 或备份污染 |
+| SMAPI / E2E / GUI 复跑 | WAIVED | 用户明确要求无需验证、直接推送；本版本不新增运行时通过声明 |
+| 前一版最终源码运行时证据 | REFERENCE ONLY | `1.4.0-alpha.1.2` 最终源码曾通过 selftest 35/35 与 43/43、FullMatrix 48/48、GUI 31/31、P0/P1 单人/多人及 RouteA；仅作风险背景，不替代 RC1 复跑 |
+
+## 2026-07-11 19:56 农场铲除与 Fable 审查整改验证
+
+| 项目 | 结果 | 证据 |
+|---|---|---|
+| 发布状态 | FROZEN | 未上传、未更新 live Mods、未复制桌面对外包；构建自动产生的 zip 仅为工作区中间产物 |
+| 单格铲除 | PASS | 本地与远程菜单提供铲除模式；点击目标格后弹出确认框，仅删除该格作物与锁定，不返还投入物，不影响其他地块 |
+| 清空全部 | PASS | 清除全部作物和地块锁；确认框列明已种植数、锁定数、无返还与 AutoPull 重播种风险；保留输入缓冲、模块、过滤、自动输入和自动输出设置 |
+| 多人权限 | PASS | farmhand 只发送主机权威动作；主机校验机器、地块索引与当前状态，成功后广播新快照；重复清空无副作用 |
+| P1 跨会话幂等 | PASS | SVSAPME schema 7 持久化已执行机器动作；SVSAP schema 3 分别持久化终端存入与结构消费；同 ActionId/RequestId 重放返回既有终局，不再次消费，载荷不匹配被拒绝 |
+| P2 输入与恢复 | PASS | 处理机 AutoPull 使用足量探测栈，咖啡 5 件配方可启动；酒桶品质卡不再被自动输入品质限制抵消；畸形缓冲逐项清理并恢复可回收物，单台机器异常不阻断其余机器 |
+| P2 箱子互斥 | PASS | 导入/导出改用真实 `NetMutex.RequestLock`，同一箱子 pending 去重并在 finally 释放；回调执行前重新校验机器状态、朝向与目标箱 |
+| P3 性能与一致性 | PASS | 终端筛选/排序按版本缓存；库存扫描改字典桶索引；移除新存档 `DisplayName`；SDK 固定 8.0.416；响应缓存统一 first-write；离线酒桶更新时间归位 |
+| Debug / Release | PASS | SVSAP 与 SVSAPME 两种配置均 0 warning / 0 error |
+| i18n parity | PASS | SVSAP `611/611`、SVSAPME `559/559`；missing/extra 0、placeholder mismatch 0、literal key missing 0、`en.json` 中文字符 0 |
+| 隔离 SMAPI 自测 | PASS | `e2e-runs/farm-clear-audit-exact-final-selftest-20260711-195637/SMAPI-latest-selftest.txt`：SVSAP `35/35`、SVSAPME `43/43` |
+| FullMatrix | PASS | `e2e-runs/farm-clear-audit-exact-final-full-gui-20260711-194653/full-matrix-complete.json`：`pass=true`，`48/48`；case 94/95 分别覆盖铲除/清空与咖啡/品质卡 AutoPull |
+| GUI 截图硬门禁 | PASS | 同目录 `gui-capture-complete.json`：`31/31`、31 个唯一 SHA256；17 张 SVSAP 与 14 张 SVSAPME 图片均逐张复核，无越界、遮挡、图标/槽位错位或异常放大文字 |
+| P0/P1 单人 | PASS | `e2e-runs/farm-clear-audit-final2-p0p1-single-20260711-192355/single-complete.json`：`pass=true`，`7/7` |
+| P0/P1 多人 | PASS | `e2e-runs/farm-clear-audit-final3-p0p1-multi-20260711-193457`：host `pass=true`、`5/5`，client complete |
+| RouteA 多人 | PASS | `e2e-runs/farm-clear-audit-final3-routea-20260711-193956`：host/client complete，client `verifiedHandSwitches=4`、`stage=100` |
+
+本轮行为口径：
+
+- “铲除”是明确的放弃操作，不返还种子、肥料、作物或已累计进度；这避免把农场机器变成无损重置工具。
+- 单格铲除同时解除该格作物锁，清空全部同时清除全部地块锁；仅有锁而没有作物的地块也可被清空。
+- 自动输入保持开启时，空地块可能在后续农场循环中按当前过滤规则重新种植，确认框会在执行前明确提醒。
+- 本轮 P0/P1 首次复跑发现旧测试夹具未推进真实箱子异步 `NetMutex`；修正夹具后重新执行，生产路径没有退回伪同步锁。
+
+## 2026-07-11 17:13 处理机真实升级槽整改验证
+
+| 项目 | 结果 | 证据 |
+|---|---|---|
+| 发布状态 | FROZEN | 未上传、未更新 live Mods、未复制桌面对外包；本轮只修改与验证工作区源码 |
+| 槽位数量与界面 | PASS | 铜/钢/金/铱处理机分别为 `2/3/4/5` 槽；`SingleBlockProcessorMenu` 和 `RemoteMachineControlMenu` 均渲染实体卡、空槽幽灵图、状态线和 hover 说明，点击区域与绘制区域共用同一布局 |
+| 本地/远程交互 | PASS | 本地可从背包安装或点击槽位移除；farmhand 安装走 escrow，主机成功后确认消费，移除由主机返回物品 payload；非法卡、满槽和失败动作不扣物 |
+| 速度卡 | PASS | 每张速度卡令实际完成工作量增加 10%；余数跨 tick 保存，耗电按实际完成工作结算，不产生免费进度 |
+| 容量卡 | PASS | 网络输出受阻时，每张容量卡增加一整机批次容量，即 `tier.Slots` 件；缓冲满时不清除完成槽 |
+| 品质卡 | PASS | 仅酒桶可安装且最多一张；只使新装载的酒桶任务保留投入品质，避免中途安装追溯改写既有任务；陈酿桶因自身承担品质升级而拒绝品质卡 |
+| 存档与回收 | PASS | `MachineStateRepository` schema 6 初始化并规范化卡槽与速度余数；已安装卡纳入 recoverable payload、退役阻断和 reclaim 清理，拆机不会吞卡或复制 |
+| Debug / Release | PASS | SVSAP 与 SVSAPME 两种配置均 0 warning / 0 error |
+| i18n parity | PASS | SVSAP `610/610`、SVSAPME `544/544`；missing/extra 0、placeholder mismatch 0、literal key missing 0、`en.json` 中文字符 0 |
+| GUI 契约 | PASS | `GUI_CONTRACT_CHECK_OK session-ordering count-format compact-layout extended-backpack` |
+| 隔离 SMAPI 自测 | PASS | `e2e-runs/processor-upgrades-selftest-20260711-165653/SMAPI-latest-selftest.txt`：SVSAP `34/34`、SVSAPME `41/41` |
+| FullMatrix | PASS | `e2e-runs/processor-upgrades-full-gui-20260711-165818/full-matrix-complete.json`：`pass=true`，`46/46`；新增 case 72 验证实体槽位与三类卡片规则 |
+| GUI 截图硬门禁 | PASS | 同目录 `gui-capture-complete.json`：`30/30`、30 个唯一 SHA256；酒桶为 `3/5`、陈酿桶为 `2/5`、远程处理机为 `3/5` 测试状态，全部槽位均可见且未与端口、工作格或背包重叠 |
+| P0/P1 单人 | PASS | `e2e-runs/processor-upgrades-p0p1-single-20260711-170419/single-complete.json`：`pass=true`，`7/7` |
+| P0/P1 多人 | PASS | `e2e-runs/processor-upgrades-p0p1-multi-20260711-170918`：host `pass=true`、`5/5`，client complete |
+| RouteA 多人 | PASS | `e2e-runs/processor-upgrades-routea-20260711-171202`：host/client complete，client `verifiedHandSwitches=4`、`stage=100` |
+
+本轮行为口径：
+
+- 输入、输出、能源端口继续负责说明机器与网络的功能边界和实时状态；升级槽是另一组真实卡片库存，两者不再混为一谈。
+- 速度卡与容量卡可在物理槽位允许范围内重复安装；品质卡在酒桶中最多一张，陈酿桶明确拒绝。
+- 品质卡只影响安装后新进入工作槽的原料。已经开始的任务保持其锁定结果，避免热插拔套利。
+
+## 2026-07-11 14:48 三项运行时缺陷整改验证
+
+| 项目 | 结果 | 证据 |
+|---|---|---|
+| 发布状态 | FROZEN | 未上传、未更新 live Mods、未复制桌面对外包；构建自动产生的 zip 仅为本地中间产物 |
+| 单方块处理机端口 | PASS | `SingleBlockProcessorMenu` 与 `RemoteMachineControlMenu` 均显示输入/输出/能源端口；状态灯读取真实网络与储能状态；端口是功能/状态入口，物品仍由左侧输入缓冲、中部工作槽、右侧输出缓冲承载 |
+| 箱子读取边界 | PASS | `NetworkRepository` schema 2 清除 legacy `EndpointType.Chest`；`NetworkInteractionService` 拒绝直接绑定 Chest；扫描和事务层只接纳活动存储接口上下左右相邻箱子 |
+| 导入/导出真实搬运 | PASS | `svsap-storage-transfer-preflight.json`：右向导入器从相邻箱子导入 `20` 件，右向导出器向相邻箱子导出 `20` 件；legacy 直连箱不可见 |
+| Debug / Release | PASS | SVSAP 与 SVSAPME 两种配置均 0 warning / 0 error |
+| i18n parity | PASS | SVSAP `610/610`、SVSAPME `527/527`；missing/extra 0、placeholder mismatch 0、`en.json` 中文字符 0 |
+| 隔离 SMAPI 自测 | PASS | `e2e-runs/three-issues-port-status-selftest-20260711-142141/SMAPI-latest-selftest.txt`：SVSAP `34/34`、SVSAPME `41/41` |
+| FullMatrix | PASS | `e2e-runs/three-issues-final-current-20260711-142440/full-matrix-complete.json`：`pass=true`，`45/45` |
+| GUI 截图硬门禁 | PASS | 同目录 `gui-capture-complete.json`：`30/30`，30 个唯一 SHA256；当前处理机三张关键图已复核端口、星级、图标居中与状态色 |
+| P0/P1 单人 | PASS | `e2e-runs/three-issues-current-p0p1-single-20260711-143100/single-complete.json`：`pass=true`，`7/7` |
+| P0/P1 多人 | PASS | `e2e-runs/three-issues-current-p0p1-multi-20260711-143411`：host `pass=true`、`5/5`，client complete |
+| RouteA 多人 | PASS | `e2e-runs/three-issues-current-routea-20260711-144627`：host/client complete，client `verifiedHandSwitches=4`、`stage=100` |
+
+本轮行为口径：
+
+- 普通箱子不再是无线网络端点。存储接口只读取自身上下左右四个相邻格，其他位置、其他地图和旧版直连箱子都不会被扫描。
+- 导入器执行“相邻容器 -> SVSAP 网络”，导出器执行“SVSAP 网络 -> 相邻容器”。朝向决定目标格；导出器必须配置过滤目标，导入器无过滤时搬运全部合规物品。
+- 单方块处理机顶部三个格是输入、输出和能源的可见功能端口/状态指示，不是三份独立库存。真实输入、逐格加工和产出仍分别位于左、中、右区域。
+
+## 2026-07-11 02:40 GUI 关联问题深度复核
+
+| 项目 | 结果 | 证据 |
+|---|---|---|
+| 发布状态 | FROZEN | 未上传、未更新 live Mods、未复制桌面对外包；构建自动生成的 zip 仅为本地中间产物 |
+| SVSAP Debug / Release | PASS | 两种配置均 0 warning / 0 error |
+| SVSAPME Debug / Release | PASS | 两种配置均 0 warning / 0 error |
+| i18n parity | PASS | SVSAP `603/603`、SVSAPME `515/515`；missing/extra 0、placeholder mismatch 0、`en.json` 中文字符 0 |
+| GUI 契约与尺寸扫描 | PASS | `GUI_CONTRACT_CHECK_OK session-ordering count-format compact-layout extended-backpack`；覆盖 640/720/800/960/1280 宽、720 高和 36/48/60 槽背包 |
+| 隔离 SMAPI 自测 | PASS | `.codex_runtime/gui-audit-selftest-postcompact-20260711-023601/SMAPI-latest-selftest.txt`：SVSAP `31/31`、SVSAPME `41/41`，运行时错误命中 0 |
+| FullMatrix / P0P1 / RouteA | PENDING | 本轮最后的紧凑布局改动后未重跑，不使用旧门禁解除冻结 |
+| 实机视觉与鼠标验收 | PENDING | 仍需检查 640x720、800x720，尤其 48/60 槽背包与多人远程菜单 |
+
+本轮继续确认并修复：
+
+- 终端按实际背包行数动态缩放物品格和背包格；网络物品继续使用原版 `Item.drawInMenu`，小于 1000 的数量由原版绘制，只有大数在右下角显示 `K`/`M`。
+- 本地/远程网络终端的九个分类按钮改为真实可用宽度均分；远程搜索框为翻页按钮预留固定空间，避免 640 宽时互相覆盖。
+- 本地/远程样板供应器按可用宽高动态选择工作槽列数、行数和格子尺寸，绘制与命中区域共用同一布局。
+- 本地/远程传输总线在 640x720 下扩大可用菜单区域并统一控制按钮、方向按钮和 3x3 过滤网格的布局计算。
+- 远程供电控制台在短内容区使用紧凑遥测、44px 升级槽和自适应多列按钮；本地供电传输器改用 48px 视口边距，60 槽背包不再压入过滤/方向区。
+- 关闭穿透与重复音效继续由会话 ID、单调请求序号和已消费打开请求约束；静态复核未发现新的 `update()` 循环播放点击音效路径。
+
+## 2026-07-10 22:26 GUI 运行时回归深修
+
+| 项目 | 结果 | 证据 |
+|---|---|---|
+| 发布状态 | FROZEN | 用户已明确要求停止发布；本轮未上传、未更新 live Mods、未生成对外发布结论 |
+| SVSAP Debug / Release | PASS | 两种配置均 0 warning / 0 error |
+| SVSAPME Debug / Release | PASS | 两种配置均 0 warning / 0 error |
+| i18n parity | PASS | SVSAP `603/603`、SVSAPME `515/515`；placeholder mismatch 0、literal key missing 0、`en.json` 中文字符 0、Emoji 文件 0 |
+| 纯逻辑 GUI 契约 | PASS | `GUI_CONTRACT_CHECK_OK`：会话匹配、迟到/重复顺序拒绝、已消费会话不重开、K/M 计数、800x720 + 60 槽背包布局 |
+| Release zip 结构 | PASS | 两包均单一 mod root、4 entries、manifest/DLL 完整、版本 `1.4.0-alpha.1.2`、bad entry 0；仅作构建产物，不发布 |
+| SMAPI 自测 | PENDING | 检测到用户正在运行的 `StardewModdingAPI`，为避免中断实机进程未启动第二实例；旧 31/31、41/41 不代表本轮最新源码 |
+| FullMatrix / P0P1 / RouteA | PENDING | 本轮协议与 GUI 源码变更后必须重跑；旧结果仅保留历史证据 |
+
+本轮关键修复：
+
+- 所有远程终端/结构菜单/机器快照增加 `MenuSessionId` 与单调 `RequestSequence`；只有匹配且更新的响应可刷新，只有尚未消费的首次会话可打开菜单。迟到响应在已有菜单或已关闭菜单时不会重开，也不会重复播放 `bigSelect`。
+- 网络终端、合成终端、监视器、存储驱动器、传输总线、样板供应器和 SVSAPME 远程机器统一采用有边界的标题、状态灯和文本省略；深色低对比内框改为浅冷灰工作区。
+- 网络物品继续调用原版 `Item.drawInMenu`。数量小于 1000 时交给原版堆叠数字绘制；达到 1000 后仅将右下角数量缩写为 `K`，达到 1000000 后缩写为 `M`。
+- 传输总线的 8 个实体升级槽移到过滤区上方，避免与 48/60 槽扩展背包重叠；单方块农场、酒桶/陈酿桶和远程机器会按实际背包槽数缩减工作分页，不再硬截 36 槽。
+- 发布前仍需在用户关闭当前游戏后重跑 SMAPI 自测、FullMatrix、P0/P1 单人/多人、RouteA，并进行一次 800x720 实机截图验收。
 
 ## 当前验证
 

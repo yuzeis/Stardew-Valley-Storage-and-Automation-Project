@@ -41,6 +41,7 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
     private TerminalInventoryCategory selectedCategory = TerminalInventoryCategory.All;
     private int? selectedQuality;
     private TerminalInventorySortMode sortMode = TerminalInventorySortMode.Count;
+    private List<NetworkInventoryEntry>? visibleEntriesCache;
     private int snapshotAtTick;
 
     public NetworkTerminalMenu(
@@ -75,17 +76,17 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
     {
         var innerX = this.xPositionOnScreen + SVSAPMenuWidgets.Pad;
         var innerW = this.width - SVSAPMenuWidgets.Pad * 2;
-        var top = this.yPositionOnScreen + 24;
+        var top = this.yPositionOnScreen + SVSAPMenuWidgets.HeaderTopOffset;
 
-        this.searchBox = new Rectangle(innerX, top + 44, Math.Min(380, innerW - 20), 40);
+        this.searchBox = new Rectangle(innerX, top + 44, SVSAPMenuWidgets.CalculateTerminalSearchWidth(innerW, 20), 40);
 
         var bx = innerX;
         var catY = top + 96;
         var categoryGap = 4;
-        var categoryWidth = Math.Clamp(
-            (innerW - categoryGap * (TerminalInventoryFilters.CategoryOrder.Length - 1)) / TerminalInventoryFilters.CategoryOrder.Length,
-            58,
-            100);
+        var categoryWidth = SVSAPMenuWidgets.CalculateUniformButtonWidth(
+            innerW,
+            TerminalInventoryFilters.CategoryOrder.Length,
+            categoryGap);
         foreach (var category in TerminalInventoryFilters.CategoryOrder)
         {
             this.categoryButtons.Add(new ClickableComponent(
@@ -97,9 +98,28 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
 
         var filterY = top + 136;
         bx = innerX;
+        var qualities = new int?[] { null, 0, 1, 2, 4 };
         var qualityWidth = innerW < 760 ? 56 : 66;
         var sortWidth = innerW < 760 ? 70 : 84;
-        foreach (var quality in new int?[] { null, 0, 1, 2, 4 })
+        var groupGap = innerW < 760 ? 8 : 28;
+        var requiredFilterWidth = qualities.Length * qualityWidth
+            + Math.Max(0, qualities.Length - 1) * 4
+            + groupGap
+            + TerminalInventoryFilters.SortOrder.Length * sortWidth
+            + Math.Max(0, TerminalInventoryFilters.SortOrder.Length - 1) * 4;
+        if (requiredFilterWidth > innerW)
+        {
+            var totalButtons = qualities.Length + TerminalInventoryFilters.SortOrder.Length;
+            var available = innerW
+                - groupGap
+                - Math.Max(0, qualities.Length - 1) * 4
+                - Math.Max(0, TerminalInventoryFilters.SortOrder.Length - 1) * 4;
+            var commonWidth = Math.Max(36, available / Math.Max(1, totalButtons));
+            qualityWidth = commonWidth;
+            sortWidth = commonWidth;
+        }
+
+        foreach (var quality in qualities)
         {
             this.qualityButtons.Add(new ClickableComponent(
                 new Rectangle(bx, filterY, qualityWidth, 34),
@@ -108,7 +128,7 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
             bx += qualityWidth + 4;
         }
 
-        bx += innerW < 760 ? 12 : 28;
+        bx += groupGap;
         foreach (var sort in TerminalInventoryFilters.SortOrder)
         {
             this.sortButtons.Add(new ClickableComponent(
@@ -118,7 +138,7 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
             bx += sortWidth + 4;
         }
 
-        var bottomY = this.yPositionOnScreen + this.height - 54;
+        var bottomY = this.yPositionOnScreen + this.height - SVSAPMenuWidgets.Pad - 42;
         var allX = this.xPositionOnScreen + this.width - SVSAPMenuWidgets.Pad - 130;
         this.depositAllButton = new ClickableComponent(new Rectangle(allX, bottomY, 130, 42), "all", ModText.Get("terminal.depositAll"));
         var sameX = allX - 8 - 150;
@@ -126,16 +146,20 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
         var lockX = sameX - 8 - 100;
         this.lockButton = new ClickableComponent(new Rectangle(lockX, bottomY, 100, 42), "lock", ModText.Get("terminal.lock"));
 
-        var backpackColumns = SVSAPBackpackGrid.GetColumnCount(innerW, CompactCell);
-        var invH = SVSAPBackpackGrid.GetHeight(backpackColumns, CompactCell);
+        var gridTop = filterY + 50;
+        var layoutCell = SVSAPMenuWidgets.CalculateTerminalCellSize(innerW, gridTop, bottomY, Game1.player.Items.Count, CompactCell);
+        this.itemGrid.SetCellSize(layoutCell);
+        this.backpackGrid.SetCellSize(layoutCell);
+        var backpackColumns = SVSAPBackpackGrid.GetColumnCount(innerW, layoutCell);
+        var invH = SVSAPBackpackGrid.GetHeight(backpackColumns, layoutCell);
         var invTop = bottomY - 18 - invH;
-        var invW = backpackColumns * CompactCell;
+        var invW = backpackColumns * layoutCell;
         this.invArea = new Rectangle(innerX + Math.Max(0, (innerW - invW) / 2), invTop, invW, invH);
         this.backpackGrid.SetBounds(this.invArea);
 
-        var gridTop = filterY + 50;
-        var gridBottom = invTop - 16;
-        this.gridArea = new Rectangle(innerX, gridTop, innerW, Math.Max(CompactCell, gridBottom - gridTop));
+        // Reserve the locked-item status line between the item grid and backpack.
+        var gridBottom = SVSAPMenuWidgets.GetTerminalItemGridBottom(invTop);
+        this.gridArea = new Rectangle(innerX, gridTop, innerW, Math.Max(layoutCell, gridBottom - gridTop));
         this.itemGrid.SetBounds(this.gridArea);
     }
 
@@ -148,6 +172,7 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
 
         this.snapshot = this.CreateSnapshot();
         this.snapshotAtTick = tick;
+        this.InvalidateVisibleEntries();
         this.itemGrid.ClampScroll(this.GetVisibleEntries().Count);
     }
 
@@ -158,14 +183,16 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
         SVSAPMenuWidgets.DrawStardewAE2Frame(b, panel);
 
         var innerX = this.xPositionOnScreen + SVSAPMenuWidgets.Pad;
-        var top = this.yPositionOnScreen + 24;
+        var top = this.yPositionOnScreen + SVSAPMenuWidgets.HeaderTopOffset;
         var entries = this.GetVisibleEntries();
         this.itemGrid.ClampScroll(entries.Count);
 
         var title = ModText.Format("terminal.title", this.network.Name, entries.Count, this.snapshot.Entries.Count, this.snapshot.SourceCount);
-        var titleSize = Game1.dialogueFont.MeasureString(title);
-        var scale = this.width < 900 ? Math.Max(0.5f, (this.width - 80) / titleSize.X) : 1f;
-        b.DrawString(Game1.dialogueFont, title, new Vector2(innerX, top), Game1.textColor, 0f, Vector2.Zero, scale, SpriteEffects.None, 1f);
+        SVSAPMenuWidgets.DrawFittedTitle(
+            b,
+            title,
+            new Rectangle(innerX, top, this.width - SVSAPMenuWidgets.Pad * 2 - 56, 42),
+            Game1.textColor);
 
         SVSAPMenuWidgets.DrawSearchBox(b, this.searchBox, this.search);
 
@@ -173,13 +200,11 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
         var summarySize = Game1.smallFont.MeasureString(summaryText);
         var showSummary = this.searchBox.Right + 24 + summarySize.X <= this.xPositionOnScreen + this.width - SVSAPMenuWidgets.Pad;
         if (showSummary)
-        {
-            b.DrawString(
-                Game1.smallFont,
+            SVSAPMenuWidgets.DrawFittedLine(
+                b,
                 summaryText,
-                new Vector2(this.searchBox.X + this.searchBox.Width + 24, this.searchBox.Y + 10),
+                new Rectangle(this.searchBox.Right + 16, this.searchBox.Y, this.xPositionOnScreen + this.width - SVSAPMenuWidgets.Pad - this.searchBox.Right - 16, this.searchBox.Height),
                 Game1.textColor);
-        }
 
         foreach (var button in this.categoryButtons)
         {
@@ -207,26 +232,21 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
             entry => entry.AvailableCount <= 0);
         if (entries.Count == 0)
         {
-            b.DrawString(
-                Game1.smallFont,
+            SVSAPMenuWidgets.DrawFittedLine(
+                b,
                 ModText.Get("terminal.empty"),
-                new Vector2(this.gridArea.X + 8, this.gridArea.Y + 8),
+                new Rectangle(this.gridArea.X + 8, this.gridArea.Y + 8, this.gridArea.Width - 16, 30),
                 Color.DarkSlateGray);
         }
 
         SVSAPMenuWidgets.DrawSeparator(b, new Rectangle(innerX, this.invArea.Y - 10, this.width - SVSAPMenuWidgets.Pad * 2, 2));
         this.backpackGrid.Draw(b);
 
-        b.DrawString(
-            Game1.smallFont,
+        SVSAPMenuWidgets.DrawFittedLine(
+            b,
             TerminalInventoryFilters.FormatLockedList(this.network.LockedQualifiedItemIds),
-            new Vector2(innerX, this.invArea.Y - 38),
+            new Rectangle(innerX, this.invArea.Y - 42, this.width - SVSAPMenuWidgets.Pad * 2, 30),
             Game1.textColor);
-        b.DrawString(
-            Game1.smallFont,
-            ModText.Get("terminal.help"),
-            new Vector2(innerX, this.depositAllButton.bounds.Y + 12),
-            Color.DimGray);
 
         SVSAPMenuWidgets.DrawButton(b, this.lockButton, this.GetLockButtonLabel());
         SVSAPMenuWidgets.DrawButton(b, this.depositSameButton);
@@ -240,6 +260,12 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
 
     public override void receiveLeftClick(int x, int y, bool playSound = true)
     {
+        if (this.upperRightCloseButton?.containsPoint(x, y) == true)
+        {
+            base.receiveLeftClick(x, y, playSound);
+            return;
+        }
+
         base.receiveLeftClick(x, y, playSound);
 
         if (this.lockButton.containsPoint(x, y))
@@ -369,6 +395,7 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
             this.transactionService.SaveNetworkState();
             this.snapshot = this.CreateSnapshot();
             this.snapshotAtTick = Game1.ticks;
+            this.InvalidateVisibleEntries();
             Game1.addHUDMessage(new HUDMessage(message, HUDMessage.newQuest_type));
             Game1.playSound("coin");
         }
@@ -396,6 +423,7 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
             this.transactionService.SaveNetworkState();
             this.snapshot = this.CreateSnapshot();
             this.snapshotAtTick = Game1.ticks;
+            this.InvalidateVisibleEntries();
             Game1.addHUDMessage(new HUDMessage(ModText.Format("inventory.depositSlotSuccess", moved), HUDMessage.newQuest_type));
             Game1.playSound("Ship");
         }
@@ -416,6 +444,7 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
             this.transactionService.SaveNetworkState();
             this.snapshot = this.CreateSnapshot();
             this.snapshotAtTick = Game1.ticks;
+            this.InvalidateVisibleEntries();
             Game1.addHUDMessage(new HUDMessage(message, HUDMessage.newQuest_type));
             Game1.playSound("Ship");
         }
@@ -440,6 +469,9 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
     private List<NetworkInventoryEntry> GetVisibleEntries()
     {
         this.SyncSearchFromInput();
+        if (this.visibleEntriesCache is not null)
+            return this.visibleEntriesCache;
+
         var entries = this.snapshot.Entries.AsEnumerable();
 
         if (!string.IsNullOrWhiteSpace(this.search))
@@ -473,7 +505,8 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
                 .ThenBy(entry => entry.Prototype.DisplayName, StringComparer.CurrentCultureIgnoreCase)
         };
 
-        return entries.ToList();
+        this.visibleEntriesCache = entries.ToList();
+        return this.visibleEntriesCache;
     }
 
     private NetworkInventorySnapshot CreateSnapshot()
@@ -529,7 +562,13 @@ internal sealed class NetworkTerminalMenu : IClickableMenu
             : ModText.Get("terminal.lock");
     }
 
-    private void ResetScroll() => this.itemGrid.ResetScroll();
+    private void ResetScroll()
+    {
+        this.itemGrid.ResetScroll();
+        this.InvalidateVisibleEntries();
+    }
+
+    private void InvalidateVisibleEntries() => this.visibleEntriesCache = null;
 
     private void SyncSearchFromInput()
     {

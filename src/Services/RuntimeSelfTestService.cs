@@ -5,6 +5,7 @@ using SVSAP.Models;
 using SVSAP.UI;
 using StardewModdingAPI;
 using StardewValley;
+using StardewValley.Objects;
 using SObject = StardewValley.Object;
 
 namespace SVSAP.Services;
@@ -63,6 +64,7 @@ internal sealed class RuntimeSelfTestService
             ("v1-processing-catalog-scope", this.TestV1ProcessingCatalogScope),
             ("farmhand-hard-block", this.TestFarmhandHardBlock),
             ("remote-action-response-cache", this.TestRemoteActionResponseCache),
+            ("durable-remote-action-ledger", this.TestDurableRemoteActionLedger),
             ("remote-terminal-payload-escrow", this.TestRemoteTerminalPayloadEscrow),
             ("remote-delivery-ack-contract", this.TestRemoteDeliveryAckContract),
             ("remote-snapshot-paging-contract", this.TestRemoteSnapshotPagingContract),
@@ -77,7 +79,10 @@ internal sealed class RuntimeSelfTestService
             ("structural-request-idempotent", this.TestStructuralRequestIdempotent),
             ("structural-host-failure-response", this.TestStructuralHostFailureResponse),
             ("structural-consume-targets-captured-item", this.TestStructuralConsumeTargetsCapturedItem),
+            ("direct-chest-link-rejected", this.TestDirectChestLinkRejected),
+            ("legacy-chest-endpoint-pruned", this.TestLegacyChestEndpointPruned),
             ("transfer-bus-kernel-parity", this.TestTransferBusKernelParity),
+            ("transfer-bus-chest-runtime", this.TestTransferBusChestRuntime),
             ("gui-layout-bounds", this.TestGuiLayoutBounds),
             ("debug-addon-vanilla-material-recipes-visible", this.TestDebugAddonVanillaMaterialRecipesVisible),
             ("cpu-reserve-fast-slot", this.TestCpuReserveFastSlot)
@@ -117,10 +122,51 @@ internal sealed class RuntimeSelfTestService
 
     private void TestGuiLayoutBounds()
     {
+        var frame = new Rectangle(0, 0, 720, 640);
+        var safeContent = SVSAPMenuWidgets.GetFrameContentBounds(frame);
+        Assert(
+            safeContent == new Rectangle(40, 80, 640, 520),
+            "SVSAP GUI content must use the shared frame-safe rectangle");
+        Assert(
+            SVSAPMenuWidgets.VisualContentGutter >= 8,
+            "SVSAP GUI controls must keep at least 8 visible pixels clear of the metal bevel");
         Assert(StorageDriveMenu.LayoutFits(menuWidth: 760), "storage drive GUI must fit its full-width 10-slot layout");
         Assert(StorageDriveMenu.LayoutFits(menuWidth: 520), "storage drive GUI must wrap storage-cell slots before the summary panel overflows compact widths");
         Assert(TransferBusMenu.LayoutFits(menuWidth: 1040), "importer/exporter GUI must fit its 3x3 filter and controls at full width");
         Assert(TransferBusMenu.LayoutFits(menuWidth: 720), "importer/exporter GUI controls must wrap instead of overflowing compact widths");
+        Assert(TransferBusMenu.LayoutFits(menuWidth: 720, menuHeight: 640, inventorySlotCount: 60), "importer/exporter GUI must keep filters, top upgrade slots, and a 60-slot backpack separated at 800x720");
+        Assert(TransferBusMenu.LayoutFits(menuWidth: 592, menuHeight: 672, inventorySlotCount: 60), "local importer/exporter controls must stay above a 60-slot backpack at 640x720");
+        Assert(RemoteTransferBusMenu.LayoutFits(menuWidth: 592, menuHeight: 672, inventorySlotCount: 60), "remote importer/exporter controls must stay above a 60-slot backpack at 640x720");
+        Assert(SVSAPMenuWidgets.GetTerminalItemGridBottom(500) <= 450, "network terminal item grids must reserve the locked-item status line above the backpack");
+        Assert(SVSAPMenuWidgets.TerminalLayoutFits(menuWidth: 720, menuHeight: 640, inventorySlotCount: 36), "network terminals must fit the vanilla backpack at 800x720");
+        Assert(SVSAPMenuWidgets.TerminalLayoutFits(menuWidth: 720, menuHeight: 640, inventorySlotCount: 48), "network terminals must fit a 48-slot backpack at 800x720");
+        Assert(SVSAPMenuWidgets.TerminalLayoutFits(menuWidth: 720, menuHeight: 640, inventorySlotCount: 60), "network terminals must fit a 60-slot backpack at 800x720");
+        Assert(SVSAPMenuWidgets.TerminalLayoutFits(menuWidth: 560, menuHeight: 640, inventorySlotCount: 48), "network terminals must keep the item grid above a 48-slot backpack at 640x720");
+        Assert(SVSAPMenuWidgets.TerminalLayoutFits(menuWidth: 560, menuHeight: 640, inventorySlotCount: 60), "network terminals must keep the item grid above a 60-slot backpack at 640x720");
+        var compactTerminalInnerWidth = 560 - SVSAPMenuWidgets.Pad * 2;
+        var compactCategoryWidth = SVSAPMenuWidgets.CalculateUniformButtonWidth(compactTerminalInnerWidth, TerminalInventoryFilters.CategoryOrder.Length, 4);
+        Assert(compactCategoryWidth * TerminalInventoryFilters.CategoryOrder.Length + 4 * (TerminalInventoryFilters.CategoryOrder.Length - 1) <= compactTerminalInnerWidth, "terminal category tabs must stay inside a 640-wide viewport");
+        Assert(SVSAPMenuWidgets.CalculateTerminalSearchWidth(compactTerminalInnerWidth, 184) + 184 <= compactTerminalInnerWidth, "remote terminal search and page buttons must not overlap at 640x720");
+        var compactPatternLayout = SVSAPMenuWidgets.CalculatePatternProviderSlotLayout(306, 246);
+        Assert(compactPatternLayout.Columns * compactPatternLayout.Rows >= 36, "pattern providers must retain all 36 slots at 640x720");
+        Assert(compactPatternLayout.Columns * compactPatternLayout.CellSize <= 306 && compactPatternLayout.Rows * compactPatternLayout.CellSize <= 246, "pattern provider slots must stay above the 60-slot backpack at 640x720");
+        var compactMonitorRows = SVSAPMenuWidgets.CalculateMonitorRowAllocation(352, 20, 10, 5, 3);
+        Assert(compactMonitorRows == (3, 3), "compact crafting monitors must reduce visible job rows before overlapping bottom controls");
+        Assert(SVSAPMenuWidgets.MeasureMonitorRows(20, 10, compactMonitorRows.JobRows, compactMonitorRows.PipelineRows) <= 352, "crafting monitor rows must stay inside their calculated content height");
+        var compactRemoteMonitorRows = SVSAPMenuWidgets.CalculateMonitorRowAllocation(466, 20, 10, 7, 5);
+        Assert(compactRemoteMonitorRows == (4, 5), "remote crafting monitors must reserve their refresh button row at compact heights");
+        Assert(SVSAPMenuWidgets.MeasureMonitorRows(20, 10, compactRemoteMonitorRows.JobRows, compactRemoteMonitorRows.PipelineRows) <= 466, "remote crafting monitor rows must not overlap bottom controls");
+        foreach (var compactWidth in new[] { 560, 720, 980 })
+        {
+            var actionRow = SVSAPMenuWidgets.CalculateRightAlignedButtonRow(0, compactWidth, 0, 4, 116, 38, 16, 56);
+            Assert(actionRow.Count == 4, "remote crafting monitor must retain all four action buttons");
+            Assert(actionRow[0].Left >= 56 && actionRow[^1].Right <= compactWidth - 56, "remote crafting monitor action buttons must remain inside compact menu margins");
+            Assert(actionRow.Zip(actionRow.Skip(1), (left, right) => left.Right <= right.Left).All(value => value), "remote crafting monitor action buttons must not overlap");
+        }
+        Assert(SVSAPMenuWidgets.FormatCount(999) == "999", "normal GUI stack counts must keep the vanilla unabridged value");
+        Assert(SVSAPMenuWidgets.FormatCount(1000) == "1K", "large GUI stack counts must use K notation");
+        Assert(SVSAPMenuWidgets.FormatCount(999_999) == "1M", "rounded GUI stack counts must promote 1000K to 1M");
+        Assert(SVSAPMenuWidgets.FormatCount(1_000_000) == "1M", "very large GUI stack counts must use M notation");
 
         var compactTerminalGrid = new SVSAPIconGrid<object>(52);
         compactTerminalGrid.SetBounds(new Rectangle(0, 0, 664, 104));
@@ -641,6 +687,80 @@ internal sealed class RuntimeSelfTestService
         }
     }
 
+    private void TestDurableRemoteActionLedger()
+    {
+        const long playerId = 55112233L;
+        var transactionId = Guid.NewGuid();
+        var networkId = Guid.NewGuid();
+        var endpointId = Guid.NewGuid();
+        var terminalEntries = new List<ExecutedTerminalDeposit>();
+        var first = new ExecutedTerminalDeposit
+        {
+            PlayerId = playerId,
+            TransactionId = transactionId,
+            NetworkId = networkId,
+            EndpointId = endpointId,
+            ActionKind = TerminalActionKind.DepositAll.ToString(),
+            Message = "first"
+        };
+        Assert(ExecutedRemoteActionLedger.RememberTerminal(terminalEntries, first), "first terminal consumption must enter the durable ledger");
+        Assert(!ExecutedRemoteActionLedger.RememberTerminal(terminalEntries, new ExecutedTerminalDeposit
+        {
+            PlayerId = playerId,
+            TransactionId = transactionId,
+            NetworkId = networkId,
+            EndpointId = endpointId,
+            ActionKind = TerminalActionKind.DepositAll.ToString(),
+            Message = "overwritten"
+        }), "duplicate terminal transaction ids must not overwrite the first durable result");
+        Assert(ExecutedRemoteActionLedger.TryGetTerminal(terminalEntries, playerId, transactionId, out var terminalReplay)
+            && ReferenceEquals(terminalReplay, first)
+            && terminalReplay.Message == "first", "durable terminal replay must retain the first successful result");
+
+        terminalEntries.Add(new ExecutedTerminalDeposit
+        {
+            PlayerId = playerId,
+            TransactionId = transactionId,
+            NetworkId = networkId,
+            EndpointId = endpointId,
+            ActionKind = TerminalActionKind.DepositAll.ToString(),
+            Message = "later duplicate"
+        });
+        terminalEntries.Add(new ExecutedTerminalDeposit());
+        Assert(ExecutedRemoteActionLedger.NormalizeTerminal(terminalEntries), "terminal ledger normalization must remove invalid and duplicate records");
+        Assert(terminalEntries.Count == 1 && terminalEntries[0].Message == "first", "terminal ledger normalization must keep the first committed response");
+
+        var structuralEntries = new List<ExecutedStructuralConsumption>();
+        var structural = new ExecutedStructuralConsumption
+        {
+            PlayerId = playerId,
+            TransactionId = Guid.NewGuid(),
+            LocationName = "Farm",
+            TileX = 4,
+            TileY = 7,
+            ActionKind = StructuralActionKind.StorageDriveInteract.ToString(),
+            Message = "installed"
+        };
+        Assert(ExecutedRemoteActionLedger.RememberStructural(structuralEntries, structural), "first structural consumption must enter the durable ledger");
+        Assert(ExecutedRemoteActionLedger.TryGetStructural(structuralEntries, playerId, structural.TransactionId, out var structuralReplay)
+            && ReferenceEquals(structuralReplay, structural), "durable structural replay must be keyed by player and transaction id");
+
+        var bounded = Enumerable.Range(0, ExecutedRemoteActionLedger.MaxEntriesPerKind + 1)
+            .Select(_ => new ExecutedTerminalDeposit
+            {
+                PlayerId = playerId,
+                TransactionId = Guid.NewGuid(),
+                NetworkId = networkId,
+                EndpointId = endpointId,
+                ActionKind = TerminalActionKind.DepositSlot.ToString()
+            })
+            .ToList();
+        var oldest = bounded[0].TransactionId;
+        Assert(ExecutedRemoteActionLedger.NormalizeTerminal(bounded), "oversized terminal ledgers must be trimmed during normalization");
+        Assert(bounded.Count == ExecutedRemoteActionLedger.MaxEntriesPerKind
+            && !ExecutedRemoteActionLedger.TryGetTerminal(bounded, playerId, oldest, out _), "durable terminal ledger must evict the oldest record at its bound");
+    }
+
     private void TestRemoteDeliveryAckContract()
     {
         Assert(typeof(TerminalActionResponseMessage).GetProperty(nameof(TerminalActionResponseMessage.DeliveryId))?.PropertyType == typeof(Guid), "terminal responses must carry a durable delivery id");
@@ -677,6 +797,33 @@ internal sealed class RuntimeSelfTestService
 
     private void TestRemoteSnapshotPagingContract()
     {
+        var sessionId = Guid.Parse("11111111-2222-3333-4444-555555555555");
+        Assert(RemoteSnapshotSessionRules.Matches(sessionId, sessionId), "remote snapshot refreshes must match the active menu session");
+        Assert(!RemoteSnapshotSessionRules.Matches(Guid.Empty, Guid.Empty), "empty snapshot sessions must never open or refresh a menu");
+        Assert(!RemoteSnapshotSessionRules.Matches(sessionId, Guid.NewGuid()), "late snapshots from another menu session must be ignored");
+        Assert(RemoteSnapshotSessionRules.IsNewer(7, 8) && !RemoteSnapshotSessionRules.IsNewer(8, 8) && !RemoteSnapshotSessionRules.IsNewer(9, 8), "remote snapshot application must reject duplicate and out-of-order responses");
+        Assert(RemoteSnapshotSessionRules.ShouldApplyPush(7, 8) && !RemoteSnapshotSessionRules.ShouldApplyPush(8, 8) && !RemoteSnapshotSessionRules.ShouldApplyPush(9, 8), "remote push updates must reject duplicate and out-of-order broadcasts");
+        Assert(RemoteSnapshotSessionRules.ShouldApplyPush(7, 0), "legacy push updates without a sequence must remain compatible");
+        Assert(!RemoteSnapshotSessionRules.HasTimedOut(10, 19, 10), "remote snapshot requests must remain pending before their timeout boundary");
+        Assert(RemoteSnapshotSessionRules.HasTimedOut(10, 20, 10), "remote snapshot requests must expire at their timeout boundary");
+        Assert(RemoteSnapshotSessionRules.HasTimedOut(20, 10, 10), "remote snapshot timeout logic must recover from a tick counter reset or wrap");
+        Assert(RemoteSnapshotSessionRules.ShouldOpenMenu(consumedPendingSession: true, hasActiveMenu: false), "the first matching pending snapshot may open its menu");
+        Assert(!RemoteSnapshotSessionRules.ShouldOpenMenu(consumedPendingSession: true, hasActiveMenu: true), "a matching late snapshot must not replace an already-open menu");
+        Assert(!RemoteSnapshotSessionRules.ShouldOpenMenu(consumedPendingSession: false, hasActiveMenu: false), "an already-consumed snapshot session must not reopen a closed menu");
+        Assert(typeof(TerminalSnapshotRequestMessage).GetProperty(nameof(TerminalSnapshotRequestMessage.MenuSessionId))?.PropertyType == typeof(Guid), "terminal snapshot requests must identify their menu session");
+        Assert(typeof(TerminalSnapshotResponseMessage).GetProperty(nameof(TerminalSnapshotResponseMessage.RequestSequence))?.PropertyType == typeof(long), "terminal snapshot responses must echo request ordering");
+        Assert(typeof(TerminalSnapshotResponseMessage).GetProperty(nameof(TerminalSnapshotResponseMessage.PushSequence))?.PropertyType == typeof(long), "terminal push updates must carry host broadcast ordering");
+        Assert(typeof(CraftingSnapshotRequestMessage).GetProperty(nameof(CraftingSnapshotRequestMessage.MenuSessionId))?.PropertyType == typeof(Guid), "crafting snapshot requests must identify their menu session");
+        Assert(typeof(CraftingSnapshotResponseMessage).GetProperty(nameof(CraftingSnapshotResponseMessage.PushSequence))?.PropertyType == typeof(long), "crafting push updates must carry host broadcast ordering");
+        Assert(typeof(CraftingMonitorSnapshotResponseMessage).GetProperty(nameof(CraftingMonitorSnapshotResponseMessage.RequestSequence))?.PropertyType == typeof(long), "monitor snapshot responses must echo request ordering");
+        Assert(typeof(StructuralSnapshotRequestMessage).GetProperty(nameof(StructuralSnapshotRequestMessage.MenuSessionId))?.PropertyType == typeof(Guid), "structural snapshot requests must identify their menu session");
+        Assert(typeof(StructuralSnapshotResponseMessage).GetProperty(nameof(StructuralSnapshotResponseMessage.RequestSequence))?.PropertyType == typeof(long), "structural snapshot responses must echo request ordering");
+        Assert(typeof(TerminalActionRequestMessage).GetProperty(nameof(TerminalActionRequestMessage.MenuSessionId))?.PropertyType == typeof(Guid), "terminal actions must identify their originating menu session");
+        Assert(typeof(TerminalActionResponseMessage).GetProperty(nameof(TerminalActionResponseMessage.RequestSequence))?.PropertyType == typeof(long), "terminal action responses must echo request ordering");
+        Assert(typeof(CraftingActionRequestMessage).GetProperty(nameof(CraftingActionRequestMessage.MenuSessionId))?.PropertyType == typeof(Guid), "crafting actions must identify their originating menu session");
+        Assert(typeof(CraftingActionResponseMessage).GetProperty(nameof(CraftingActionResponseMessage.RequestSequence))?.PropertyType == typeof(long), "crafting action responses must echo request ordering");
+        Assert(typeof(CraftingMonitorActionRequestMessage).GetProperty(nameof(CraftingMonitorActionRequestMessage.MenuSessionId))?.PropertyType == typeof(Guid), "monitor actions must identify their originating menu session");
+        Assert(typeof(CraftingMonitorActionResponseMessage).GetProperty(nameof(CraftingMonitorActionResponseMessage.RequestSequence))?.PropertyType == typeof(long), "monitor action responses must echo request ordering");
         Assert(typeof(TerminalSnapshotRequestMessage).GetProperty(nameof(TerminalSnapshotRequestMessage.EntryOffset)) is not null, "terminal snapshot requests must carry a page offset");
         Assert(typeof(TerminalSnapshotRequestMessage).GetProperty(nameof(TerminalSnapshotRequestMessage.EntryLimit)) is not null, "terminal snapshot requests must carry a bounded page size");
         Assert(typeof(TerminalSnapshotResponseMessage).GetProperty(nameof(TerminalSnapshotResponseMessage.TotalEntryCount)) is not null, "terminal snapshot responses must report total entries");
@@ -699,6 +846,10 @@ internal sealed class RuntimeSelfTestService
         Assert(typeof(StructuralSnapshotResponseMessage).GetProperty(nameof(StructuralSnapshotResponseMessage.TransferBus))?.PropertyType == typeof(RemoteTransferBusSnapshotMessage), "structural snapshots must carry transfer bus configuration state");
         Assert(typeof(StructuralSnapshotResponseMessage).GetProperty(nameof(StructuralSnapshotResponseMessage.PatternProvider))?.PropertyType == typeof(RemotePatternProviderSnapshotMessage), "structural snapshots must carry pattern provider priority and slot state");
         Assert(typeof(StructuralActionRequestMessage).GetProperty(nameof(StructuralActionRequestMessage.ActionValue))?.PropertyType == typeof(int), "structural pattern reorder and priority requests must carry a signed action value");
+        Assert(typeof(StructuralActionRequestMessage).GetProperty(nameof(StructuralActionRequestMessage.MenuSessionId))?.PropertyType == typeof(Guid), "remote structural actions must identify their originating menu session");
+        Assert(typeof(StructuralActionRequestMessage).GetProperty(nameof(StructuralActionRequestMessage.RequestSequence))?.PropertyType == typeof(long), "remote structural actions must carry a monotonically ordered request sequence");
+        Assert(typeof(StructuralActionResponseMessage).GetProperty(nameof(StructuralActionResponseMessage.MenuSessionId))?.PropertyType == typeof(Guid), "structural action responses must echo their menu session");
+        Assert(typeof(StructuralActionResponseMessage).GetProperty(nameof(StructuralActionResponseMessage.RequestSequence))?.PropertyType == typeof(long), "structural action responses must echo request ordering");
         Assert(typeof(RemoteStorageDriveMenu).GetProperty("Snapshot", BindingFlags.Instance | BindingFlags.NonPublic)?.PropertyType == typeof(StructuralSnapshotResponseMessage), "remote storage drive menu must render host-authored snapshots");
         Assert(typeof(RemoteTransferBusMenu).GetProperty("Snapshot", BindingFlags.Instance | BindingFlags.NonPublic)?.PropertyType == typeof(StructuralSnapshotResponseMessage), "remote transfer bus menu must render host-authored snapshots");
         Assert(typeof(RemotePatternProviderMenu).GetProperty("Snapshot", BindingFlags.Instance | BindingFlags.NonPublic)?.PropertyType == typeof(StructuralSnapshotResponseMessage), "remote pattern provider menu must render host-authored snapshots");
@@ -1063,6 +1214,90 @@ internal sealed class RuntimeSelfTestService
         }
     }
 
+    private void TestDirectChestLinkRejected()
+    {
+        var chest = CreateSelfTestChest();
+        var result = this.InvokeApplyStructuralAction(
+            StructuralActionKind.LinkBindEndpoint,
+            chest,
+            null!,
+            Vector2.Zero,
+            Guid.NewGuid(),
+            string.Empty,
+            string.Empty,
+            0,
+            string.Empty);
+
+        Assert(!result.Success, "chests must not be accepted as direct wireless network endpoints");
+        Assert(result.Message == ModText.Get("network.link.chestRequiresInterface"), "direct chest links must explain the Storage Interface requirement");
+        Assert(!chest.modData.ContainsKey(EndpointIdentityService.NetworkIdKey), "a rejected direct chest link must not leave network identity modData");
+        Assert(!chest.modData.ContainsKey(EndpointIdentityService.EndpointIdKey), "a rejected direct chest link must not leave endpoint identity modData");
+    }
+
+    private void TestLegacyChestEndpointPruned()
+    {
+        var directChestEndpoint = new NetworkEndpoint { EndpointId = Guid.NewGuid(), Type = EndpointType.Chest, Active = true };
+        var interfaceEndpoint = new NetworkEndpoint { EndpointId = Guid.NewGuid(), Type = EndpointType.StorageInterface, Active = true };
+        var network = new NetworkData { NetworkId = Guid.NewGuid(), Name = "legacy chest migration" };
+        network.Endpoints.Add(directChestEndpoint);
+        network.Endpoints.Add(interfaceEndpoint);
+        var saveData = new NetworkSaveData { SchemaVersion = 1 };
+        saveData.Networks[network.NetworkId] = network;
+
+        var method = typeof(NetworkRepository).GetMethod("NormalizeLoadedData", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert(method is not null, "NetworkRepository.NormalizeLoadedData reflection hook must exist");
+        var changed = (bool)(method!.Invoke(this.repository, new object[] { saveData }) ?? false);
+
+        Assert(changed, "legacy direct chest endpoint data must trigger a schema migration");
+        Assert(saveData.SchemaVersion == 3, "legacy network data must migrate to schema 3");
+        Assert(network.Endpoints.Count == 1 && network.Endpoints[0].Type == EndpointType.StorageInterface, "migration must remove only direct chest endpoints and preserve Storage Interfaces");
+    }
+
+    private void TestTransferBusChestRuntime()
+    {
+        var network = this.CreateTemporaryNetwork(out var networkId);
+        try
+        {
+            network.StorageDrives.Values.Single().Slots.Add(this.CreateStorageCellSlot(StorageCellTier.OneK, 0));
+            var source = CreateSelfTestChest();
+            source.Items[0] = CreateSelfTestStack("(O)390", 12);
+            source.Items[1] = CreateSelfTestStack("(O)388", 9);
+            var importer = new TransferBusData
+            {
+                Mode = TransferBusMode.ImportAll,
+                FilterQualifiedItemId = "(O)390",
+                FilterQualifiedItemIds = new List<string> { "(O)390" },
+                ItemsPerOperation = 64,
+                QualityStrategy = MaterialQualityStrategy.LowQualityFirst
+            };
+
+            Assert(this.transferBusService.RunChestImporterForSelfTest(network, source, importer), "importer must move a matching item from an adjacent chest into network storage");
+            Assert(CountChestItem(source, "(O)390") == 0, "importer must remove the moved matching stack from its source chest");
+            Assert(CountChestItem(source, "(O)388") == 9, "importer whitelist must leave nonmatching source items untouched");
+            Assert(this.CountNetworkItem(network, "(O)390") == 12, "importer must place the exact moved count into network storage");
+
+            var target = CreateSelfTestChest();
+            var exporter = new TransferBusData
+            {
+                Mode = TransferBusMode.ExportFiltered,
+                FilterQualifiedItemId = "(O)390",
+                FilterQualifiedItemIds = new List<string> { "(O)390" },
+                ItemsPerOperation = 5,
+                QualityStrategy = MaterialQualityStrategy.LowQualityFirst
+            };
+            Assert(this.transferBusService.RunChestExporterForSelfTest(network, target, exporter), "exporter must move a filtered network item into an adjacent chest");
+            Assert(CountChestItem(target, "(O)390") == 5, "exporter must honor its per-operation transfer count");
+            Assert(this.CountNetworkItem(network, "(O)390") == 7, "exporter must debit exactly the count accepted by the target chest");
+
+            var unconfiguredExporter = new TransferBusData { Mode = TransferBusMode.ExportFiltered, ItemsPerOperation = 64 };
+            Assert(!this.transferBusService.RunChestExporterForSelfTest(network, target, unconfiguredExporter), "exporter without a filter must remain safely idle");
+        }
+        finally
+        {
+            this.CleanupTemporaryNetwork(networkId);
+        }
+    }
+
     private void TestDebugAddonVanillaMaterialRecipesVisible()
     {
         const string carbonRod = "Koizumi.SVSAPME.CarbonRod";
@@ -1408,6 +1643,25 @@ internal sealed class RuntimeSelfTestService
             throw new InvalidOperationException($"Expected {id} to create a Stardew object.");
 
         return obj;
+    }
+
+    private static Chest CreateSelfTestChest()
+    {
+        return new Chest(Enumerable.Repeat<Item?>(null, 36).ToList(), Vector2.Zero, false, 0, false);
+    }
+
+    private static Item CreateSelfTestStack(string qualifiedItemId, int count)
+    {
+        var item = ItemRegistry.Create(qualifiedItemId);
+        item.Stack = Math.Max(1, count);
+        return item;
+    }
+
+    private static int CountChestItem(Chest chest, string qualifiedItemId)
+    {
+        return chest.Items
+            .Where(item => item is not null && item.QualifiedItemId == qualifiedItemId)
+            .Sum(item => item!.Stack);
     }
 
     private static SObject CreateLinkedBigCraftable(string id, Guid networkId, Guid endpointId)

@@ -30,29 +30,11 @@ internal sealed class InventoryScanner
     {
         var snapshot = new NetworkInventorySnapshot { NetworkId = network.NetworkId };
         var scannedChests = new HashSet<string>(StringComparer.Ordinal);
+        var entryBuckets = new Dictionary<StackBucketIndexKey, List<NetworkInventoryEntry>>();
 
         foreach (var endpoint in network.Endpoints.Where(endpoint => endpoint.Active))
         {
-            if (endpoint.Type == EndpointType.Chest)
-            {
-                var location = this.GetLocation(endpoint.LocationName);
-                if (location is null)
-                    continue;
-
-                var tile = new Vector2(endpoint.TileX, endpoint.TileY);
-                if (!location.objects.TryGetValue(tile, out SObject? placedObject))
-                    continue;
-
-                if (placedObject is not Chest chest || !IsSupportedNetworkChest(chest) || IsChestLocked(chest))
-                    continue;
-
-                if (!scannedChests.Add(GetChestKey(location, tile)))
-                    continue;
-
-                snapshot.SourceCount++;
-                this.ScanChest(endpoint, chest, tile, snapshot);
-            }
-            else if (endpoint.Type == EndpointType.StorageInterface)
+            if (endpoint.Type == EndpointType.StorageInterface)
             {
                 var location = this.GetLocation(endpoint.LocationName);
                 if (location is null)
@@ -65,13 +47,13 @@ internal sealed class InventoryScanner
                         continue;
 
                     snapshot.SourceCount++;
-                    this.ScanChest(endpoint, chestInfo.Chest, chestInfo.Tile, snapshot);
+                    this.ScanChest(endpoint, chestInfo.Chest, chestInfo.Tile, snapshot, entryBuckets);
                 }
             }
             else if (endpoint.Type == EndpointType.StorageDrive && network.StorageDrives.TryGetValue(endpoint.EndpointId, out var driveData))
             {
                 snapshot.SourceCount++;
-                this.ScanStorageDrive(endpoint, driveData, snapshot);
+                this.ScanStorageDrive(endpoint, driveData, snapshot, entryBuckets);
             }
         }
 
@@ -95,7 +77,12 @@ internal sealed class InventoryScanner
             .Max();
     }
 
-    private void ScanChest(NetworkEndpoint endpoint, Chest chest, Vector2 chestTile, NetworkInventorySnapshot snapshot)
+    private void ScanChest(
+        NetworkEndpoint endpoint,
+        Chest chest,
+        Vector2 chestTile,
+        NetworkInventorySnapshot snapshot,
+        Dictionary<StackBucketIndexKey, List<NetworkInventoryEntry>> entryBuckets)
     {
         for (var i = 0; i < chest.Items.Count; i++)
         {
@@ -104,19 +91,7 @@ internal sealed class InventoryScanner
                 continue;
 
             var key = ItemKeyFactory.FromItem(item);
-            var entry = snapshot.Entries.FirstOrDefault(candidate =>
-                ItemKeyFactory.SameStackBucket(candidate.Key, candidate.Prototype, key, item));
-
-            if (entry is null)
-            {
-                entry = new NetworkInventoryEntry
-                {
-                    Key = key,
-                    Prototype = item.getOne(),
-                    TotalCount = 0
-                };
-                snapshot.Entries.Add(entry);
-            }
+            var entry = GetOrCreateEntry(snapshot, entryBuckets, key, item);
 
             entry.TotalCount += item.Stack;
             entry.Locations.Add(new ItemStackLocation
@@ -133,7 +108,11 @@ internal sealed class InventoryScanner
         }
     }
 
-    private void ScanStorageDrive(NetworkEndpoint endpoint, StorageDriveData driveData, NetworkInventorySnapshot snapshot)
+    private void ScanStorageDrive(
+        NetworkEndpoint endpoint,
+        StorageDriveData driveData,
+        NetworkInventorySnapshot snapshot,
+        Dictionary<StackBucketIndexKey, List<NetworkInventoryEntry>> entryBuckets)
     {
         foreach (var slot in driveData.Slots)
         {
@@ -159,19 +138,7 @@ internal sealed class InventoryScanner
                     continue;
                 }
 
-                var entry = snapshot.Entries.FirstOrDefault(candidate =>
-                    ItemKeyFactory.SameStackBucket(candidate.Key, candidate.Prototype, stack.Key, prototype));
-
-                if (entry is null)
-                {
-                    entry = new NetworkInventoryEntry
-                    {
-                        Key = stack.Key,
-                        Prototype = prototype,
-                        TotalCount = 0
-                    };
-                    snapshot.Entries.Add(entry);
-                }
+                var entry = GetOrCreateEntry(snapshot, entryBuckets, stack.Key, prototype);
 
                 entry.TotalCount += stack.Count;
                 entry.Locations.Add(new ItemStackLocation
@@ -187,6 +154,39 @@ internal sealed class InventoryScanner
                 });
             }
         }
+    }
+
+    private static NetworkInventoryEntry GetOrCreateEntry(
+        NetworkInventorySnapshot snapshot,
+        Dictionary<StackBucketIndexKey, List<NetworkInventoryEntry>> entryBuckets,
+        ItemKey key,
+        Item prototype)
+    {
+        var bucketKey = new StackBucketIndexKey(
+            key.QualifiedItemId,
+            key.Quality,
+            key.PreservedParentSheetIndex,
+            key.Color);
+        if (!entryBuckets.TryGetValue(bucketKey, out var bucket))
+        {
+            bucket = new List<NetworkInventoryEntry>();
+            entryBuckets[bucketKey] = bucket;
+        }
+
+        var entry = bucket.FirstOrDefault(candidate =>
+            ItemKeyFactory.SameStackBucket(candidate.Key, candidate.Prototype, key, prototype));
+        if (entry is not null)
+            return entry;
+
+        entry = new NetworkInventoryEntry
+        {
+            Key = key,
+            Prototype = prototype.getOne(),
+            TotalCount = 0
+        };
+        snapshot.Entries.Add(entry);
+        bucket.Add(entry);
+        return entry;
     }
 
     public GameLocation? GetLocation(string name)
@@ -232,4 +232,10 @@ internal sealed class InventoryScanner
     {
         return $"{location.NameOrUniqueName}:{tile.X:0}:{tile.Y:0}";
     }
+
+    private readonly record struct StackBucketIndexKey(
+        string QualifiedItemId,
+        int Quality,
+        string PreservedParentSheetIndex,
+        uint? Color);
 }

@@ -83,13 +83,18 @@ internal sealed class CraftingMonitorMenu : IClickableMenu
         var jobs = this.executionService.GetVisibleJobs(this.network);
         var pipelines = this.executionService.GetVisiblePipelines(this.network);
         this.ClampScrolls(jobs.Count, pipelines.Count);
+        var rowAllocation = this.GetRowAllocation(jobs.Count, pipelines.Count);
         var title = ModText.Format("craftingMonitor.title", this.network.Name, jobs.Count, pipelines.Count);
-        b.DrawString(Game1.dialogueFont, title, new Vector2(this.xPositionOnScreen + SVSAPMenuWidgets.Pad + 12, this.yPositionOnScreen + 32), Game1.textColor);
+        SVSAPMenuWidgets.DrawFittedTitle(
+            b,
+            title,
+            new Rectangle(this.xPositionOnScreen + SVSAPMenuWidgets.Pad + 12, this.yPositionOnScreen + 22, this.width - SVSAPMenuWidgets.Pad * 2 - 64, 46),
+            Game1.textColor);
 
         var y = this.yPositionOnScreen + 86;
         this.cancelButtons.Clear();
         this.pipelineButtons.Clear();
-        var maxJobRows = this.GetMaxJobRows(pipelines.Count);
+        var maxJobRows = rowAllocation.JobRows;
         var maxRows = Math.Min(maxJobRows, jobs.Count - this.jobScrollOffset);
         for (var i = 0; i < maxRows; i++)
         {
@@ -102,7 +107,12 @@ internal sealed class CraftingMonitorMenu : IClickableMenu
                 _ => Game1.textColor
             };
             var detail = $"{PatternDisplayNames.Get(job.Pattern)}  {FormatJobState(job.State)}{FormatCpuSlot(job)}{FormatNodeCount(job)}{FormatReservations(job)}  {job.CompletedCount:N0}/{job.RequestedCount:N0}  {job.StatusMessage}";
-            b.DrawString(Game1.smallFont, TrimTo(detail, 94), new Vector2(this.xPositionOnScreen + 64, y), color);
+            SVSAPMenuWidgets.DrawFittedLine(
+                b,
+                detail,
+                new Rectangle(this.xPositionOnScreen + 64, y - 2, this.width - 248, 34),
+                color,
+                horizontalPadding: 0);
 
             if (job.State is CraftingJobState.Planning or CraftingJobState.MissingItems or CraftingJobState.Reserved or CraftingJobState.Running or CraftingJobState.WaitingForMachine or CraftingJobState.WaitingForOutput)
             {
@@ -119,19 +129,29 @@ internal sealed class CraftingMonitorMenu : IClickableMenu
 
         if (jobs.Count == 0)
         {
-            b.DrawString(Game1.smallFont, ModText.Get("craftingMonitor.noJobs"), new Vector2(this.xPositionOnScreen + 64, y), Color.DarkSlateGray);
+            SVSAPMenuWidgets.DrawFittedLine(
+                b,
+                ModText.Get("craftingMonitor.noJobs"),
+                new Rectangle(this.xPositionOnScreen + 64, y, this.width - 128, 30),
+                Color.DarkSlateGray,
+                horizontalPadding: 0);
             y += 38;
         }
         else if (this.jobScrollOffset + maxRows < jobs.Count)
         {
-            b.DrawString(Game1.smallFont, ModText.Format("craftingMonitor.moreJobs", jobs.Count - this.jobScrollOffset - maxRows), new Vector2(this.xPositionOnScreen + 64, y), Color.DarkSlateGray);
+            SVSAPMenuWidgets.DrawFittedLine(
+                b,
+                ModText.Format("craftingMonitor.moreJobs", jobs.Count - this.jobScrollOffset - maxRows),
+                new Rectangle(this.xPositionOnScreen + 64, y, this.width - 128, 30),
+                Color.DarkSlateGray,
+                horizontalPadding: 0);
             y += 32;
         }
 
         if (pipelines.Count > 0)
         {
             y += 16;
-            var shown = Math.Min(this.GetMaxPipelineRows(), pipelines.Count - this.pipelineScrollOffset);
+            var shown = Math.Min(rowAllocation.PipelineRows, pipelines.Count - this.pipelineScrollOffset);
             for (var i = 0; i < shown; i++)
             {
                 var pipeline = pipelines[this.pipelineScrollOffset + i];
@@ -139,7 +159,12 @@ internal sealed class CraftingMonitorMenu : IClickableMenu
                 var status = pipeline.Enabled ? ModText.Get("craftingMonitor.state.on") : ModText.Get("craftingMonitor.state.off");
                 var target = pipeline.TargetKeep > 0 ? pipeline.TargetKeep.ToString("N0") : ModText.Get("craftingMonitor.unlimited");
                 var line = ModText.Format("craftingMonitor.pipelineLine", status, PatternDisplayNames.Get(pipeline.Pattern), pipeline.Priority, target, pipeline.ItemsPerCycle, pipeline.StatusMessage);
-                b.DrawString(Game1.smallFont, TrimTo(line, 58), new Vector2(this.xPositionOnScreen + 64, y), color);
+                SVSAPMenuWidgets.DrawFittedLine(
+                    b,
+                    line,
+                    new Rectangle(this.xPositionOnScreen + 64, y - 2, Math.Max(80, this.width - 460), 34),
+                    color,
+                    horizontalPadding: 0);
 
                 var buttonX = this.xPositionOnScreen + this.width - 380;
                 this.DrawPipelineButton(b, pipeline, PatternExecutionService.PipelineActionToggle, status, buttonX, y - 3, 52, pipeline.Enabled ? Color.LightGreen : Color.White);
@@ -162,16 +187,29 @@ internal sealed class CraftingMonitorMenu : IClickableMenu
 
         if (this.queuePattern is not null)
         {
+            var amountTop = this.amountButtons.Count > 0
+                ? this.amountButtons[0].bounds.Y
+                : this.yPositionOnScreen + this.height - 96;
             if (this.NeedsLongJobConfirmationForCurrentQueue())
             {
                 var warning = this.longJobConfirmationArmed
                     ? ModText.Get("craftingMonitor.longJob.armed")
                     : ModText.Get("craftingMonitor.longJob.warning");
-                b.DrawString(Game1.smallFont, warning, new Vector2(this.xPositionOnScreen + 56, this.yPositionOnScreen + this.height - 166), Color.Firebrick);
+                SVSAPMenuWidgets.DrawFittedLine(
+                    b,
+                    warning,
+                    new Rectangle(this.xPositionOnScreen + 56, amountTop - 58, this.width - 112, 24),
+                    Color.Firebrick,
+                    horizontalPadding: 0);
             }
 
             var queueText = ModText.Format("craftingMonitor.queueLine", PatternDisplayNames.Get(this.queuePattern), this.queueAmount);
-            b.DrawString(Game1.smallFont, queueText, new Vector2(this.xPositionOnScreen + 56, this.yPositionOnScreen + this.height - 134), Game1.textColor);
+            SVSAPMenuWidgets.DrawFittedLine(
+                b,
+                queueText,
+                new Rectangle(this.xPositionOnScreen + 56, amountTop - 30, this.width - 112, 24),
+                Game1.textColor,
+                horizontalPadding: 0);
 
             foreach (var button in this.amountButtons)
             {
@@ -192,7 +230,8 @@ internal sealed class CraftingMonitorMenu : IClickableMenu
         else if (this.caskPipelineButton is not null && this.caskPipelineItem is not null)
         {
             var caskText = ModText.Format("craftingMonitor.caskLine", this.caskPipelineItem.DisplayName);
-            b.DrawString(Game1.smallFont, TrimTo(caskText, 58), new Vector2(this.xPositionOnScreen + 56, this.yPositionOnScreen + this.height - 134), Game1.textColor);
+            var textY = this.caskPipelineButton.bounds.Y - 30;
+            SVSAPMenuWidgets.DrawFittedLine(b, caskText, new Rectangle(this.xPositionOnScreen + 56, textY, this.width - 112, 24), Game1.textColor, horizontalPadding: 0);
             this.DrawBottomButton(b, this.caskPipelineButton);
         }
 
@@ -202,6 +241,12 @@ internal sealed class CraftingMonitorMenu : IClickableMenu
 
     public override void receiveLeftClick(int x, int y, bool playSound = true)
     {
+        if (this.upperRightCloseButton?.containsPoint(x, y) == true)
+        {
+            base.receiveLeftClick(x, y, playSound);
+            return;
+        }
+
         base.receiveLeftClick(x, y, playSound);
 
         foreach (var button in this.cancelButtons)
@@ -350,9 +395,13 @@ internal sealed class CraftingMonitorMenu : IClickableMenu
 
     public override void receiveKeyPress(Keys key)
     {
-        base.receiveKeyPress(key);
         if (key == Keys.Escape)
+        {
             this.exitThisMenu();
+            return;
+        }
+
+        base.receiveKeyPress(key);
     }
 
     public override void receiveScrollWheelAction(int direction)
@@ -430,21 +479,41 @@ internal sealed class CraftingMonitorMenu : IClickableMenu
         }
     }
 
-    private int GetMaxJobRows(int pipelineCount)
+    private (int JobRows, int PipelineRows) GetRowAllocation(int jobCount, int pipelineCount)
     {
-        return pipelineCount > 0
+        var preferredJobRows = pipelineCount > 0
             ? this.queuePattern is null ? 6 : 5
             : this.queuePattern is null ? 10 : 8;
+        var preferredPipelineRows = this.queuePattern is null ? 5 : 3;
+        var contentTop = this.yPositionOnScreen + 86;
+        var contentHeight = Math.Max(0, this.GetContentBottom() - contentTop);
+        return SVSAPMenuWidgets.CalculateMonitorRowAllocation(
+            contentHeight,
+            jobCount,
+            pipelineCount,
+            preferredJobRows,
+            preferredPipelineRows);
     }
 
-    private int GetMaxPipelineRows()
+    private int GetContentBottom()
     {
-        return this.queuePattern is null ? 5 : 3;
+        if (this.queuePattern is not null)
+        {
+            var amountTop = this.amountButtons.Count > 0
+                ? this.amountButtons[0].bounds.Y
+                : this.yPositionOnScreen + this.height - 96;
+            return amountTop - 64;
+        }
+
+        if (this.caskPipelineButton is not null)
+            return this.caskPipelineButton.bounds.Y - 34;
+
+        return this.yPositionOnScreen + this.height - SVSAPMenuWidgets.Pad;
     }
 
     private bool IsMouseInPipelineArea(int jobCount, int pipelineCount)
     {
-        var maxJobRows = this.GetMaxJobRows(pipelineCount);
+        var maxJobRows = this.GetRowAllocation(jobCount, pipelineCount).JobRows;
         var shownJobs = Math.Min(maxJobRows, Math.Max(0, jobCount - this.jobScrollOffset));
         var pipelineTop = this.yPositionOnScreen + 86 + shownJobs * 46;
         if (jobCount == 0)
@@ -469,10 +538,11 @@ internal sealed class CraftingMonitorMenu : IClickableMenu
 
     private void ClampScrolls(int jobCount, int pipelineCount)
     {
-        var maxJobOffset = Math.Max(0, jobCount - this.GetMaxJobRows(pipelineCount));
+        var rowAllocation = this.GetRowAllocation(jobCount, pipelineCount);
+        var maxJobOffset = Math.Max(0, jobCount - rowAllocation.JobRows);
         this.jobScrollOffset = Math.Clamp(this.jobScrollOffset, 0, maxJobOffset);
 
-        var maxPipelineOffset = Math.Max(0, pipelineCount - this.GetMaxPipelineRows());
+        var maxPipelineOffset = Math.Max(0, pipelineCount - rowAllocation.PipelineRows);
         this.pipelineScrollOffset = Math.Clamp(this.pipelineScrollOffset, 0, maxPipelineOffset);
     }
 

@@ -10,13 +10,13 @@ namespace SVSAP.UI;
 
 internal sealed class PatternProviderMenu : IClickableMenu
 {
-    private const int Pad = 24;
+    private const int Pad = SVSAPMenuWidgets.Pad;
     private const int SlotCount = 36;
-    private const int SlotColumns = 6;
-    private const int SlotRows = 6;
+    private const int MinSlotColumns = 4;
+    private const int MaxSlotColumns = 8;
     private const int Cell = 56;
     private const int InventoryCell = 48;
-    private const int InventoryColumns = 12;
+    private const int MaxInventoryColumns = 12;
     private const int ViewRefreshTicks = 30;
 
     private readonly SObject provider;
@@ -24,6 +24,10 @@ internal sealed class PatternProviderMenu : IClickableMenu
     private readonly Rectangle slotArea;
     private readonly Rectangle controlArea;
     private readonly Rectangle inventoryArea;
+    private readonly int slotColumns;
+    private readonly int slotRows;
+    private readonly int slotCellSize;
+    private readonly int inventoryColumns;
     private readonly ClickableComponent priorityUpButton;
     private readonly ClickableComponent priorityDownButton;
     private readonly ClickableComponent patternUpButton;
@@ -43,12 +47,25 @@ internal sealed class PatternProviderMenu : IClickableMenu
     {
         this.provider = provider;
         this.service = service;
-        this.slotArea = new Rectangle(this.xPositionOnScreen + Pad, this.yPositionOnScreen + 96, SlotColumns * Cell, SlotRows * Cell);
+        this.inventoryColumns = Math.Clamp((this.width - Pad * 2) / InventoryCell, 4, MaxInventoryColumns);
+        var inventoryRows = Math.Max(3, (int)Math.Ceiling(Game1.player.Items.Count / (double)this.inventoryColumns));
         this.inventoryArea = new Rectangle(
-            this.xPositionOnScreen + (this.width - InventoryColumns * InventoryCell) / 2,
-            this.yPositionOnScreen + this.height - Pad - 3 * InventoryCell,
-            InventoryColumns * InventoryCell,
-            3 * InventoryCell);
+            this.xPositionOnScreen + (this.width - this.inventoryColumns * InventoryCell) / 2,
+            this.yPositionOnScreen + this.height - Pad - inventoryRows * InventoryCell,
+            this.inventoryColumns * InventoryCell,
+            inventoryRows * InventoryCell);
+        var slotTop = this.yPositionOnScreen + 96;
+        var slotLayout = SVSAPMenuWidgets.CalculatePatternProviderSlotLayout(
+            this.width - Pad * 2 - 18 - 220,
+            this.inventoryArea.Y - slotTop - 18,
+            SlotCount,
+            Cell,
+            MinSlotColumns,
+            MaxSlotColumns);
+        this.slotColumns = slotLayout.Columns;
+        this.slotRows = slotLayout.Rows;
+        this.slotCellSize = slotLayout.CellSize;
+        this.slotArea = new Rectangle(this.xPositionOnScreen + Pad, slotTop, this.slotColumns * this.slotCellSize, this.slotRows * this.slotCellSize);
         this.controlArea = new Rectangle(
             this.slotArea.Right + 18,
             this.slotArea.Y,
@@ -68,6 +85,12 @@ internal sealed class PatternProviderMenu : IClickableMenu
 
     public override void receiveLeftClick(int x, int y, bool playSound = true)
     {
+        if (this.upperRightCloseButton?.containsPoint(x, y) == true)
+        {
+            base.receiveLeftClick(x, y, playSound);
+            return;
+        }
+
         base.receiveLeftClick(x, y, playSound);
         if (this.priorityUpButton.containsPoint(x, y))
         {
@@ -121,11 +144,10 @@ internal sealed class PatternProviderMenu : IClickableMenu
     public override void draw(SpriteBatch b)
     {
         SVSAPMenuWidgets.DrawStardewAE2Frame(b, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
-        Utility.drawTextWithShadow(
+        SVSAPMenuWidgets.DrawFittedTitle(
             b,
             this.provider.DisplayName,
-            Game1.dialogueFont,
-            new Vector2(this.xPositionOnScreen + Pad + 12, this.yPositionOnScreen + 26),
+            new Rectangle(this.xPositionOnScreen + Pad + 12, this.yPositionOnScreen + 18, this.width - Pad * 2 - 70, 52),
             Game1.textColor);
 
         this.RefreshCachedViews();
@@ -148,7 +170,10 @@ internal sealed class PatternProviderMenu : IClickableMenu
             SVSAPMenuWidgets.DrawSlotStatusLine(b, bounds, view is null ? PixelStatus.Idle : PixelStatus.Ready);
             if (index == this.selectedSlot)
                 DrawSelection(b, bounds);
-            view?.Item.drawInMenu(b, new Vector2(bounds.X + 4, bounds.Y + 4), 0.72f, 1f, 0.86f, StackDrawType.Hide, Color.White, true);
+            if (view is not null)
+            {
+                SVSAPMenuWidgets.DrawItemInSlot(b, view.Item, bounds, 1, 0.72f);
+            }
         }
     }
 
@@ -189,11 +214,12 @@ internal sealed class PatternProviderMenu : IClickableMenu
 
     private void DrawInventory(SpriteBatch b)
     {
-        for (var index = 0; index < Math.Min(36, Game1.player.Items.Count); index++)
+        for (var index = 0; index < Game1.player.Items.Count; index++)
         {
             var bounds = this.GetInventorySlotBounds(index);
             SVSAPMenuWidgets.DrawSlotBackground(b, bounds, Game1.player.Items[index] is null);
-            Game1.player.Items[index]?.drawInMenu(b, new Vector2(bounds.X + 4, bounds.Y + 4), 0.68f, 1f, 0.86f, StackDrawType.Draw, Color.White, true);
+            var item = Game1.player.Items[index];
+            SVSAPMenuWidgets.DrawItemInSlot(b, item, bounds, item?.Stack ?? 0, 0.68f);
         }
     }
 
@@ -308,34 +334,34 @@ internal sealed class PatternProviderMenu : IClickableMenu
     {
         if (!this.slotArea.Contains(x, y))
             return -1;
-        var column = (x - this.slotArea.X) / Cell;
-        var row = (y - this.slotArea.Y) / Cell;
-        var index = row * SlotColumns + column;
+        var column = (x - this.slotArea.X) / this.slotCellSize;
+        var row = (y - this.slotArea.Y) / this.slotCellSize;
+        var index = row * this.slotColumns + column;
         return index is >= 0 and < SlotCount ? index : -1;
     }
 
     private Rectangle GetSlotBounds(int index)
     {
         return new Rectangle(
-            this.slotArea.X + index % SlotColumns * Cell,
-            this.slotArea.Y + index / SlotColumns * Cell,
-            Cell - 4,
-            Cell - 4);
+            this.slotArea.X + index % this.slotColumns * this.slotCellSize,
+            this.slotArea.Y + index / this.slotColumns * this.slotCellSize,
+            this.slotCellSize - 4,
+            this.slotCellSize - 4);
     }
 
     private int HitInventorySlot(int x, int y)
     {
         if (!this.inventoryArea.Contains(x, y))
             return -1;
-        var index = (y - this.inventoryArea.Y) / InventoryCell * InventoryColumns + (x - this.inventoryArea.X) / InventoryCell;
-        return index >= 0 && index < Math.Min(36, Game1.player.Items.Count) ? index : -1;
+        var index = (y - this.inventoryArea.Y) / InventoryCell * this.inventoryColumns + (x - this.inventoryArea.X) / InventoryCell;
+        return index >= 0 && index < Game1.player.Items.Count ? index : -1;
     }
 
     private Rectangle GetInventorySlotBounds(int index)
     {
         return new Rectangle(
-            this.inventoryArea.X + index % InventoryColumns * InventoryCell,
-            this.inventoryArea.Y + index / InventoryColumns * InventoryCell,
+            this.inventoryArea.X + index % this.inventoryColumns * InventoryCell,
+            this.inventoryArea.Y + index / this.inventoryColumns * InventoryCell,
             InventoryCell - 4,
             InventoryCell - 4);
     }

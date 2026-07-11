@@ -91,7 +91,6 @@ internal static class SerializedItemCodec
         public int? Category { get; set; }
         public string Type { get; set; } = string.Empty;
         public string Name { get; set; } = string.Empty;
-        public string DisplayName { get; set; } = string.Empty;
         public uint? Color { get; set; }
         public Dictionary<string, string> ModData { get; set; } = new();
     }

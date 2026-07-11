@@ -6,6 +6,35 @@ internal sealed class NetworkSaveData
     public Dictionary<Guid, NetworkData> Networks { get; set; } = new();
     public List<TxLogRecord> PendingTransactions { get; set; } = new();
     public List<PendingRemoteDelivery> PendingRemoteDeliveries { get; set; } = new();
+    public List<ExecutedTerminalDeposit> ExecutedTerminalDeposits { get; set; } = new();
+    public List<ExecutedStructuralConsumption> ExecutedStructuralConsumptions { get; set; } = new();
+}
+
+internal sealed class ExecutedTerminalDeposit
+{
+    public long PlayerId { get; set; }
+    public Guid TransactionId { get; set; }
+    public Guid NetworkId { get; set; }
+    public Guid EndpointId { get; set; }
+    public string ActionKind { get; set; } = string.Empty;
+    public string Message { get; set; } = string.Empty;
+    public int CreatedDay { get; set; }
+    public long CreatedTick { get; set; }
+    public List<TerminalItemPayloadMessage> ReturnedDepositItems { get; set; } = new();
+}
+
+internal sealed class ExecutedStructuralConsumption
+{
+    public long PlayerId { get; set; }
+    public Guid TransactionId { get; set; }
+    public string LocationName { get; set; } = string.Empty;
+    public int TileX { get; set; }
+    public int TileY { get; set; }
+    public string ActionKind { get; set; } = string.Empty;
+    public string Message { get; set; } = string.Empty;
+    public Guid ResultNetworkId { get; set; }
+    public int CreatedDay { get; set; }
+    public long CreatedTick { get; set; }
 }
 
 internal enum RemoteDeliveryKind
@@ -19,6 +48,8 @@ internal sealed class PendingRemoteDelivery
     public Guid DeliveryId { get; set; }
     public long PlayerId { get; set; }
     public Guid TransactionId { get; set; }
+    public Guid MenuSessionId { get; set; }
+    public long RequestSequence { get; set; }
     public RemoteDeliveryKind Kind { get; set; }
     public TerminalActionKind TerminalAction { get; set; }
     public StructuralActionKind StructuralKind { get; set; }

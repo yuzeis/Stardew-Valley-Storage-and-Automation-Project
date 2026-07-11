@@ -10,9 +10,11 @@ namespace SVSAP.UI;
 
 internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
 {
+    private const int SnapshotRequestTimeoutTicks = 180;
+    private const int ActionRequestTimeoutTicks = 300;
     private CraftingMonitorSnapshotResponseMessage snapshot;
     private readonly Func<CraftingMonitorActionRequestMessage, bool> sendRequest;
-    private readonly Action<Guid, Guid> requestSnapshot;
+    private readonly Func<Guid, Guid, bool> requestSnapshot;
     private readonly List<ClickableComponent> amountButtons = new();
     private readonly List<ClickableComponent> cancelButtons = new();
     private readonly List<ClickableComponent> pipelineButtons = new();
@@ -25,13 +27,18 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
     private int pipelineScrollOffset;
     private bool longJobConfirmationArmed;
     private bool requestPending;
+    private bool snapshotRequestPending;
+    private int snapshotRequestAtTick;
+    private int actionRequestAtTick;
     private PatternData? previewQueuePattern;
     private int previewQueueBatches = 1;
+    private readonly Guid menuSessionId;
+    private long lastAppliedRequestSequence;
 
     public RemoteCraftingMonitorMenu(
         CraftingMonitorSnapshotResponseMessage snapshot,
         Func<CraftingMonitorActionRequestMessage, bool> sendRequest,
-        Action<Guid, Guid> requestSnapshot)
+        Func<Guid, Guid, bool> requestSnapshot)
         : base(
             x: Math.Max(0, (Game1.uiViewport.Width - GetMenuWidth()) / 2),
             y: Math.Max(0, (Game1.uiViewport.Height - GetMenuHeight()) / 2),
@@ -40,6 +47,8 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
             showUpperRightCloseButton: true)
     {
         this.snapshot = snapshot;
+        this.menuSessionId = snapshot.MenuSessionId;
+        this.lastAppliedRequestSequence = snapshot.RequestSequence;
         this.sendRequest = sendRequest;
         this.requestSnapshot = requestSnapshot;
         this.BuildLayout();
@@ -52,29 +61,39 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
 
     private void BuildLayout()
     {
-        var isTwoRow = this.width < 900;
-        var buttonY1 = this.yPositionOnScreen + this.height - (isTwoRow ? 116 : 76);
-        var buttonY2 = this.yPositionOnScreen + this.height - 76;
+        var buttonY2 = this.yPositionOnScreen + this.height - SVSAPMenuWidgets.Pad - 38;
+        var actionBounds = SVSAPMenuWidgets.CalculateRightAlignedButtonRow(
+            this.xPositionOnScreen,
+            this.width,
+            buttonY2,
+            buttonCount: 4,
+            preferredWidth: 116,
+            height: 38,
+            gap: 16,
+            horizontalMargin: 56);
+        var amountX = this.xPositionOnScreen + 56;
+        const int amountRowWidth = 5 * 58 + 4 * 6;
+        var isTwoRow = amountX + amountRowWidth + 16 > actionBounds[0].X;
+        var buttonY1 = isTwoRow ? buttonY2 - 40 : buttonY2;
 
         this.refreshButton = new ClickableComponent(
-            new Rectangle(this.xPositionOnScreen + this.width - 172, buttonY2, 116, 38),
+            actionBounds[3],
             "refresh",
             ModText.Get("craftingMonitor.button.refresh"));
         this.queueButton = new ClickableComponent(
-            new Rectangle(this.xPositionOnScreen + this.width - 304, buttonY2, 116, 38),
+            actionBounds[2],
             "queue",
             ModText.Get("craftingMonitor.button.queue"));
         this.pipelineToggleButton = new ClickableComponent(
-            new Rectangle(this.xPositionOnScreen + this.width - 436, buttonY2, 116, 38),
+            actionBounds[1],
             "toggle_pipeline",
             ModText.Get("craftingMonitor.button.pipeline"));
         this.caskPipelineButton = new ClickableComponent(
-            new Rectangle(this.xPositionOnScreen + this.width - 568, buttonY2, 116, 38),
+            actionBounds[0],
             "toggle_cask",
             ModText.Get("craftingMonitor.button.cask"));
 
         this.amountButtons.Clear();
-        var amountX = this.xPositionOnScreen + 56;
         foreach (var amount in new[] { 1, 5, 10, 25, 100 })
         {
             this.amountButtons.Add(new ClickableComponent(
@@ -90,6 +109,36 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
         return this.snapshot.NetworkId == networkId;
     }
 
+    public bool MatchesSnapshotContext(CraftingMonitorSnapshotResponseMessage candidate)
+    {
+        return RemoteSnapshotSessionRules.Matches(this.menuSessionId, candidate.MenuSessionId)
+            && candidate.NetworkId == this.snapshot.NetworkId
+            && candidate.EndpointId == this.snapshot.EndpointId;
+    }
+
+    public bool TryApplyRefreshSnapshot(CraftingMonitorSnapshotResponseMessage updated)
+    {
+        if (!this.MatchesSnapshotContext(updated))
+            return false;
+
+        if (!RemoteSnapshotSessionRules.IsNewer(this.lastAppliedRequestSequence, updated.RequestSequence))
+            return false;
+
+        this.snapshotRequestPending = false;
+        this.lastAppliedRequestSequence = updated.RequestSequence;
+        this.ApplySnapshot(updated);
+        return true;
+    }
+
+    public void MarkSnapshotRequestFailed(long requestSequence)
+    {
+        if (!RemoteSnapshotSessionRules.IsNewer(this.lastAppliedRequestSequence, requestSequence))
+            return;
+
+        this.lastAppliedRequestSequence = requestSequence;
+        this.snapshotRequestPending = false;
+    }
+
     public void ApplySnapshot(CraftingMonitorSnapshotResponseMessage updated)
     {
         if (!SameQueuePattern(this.snapshot.QueuePattern, updated.QueuePattern)
@@ -99,15 +148,25 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
         }
 
         this.snapshot = updated;
-        this.requestPending = false;
+        this.snapshotRequestPending = false;
         this.ClampScrolls();
     }
 
-    public void MarkActionComplete(CraftingMonitorSnapshotResponseMessage? updated)
+    public bool MarkActionComplete(CraftingMonitorActionResponseMessage response)
     {
+        if (response.NetworkId != this.snapshot.NetworkId
+            || !RemoteSnapshotSessionRules.Matches(this.menuSessionId, response.MenuSessionId)
+            || !RemoteSnapshotSessionRules.IsNewer(this.lastAppliedRequestSequence, response.RequestSequence))
+        {
+            return false;
+        }
+
+        this.lastAppliedRequestSequence = response.RequestSequence;
         this.requestPending = false;
-        if (updated is not null && updated.Success)
-            this.ApplySnapshot(updated);
+        if (response.Snapshot is not null && response.Snapshot.Success && this.MatchesSnapshotContext(response.Snapshot))
+            this.ApplySnapshot(response.Snapshot);
+
+        return true;
     }
 
     public void ApplyActionResult(CraftingMonitorActionResponseMessage response)
@@ -126,6 +185,24 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
         Game1.playSound("smallSelect");
     }
 
+    public override void update(GameTime time)
+    {
+        base.update(time);
+        var tick = Game1.ticks;
+        if (this.requestPending
+            && RemoteSnapshotSessionRules.HasTimedOut(this.actionRequestAtTick, tick, ActionRequestTimeoutTicks))
+        {
+            this.requestPending = false;
+            this.RequestSnapshot();
+        }
+
+        if (this.snapshotRequestPending
+            && RemoteSnapshotSessionRules.HasTimedOut(this.snapshotRequestAtTick, tick, SnapshotRequestTimeoutTicks))
+        {
+            this.snapshotRequestPending = false;
+        }
+    }
+
     public override void draw(SpriteBatch b)
     {
         SVSAPMenuWidgets.DrawStardewAE2Frame(b, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
@@ -133,16 +210,21 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
 
         var jobs = this.snapshot.Jobs;
         var pipelines = this.snapshot.Pipelines;
+        var rowAllocation = this.GetRowAllocation();
         var title = ModText.Format("remoteCraftingMonitor.title", this.snapshot.NetworkName, jobs.Count, pipelines.Count);
-        b.DrawString(Game1.dialogueFont, title, new Vector2(this.xPositionOnScreen + SVSAPMenuWidgets.Pad + 12, this.yPositionOnScreen + 32), Game1.textColor);
-        if (this.requestPending)
-            b.DrawString(Game1.smallFont, ModText.Get("remoteMonitor.pendingInline"), new Vector2(this.xPositionOnScreen + 48, this.yPositionOnScreen + 66), Color.Firebrick);
+        SVSAPMenuWidgets.DrawFittedTitle(
+            b,
+            title,
+            new Rectangle(this.xPositionOnScreen + SVSAPMenuWidgets.Pad + 12, this.yPositionOnScreen + 22, this.width - SVSAPMenuWidgets.Pad * 2 - 104, 46),
+            Game1.textColor);
+        if (this.requestPending || this.snapshotRequestPending)
+            SVSAPMenuWidgets.DrawPixelStatusLight(b, this.xPositionOnScreen + this.width - 96, this.yPositionOnScreen + 40, PixelStatus.Processing);
 
         var y = this.yPositionOnScreen + 86;
         this.cancelButtons.Clear();
         this.pipelineButtons.Clear();
 
-        var maxJobRows = this.GetMaxJobRows(pipelines.Count);
+        var maxJobRows = rowAllocation.JobRows;
         var maxRows = Math.Min(maxJobRows, jobs.Count - this.jobScrollOffset);
         for (var i = 0; i < maxRows; i++)
         {
@@ -154,8 +236,14 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
                 CraftingJobState.Cancelled => Color.DarkSlateGray,
                 _ => Game1.textColor
             };
-            var detail = $"{GetJobDisplayName(job)}  {FormatJobState(job.State)}{FormatCpuSlot(job)}{FormatNodeCount(job)}{FormatReservations(job)}  {job.CompletedCount:N0}/{job.RequestedCount:N0}";
-            b.DrawString(Game1.smallFont, TrimTo(detail, 94), new Vector2(this.xPositionOnScreen + 64, y), color);
+            var status = string.IsNullOrWhiteSpace(job.StatusMessage) ? string.Empty : $"  {job.StatusMessage}";
+            var detail = $"{GetJobDisplayName(job)}  {FormatJobState(job.State)}{FormatCpuSlot(job)}{FormatNodeCount(job)}{FormatReservations(job)}  {job.CompletedCount:N0}/{job.RequestedCount:N0}{status}";
+            SVSAPMenuWidgets.DrawFittedLine(
+                b,
+                detail,
+                new Rectangle(this.xPositionOnScreen + 64, y - 2, this.width - 248, 34),
+                color,
+                horizontalPadding: 0);
 
             if (job.CanCancel)
             {
@@ -172,19 +260,29 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
 
         if (jobs.Count == 0)
         {
-            b.DrawString(Game1.smallFont, ModText.Get("craftingMonitor.noJobs"), new Vector2(this.xPositionOnScreen + 64, y), Color.DarkSlateGray);
+            SVSAPMenuWidgets.DrawFittedLine(
+                b,
+                ModText.Get("craftingMonitor.noJobs"),
+                new Rectangle(this.xPositionOnScreen + 64, y, this.width - 128, 30),
+                Color.DarkSlateGray,
+                horizontalPadding: 0);
             y += 38;
         }
         else if (this.jobScrollOffset + maxRows < jobs.Count)
         {
-            b.DrawString(Game1.smallFont, ModText.Format("craftingMonitor.moreJobs", jobs.Count - this.jobScrollOffset - maxRows), new Vector2(this.xPositionOnScreen + 64, y), Color.DarkSlateGray);
+            SVSAPMenuWidgets.DrawFittedLine(
+                b,
+                ModText.Format("craftingMonitor.moreJobs", jobs.Count - this.jobScrollOffset - maxRows),
+                new Rectangle(this.xPositionOnScreen + 64, y, this.width - 128, 30),
+                Color.DarkSlateGray,
+                horizontalPadding: 0);
             y += 32;
         }
 
         if (pipelines.Count > 0)
         {
             y += 16;
-            var shown = Math.Min(this.GetMaxPipelineRows(), pipelines.Count - this.pipelineScrollOffset);
+            var shown = Math.Min(rowAllocation.PipelineRows, pipelines.Count - this.pipelineScrollOffset);
             for (var i = 0; i < shown; i++)
             {
                 var pipeline = pipelines[this.pipelineScrollOffset + i];
@@ -193,7 +291,12 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
                 var target = pipeline.TargetKeep > 0 ? pipeline.TargetKeep.ToString("N0") : ModText.Get("craftingMonitor.unlimited");
                 var mode = pipeline.Mode == ProductionPipelineMode.CaskAging ? ModText.Get("craftingMonitor.mode.cask") : ModText.Get("craftingMonitor.mode.processing");
                 var line = ModText.Format("remoteCraftingMonitor.pipelineLine", status, mode, GetPipelineDisplayName(pipeline), pipeline.Priority, target, pipeline.ItemsPerCycle, FormatPipelineStatus(pipeline));
-                b.DrawString(Game1.smallFont, TrimTo(line, 56), new Vector2(this.xPositionOnScreen + 64, y), color);
+                SVSAPMenuWidgets.DrawFittedLine(
+                    b,
+                    line,
+                    new Rectangle(this.xPositionOnScreen + 64, y - 2, Math.Max(80, this.width - 460), 34),
+                    color,
+                    horizontalPadding: 0);
 
                 var buttonX = this.xPositionOnScreen + this.width - 380;
                 this.DrawPipelineButton(b, pipeline, PatternExecutionService.PipelineActionToggle, status, buttonX, y - 3, 52, pipeline.Enabled ? Color.LightGreen : Color.White);
@@ -216,17 +319,26 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
 
         if (this.snapshot.QueuePattern is not null)
         {
+            var amountTop = this.amountButtons.Count > 0
+                ? this.amountButtons[0].bounds.Y
+                : this.yPositionOnScreen + this.height - SVSAPMenuWidgets.Pad - 38;
             if (this.longJobConfirmationArmed)
             {
-                b.DrawString(
-                    Game1.smallFont,
+                SVSAPMenuWidgets.DrawFittedLine(
+                    b,
                     ModText.Get("craftingMonitor.longJob.armed"),
-                    new Vector2(this.xPositionOnScreen + 56, this.yPositionOnScreen + this.height - 138),
-                    Color.Firebrick);
+                    new Rectangle(this.xPositionOnScreen + 56, amountTop - 56, this.width - 112, 24),
+                    Color.Firebrick,
+                    horizontalPadding: 0);
             }
 
             var queueText = ModText.Format("craftingMonitor.queueLine", PatternDisplayNames.Get(this.snapshot.QueuePattern), this.queueAmount);
-            b.DrawString(Game1.smallFont, TrimTo(queueText, 70), new Vector2(this.xPositionOnScreen + 56, this.yPositionOnScreen + this.height - 112), Game1.textColor);
+            SVSAPMenuWidgets.DrawFittedLine(
+                b,
+                queueText,
+                new Rectangle(this.xPositionOnScreen + 56, amountTop - 28, this.width - 112, 24),
+                Game1.textColor,
+                horizontalPadding: 0);
 
             foreach (var button in this.amountButtons)
             {
@@ -245,7 +357,7 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
         else if (this.HasCaskPipelineItem())
         {
             var caskText = ModText.Format("craftingMonitor.caskLine", this.GetCaskPipelineItemDisplayName());
-            b.DrawString(Game1.smallFont, TrimTo(caskText, 70), new Vector2(this.xPositionOnScreen + 56, this.yPositionOnScreen + this.height - 112), Game1.textColor);
+            SVSAPMenuWidgets.DrawFittedLine(b, caskText, new Rectangle(this.xPositionOnScreen + 56, this.caskPipelineButton.bounds.Y - 28, this.width - 112, 24), Game1.textColor, horizontalPadding: 0);
             this.DrawBottomButton(b, this.caskPipelineButton);
         }
 
@@ -256,12 +368,17 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
 
     public override void receiveLeftClick(int x, int y, bool playSound = true)
     {
+        if (this.upperRightCloseButton?.containsPoint(x, y) == true)
+        {
+            base.receiveLeftClick(x, y, playSound);
+            return;
+        }
+
         base.receiveLeftClick(x, y, playSound);
 
         if (this.refreshButton.containsPoint(x, y))
         {
-            this.requestSnapshot(this.snapshot.NetworkId, this.snapshot.EndpointId);
-            Game1.playSound("smallSelect");
+            Game1.playSound(this.RequestSnapshot() ? "smallSelect" : "cancel");
             return;
         }
 
@@ -408,24 +525,48 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
 
     private bool SendMutation(CraftingMonitorActionRequestMessage request)
     {
-        if (this.requestPending)
+        if (this.requestPending || this.snapshotRequestPending)
         {
             Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteMonitor.requestPending"), HUDMessage.error_type));
             Game1.playSound("cancel");
             return false;
         }
 
+        request.MenuSessionId = this.menuSessionId;
         var sent = this.sendRequest(request);
         this.requestPending = sent;
+        if (sent)
+            this.actionRequestAtTick = Game1.ticks;
         Game1.playSound(sent ? "smallSelect" : "cancel");
         return sent;
     }
 
+    private bool RequestSnapshot()
+    {
+        if (this.requestPending)
+            return false;
+
+        var tick = Game1.ticks;
+        if (this.snapshotRequestPending
+            && !RemoteSnapshotSessionRules.HasTimedOut(this.snapshotRequestAtTick, tick, SnapshotRequestTimeoutTicks))
+        {
+            return false;
+        }
+
+        this.snapshotRequestAtTick = tick;
+        this.snapshotRequestPending = this.requestSnapshot(this.snapshot.NetworkId, this.snapshot.EndpointId);
+        return this.snapshotRequestPending;
+    }
+
     public override void receiveKeyPress(Keys key)
     {
-        base.receiveKeyPress(key);
         if (key == Keys.Escape)
+        {
             this.exitThisMenu();
+            return;
+        }
+
+        base.receiveKeyPress(key);
     }
 
     public override void receiveScrollWheelAction(int direction)
@@ -519,22 +660,44 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
         SVSAPMenuWidgets.DrawButton(b, button, tint: tint);
     }
 
-    private int GetMaxJobRows(int pipelineCount)
+    private (int JobRows, int PipelineRows) GetRowAllocation()
     {
-        if (this.HasBottomControls())
-            return pipelineCount > 0 ? 5 : 8;
-
-        return pipelineCount > 0 ? 7 : 10;
+        var pipelineCount = this.snapshot.Pipelines.Count;
+        var preferredJobRows = this.HasBottomControls()
+            ? pipelineCount > 0 ? 5 : 8
+            : pipelineCount > 0 ? 7 : 10;
+        var preferredPipelineRows = this.HasBottomControls() ? 3 : 5;
+        var contentTop = this.yPositionOnScreen + 86;
+        var contentHeight = Math.Max(0, this.GetContentBottom() - contentTop);
+        return SVSAPMenuWidgets.CalculateMonitorRowAllocation(
+            contentHeight,
+            this.snapshot.Jobs.Count,
+            pipelineCount,
+            preferredJobRows,
+            preferredPipelineRows);
     }
 
-    private int GetMaxPipelineRows()
+    private int GetContentBottom()
     {
-        return this.HasBottomControls() ? 3 : 5;
+        var contentBottom = this.refreshButton.bounds.Y - 12;
+        if (this.snapshot.QueuePattern is not null)
+        {
+            var amountTop = this.amountButtons.Count > 0
+                ? this.amountButtons[0].bounds.Y
+                : this.yPositionOnScreen + this.height - SVSAPMenuWidgets.Pad - 38;
+            contentBottom = Math.Min(contentBottom, amountTop - 62);
+        }
+        else if (this.HasCaskPipelineItem())
+        {
+            contentBottom = Math.Min(contentBottom, this.caskPipelineButton.bounds.Y - 32);
+        }
+
+        return contentBottom;
     }
 
     private bool IsMouseInPipelineArea()
     {
-        var maxJobRows = this.GetMaxJobRows(this.snapshot.Pipelines.Count);
+        var maxJobRows = this.GetRowAllocation().JobRows;
         var shownJobs = Math.Min(maxJobRows, Math.Max(0, this.snapshot.Jobs.Count - this.jobScrollOffset));
         var pipelineTop = this.yPositionOnScreen + 86 + shownJobs * 46;
         if (this.snapshot.Jobs.Count == 0)
@@ -548,10 +711,11 @@ internal sealed class RemoteCraftingMonitorMenu : IClickableMenu
 
     private void ClampScrolls()
     {
-        var maxJobOffset = Math.Max(0, this.snapshot.Jobs.Count - this.GetMaxJobRows(this.snapshot.Pipelines.Count));
+        var rowAllocation = this.GetRowAllocation();
+        var maxJobOffset = Math.Max(0, this.snapshot.Jobs.Count - rowAllocation.JobRows);
         this.jobScrollOffset = Math.Clamp(this.jobScrollOffset, 0, maxJobOffset);
 
-        var maxPipelineOffset = Math.Max(0, this.snapshot.Pipelines.Count - this.GetMaxPipelineRows());
+        var maxPipelineOffset = Math.Max(0, this.snapshot.Pipelines.Count - rowAllocation.PipelineRows);
         this.pipelineScrollOffset = Math.Clamp(this.pipelineScrollOffset, 0, maxPipelineOffset);
     }
 

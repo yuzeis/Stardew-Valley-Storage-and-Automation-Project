@@ -10,23 +10,33 @@ namespace SVSAP.UI;
 internal sealed class RemoteStorageDriveMenu : IClickableMenu
 {
     private const int SnapshotRefreshTicks = 30;
-    private const int Pad = 28;
+    private const int SnapshotRequestTimeoutTicks = 180;
+    private const int ActionRequestTimeoutTicks = 300;
+    private const int Pad = SVSAPMenuWidgets.Pad;
     private const int SlotCount = 10;
-    private const int SlotColumns = 5;
     private const int InventoryCell = 48;
-    private const int InventoryColumns = 12;
-    private readonly Action<StructuralActionKind, int, Item?> runSlotAction;
-    private readonly Action requestRefresh;
+    private const int MaxInventoryColumns = 12;
+    private readonly Func<StructuralActionKind, int, Item?, bool> runSlotAction;
+    private readonly Func<bool> requestRefresh;
     private readonly Rectangle slotArea;
     private readonly Rectangle inventoryArea;
+    private readonly int slotColumns;
+    private readonly int slotRows;
+    private readonly int inventoryColumns;
     private bool requestPending;
+    private bool snapshotRequestPending;
     private int selectedSlot;
     private int snapshotAtTick;
+    private int snapshotRequestAtTick;
+    private int actionRequestAtTick;
+    private readonly SVSAPItemIconCache itemIconCache = new();
+    private readonly Guid menuSessionId;
+    private long lastAppliedRequestSequence;
 
     public RemoteStorageDriveMenu(
         StructuralSnapshotResponseMessage snapshot,
-        Action<StructuralActionKind, int, Item?> runSlotAction,
-        Action requestRefresh)
+        Func<StructuralActionKind, int, Item?, bool> runSlotAction,
+        Func<bool> requestRefresh)
         : base(
             x: Math.Max(0, (Game1.uiViewport.Width - GetMenuWidth()) / 2),
             y: Math.Max(0, (Game1.uiViewport.Height - GetMenuHeight()) / 2),
@@ -36,22 +46,82 @@ internal sealed class RemoteStorageDriveMenu : IClickableMenu
     {
         this.Snapshot = snapshot;
         this.snapshotAtTick = Game1.ticks;
+        this.inventoryColumns = Math.Clamp((this.width - Pad * 2) / InventoryCell, 4, MaxInventoryColumns);
+        var inventoryRows = Math.Max(3, (int)Math.Ceiling(Game1.player.Items.Count / (double)this.inventoryColumns));
+        this.menuSessionId = snapshot.MenuSessionId;
+        this.lastAppliedRequestSequence = snapshot.RequestSequence;
         this.runSlotAction = runSlotAction;
         this.requestRefresh = requestRefresh;
-        this.slotArea = new Rectangle(this.xPositionOnScreen + Pad, this.yPositionOnScreen + 112, SlotColumns * SVSAPMenuWidgets.Cell, 2 * SVSAPMenuWidgets.Cell);
+        var layout = StorageDriveMenu.CalculateLayoutShape(this.width);
+        this.slotColumns = layout.Columns;
+        this.slotRows = layout.Rows;
+        this.slotArea = new Rectangle(
+            this.xPositionOnScreen + Pad,
+            this.yPositionOnScreen + 112,
+            this.slotColumns * SVSAPMenuWidgets.Cell,
+            this.slotRows * SVSAPMenuWidgets.Cell);
         this.inventoryArea = new Rectangle(
-            this.xPositionOnScreen + (this.width - InventoryColumns * InventoryCell) / 2,
-            this.yPositionOnScreen + this.height - Pad - 3 * InventoryCell,
-            InventoryColumns * InventoryCell,
-            3 * InventoryCell);
+            this.xPositionOnScreen + (this.width - this.inventoryColumns * InventoryCell) / 2,
+            this.yPositionOnScreen + this.height - Pad - inventoryRows * InventoryCell,
+            this.inventoryColumns * InventoryCell,
+            inventoryRows * InventoryCell);
         SVSAPMenuWidgets.PositionCloseButton(this.upperRightCloseButton, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
     }
 
     internal StructuralSnapshotResponseMessage Snapshot { get; private set; }
 
+    public bool MatchesSnapshotContext(StructuralSnapshotResponseMessage candidate)
+    {
+        return RemoteSnapshotSessionRules.Matches(this.menuSessionId, candidate.MenuSessionId)
+            && candidate.Kind == StructuralSnapshotKind.StorageDrive
+            && string.Equals(candidate.LocationName, this.Snapshot.LocationName, StringComparison.Ordinal)
+            && candidate.TileX == this.Snapshot.TileX
+            && candidate.TileY == this.Snapshot.TileY;
+    }
+
+    public bool TryApplyRefreshSnapshot(StructuralSnapshotResponseMessage snapshot)
+    {
+        if (!this.MatchesSnapshotContext(snapshot))
+            return false;
+
+        if (!RemoteSnapshotSessionRules.IsNewer(this.lastAppliedRequestSequence, snapshot.RequestSequence))
+            return false;
+
+        this.snapshotRequestPending = false;
+        this.snapshotAtTick = Game1.ticks;
+        this.lastAppliedRequestSequence = snapshot.RequestSequence;
+        this.ApplySnapshot(snapshot);
+        return true;
+    }
+
+    public void MarkSnapshotRequestFailed(long requestSequence)
+    {
+        if (!RemoteSnapshotSessionRules.IsNewer(this.lastAppliedRequestSequence, requestSequence))
+            return;
+
+        this.lastAppliedRequestSequence = requestSequence;
+        this.snapshotRequestPending = false;
+        this.snapshotAtTick = Game1.ticks;
+    }
+
+    public bool TryMarkActionComplete(StructuralActionResponseMessage response)
+    {
+        if (!RemoteSnapshotSessionRules.Matches(this.menuSessionId, response.MenuSessionId)
+            || !RemoteSnapshotSessionRules.IsNewer(this.lastAppliedRequestSequence, response.RequestSequence))
+        {
+            return false;
+        }
+
+        this.lastAppliedRequestSequence = response.RequestSequence;
+        this.requestPending = false;
+        this.RequestRefresh();
+        return true;
+    }
+
     public void ApplySnapshot(StructuralSnapshotResponseMessage snapshot)
     {
         this.requestPending = false;
+        this.snapshotRequestPending = false;
         this.snapshotAtTick = Game1.ticks;
         if (snapshot.Kind == StructuralSnapshotKind.StorageDrive && snapshot.StorageDrive is not null)
             this.Snapshot = snapshot;
@@ -61,22 +131,39 @@ internal sealed class RemoteStorageDriveMenu : IClickableMenu
     {
         base.update(time);
         var tick = Game1.ticks;
-        if (this.requestPending || (tick >= this.snapshotAtTick && tick - this.snapshotAtTick < SnapshotRefreshTicks))
+        if (this.requestPending)
+        {
+            if (!RemoteSnapshotSessionRules.HasTimedOut(this.actionRequestAtTick, tick, ActionRequestTimeoutTicks))
+                return;
+
+            this.requestPending = false;
+        }
+
+        if (this.snapshotRequestPending)
+        {
+            if (!RemoteSnapshotSessionRules.HasTimedOut(this.snapshotRequestAtTick, tick, SnapshotRequestTimeoutTicks))
+                return;
+
+            this.snapshotRequestPending = false;
+        }
+
+        if (tick >= this.snapshotAtTick && tick - this.snapshotAtTick < SnapshotRefreshTicks)
             return;
 
-        this.snapshotAtTick = tick;
-        this.requestRefresh();
+        this.RequestRefresh();
     }
 
     public override void draw(SpriteBatch b)
     {
         SVSAPMenuWidgets.DrawStardewAE2Frame(b, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
-        Utility.drawTextWithShadow(b, this.Snapshot.DisplayName, Game1.dialogueFont, new Vector2(this.xPositionOnScreen + Pad + 12, this.yPositionOnScreen + 26), Game1.textColor);
+        SVSAPMenuWidgets.DrawFittedTitle(
+            b,
+            this.Snapshot.DisplayName,
+            new Rectangle(this.xPositionOnScreen + Pad + 12, this.yPositionOnScreen + 18, this.width - Pad * 2 - 104, 52),
+            Game1.textColor);
 
-        if (this.requestPending)
-        {
-            b.DrawString(Game1.smallFont, ModText.Get("remoteTerminal.pendingInline"), new Vector2(this.xPositionOnScreen + Pad + 320, this.yPositionOnScreen + 34), Color.Firebrick);
-        }
+        if (this.requestPending || this.snapshotRequestPending)
+            SVSAPMenuWidgets.DrawPixelStatusLight(b, this.xPositionOnScreen + this.width - 96, this.yPositionOnScreen + 38, PixelStatus.Processing);
 
         var slots = this.Snapshot.StorageDrive?.Slots ?? new List<RemoteStorageDriveSlotMessage>();
         this.DrawSlots(b, slots);
@@ -89,6 +176,12 @@ internal sealed class RemoteStorageDriveMenu : IClickableMenu
 
     public override void receiveLeftClick(int x, int y, bool playSound = true)
     {
+        if (this.upperRightCloseButton?.containsPoint(x, y) == true)
+        {
+            base.receiveLeftClick(x, y, playSound);
+            return;
+        }
+
         base.receiveLeftClick(x, y, playSound);
 
         if (this.requestPending)
@@ -127,8 +220,15 @@ internal sealed class RemoteStorageDriveMenu : IClickableMenu
         }
 
         var targetSlot = this.Snapshot.StorageDrive?.Slots.Any(slot => slot.SlotIndex == this.selectedSlot && slot.Occupied) == true
-            ? Enumerable.Range(0, SlotCount).FirstOrDefault(index => this.Snapshot.StorageDrive?.Slots.Any(slot => slot.SlotIndex == index && slot.Occupied) != true)
+            ? Enumerable.Range(0, SlotCount).FirstOrDefault(index => this.Snapshot.StorageDrive?.Slots.Any(slot => slot.SlotIndex == index && slot.Occupied) != true, -1)
             : this.selectedSlot;
+        if (targetSlot < 0)
+        {
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("ui.storageDrive.full"), HUDMessage.error_type));
+            Game1.playSound("cancel");
+            return;
+        }
+
         var oldToolIndex = Game1.player.CurrentToolIndex;
         Game1.player.CurrentToolIndex = inventoryIndex;
         try
@@ -143,17 +243,7 @@ internal sealed class RemoteStorageDriveMenu : IClickableMenu
 
     public override void receiveRightClick(int x, int y, bool playSound = true)
     {
-        if (this.requestPending)
-        {
-            Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteTerminal.requestPending"), HUDMessage.error_type));
-            Game1.playSound("cancel");
-            return;
-        }
-
-        this.requestPending = true;
-        this.snapshotAtTick = Game1.ticks;
-        this.requestRefresh();
-        Game1.playSound("shwip");
+        base.receiveRightClick(x, y, playSound);
     }
 
     private void DrawSlots(SpriteBatch b, IReadOnlyList<RemoteStorageDriveSlotMessage> views)
@@ -169,21 +259,12 @@ internal sealed class RemoteStorageDriveMenu : IClickableMenu
             if (view?.Occupied != true || string.IsNullOrWhiteSpace(view.QualifiedItemId))
                 continue;
 
-            try
+            var item = this.itemIconCache.GetOrCreate(
+                $"cell:{view.QualifiedItemId}",
+                () => SVSAPMenuWidgets.CreateIconItem(view.QualifiedItemId));
+            if (item is not null)
             {
-                ItemRegistry.Create(view.QualifiedItemId).drawInMenu(
-                    b,
-                    new Vector2(cell.X + SVSAPMenuWidgets.IconInset, cell.Y + SVSAPMenuWidgets.IconInset),
-                    1f,
-                    1f,
-                    0.86f,
-                    StackDrawType.Hide,
-                    Color.White,
-                    true);
-            }
-            catch
-            {
-                // Snapshot text below still identifies the cell if the local client lacks an icon.
+                SVSAPMenuWidgets.DrawItemInSlot(b, item, cell, 1);
             }
 
             var ratio = view.CapacityMax <= 0 ? 0f : Math.Clamp(view.CapacityUsed / (float)view.CapacityMax, 0f, 1f);
@@ -198,10 +279,10 @@ internal sealed class RemoteStorageDriveMenu : IClickableMenu
         var lines = this.Snapshot.StorageDrive?.SummaryLines ?? new List<string>();
         var x = this.slotArea.Right + 32;
         var y = this.slotArea.Y;
+        var maxWidth = this.xPositionOnScreen + this.width - Pad - x;
         foreach (var line in lines.Take(10))
         {
-            var text = line.Length > 48 ? line[..48] + "..." : line;
-            b.DrawString(Game1.smallFont, text, new Vector2(x, y), Game1.textColor);
+            SVSAPMenuWidgets.DrawFittedLine(b, line, new Rectangle(x, y, Math.Max(1, maxWidth), 26), Game1.textColor, horizontalPadding: 0);
             y += 28;
             if (y > this.inventoryArea.Y - 48)
                 break;
@@ -211,20 +292,47 @@ internal sealed class RemoteStorageDriveMenu : IClickableMenu
     private void DrawInventory(SpriteBatch b)
     {
         b.Draw(Game1.staminaRect, new Rectangle(this.inventoryArea.X, this.inventoryArea.Y - 10, this.inventoryArea.Width, 2), Color.SaddleBrown * 0.45f);
-        for (var index = 0; index < Math.Min(36, Game1.player.Items.Count); index++)
+        for (var index = 0; index < Game1.player.Items.Count; index++)
         {
             var bounds = this.GetInventorySlotBounds(index);
             SVSAPMenuWidgets.DrawSlotBackground(b, bounds, Game1.player.Items[index] is null);
-            Game1.player.Items[index]?.drawInMenu(b, new Vector2(bounds.X + 4, bounds.Y + 4), 0.68f, 1f, 0.86f, StackDrawType.Draw, Color.White, true);
+            var item = Game1.player.Items[index];
+            SVSAPMenuWidgets.DrawItemInSlot(b, item, bounds, item?.Stack ?? 0, 0.68f);
         }
     }
 
     private void SendAction(StructuralActionKind kind, int slotIndex, Item? held)
     {
-        this.requestPending = true;
+        if (this.snapshotRequestPending)
+        {
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteTerminal.requestPending"), HUDMessage.error_type));
+            Game1.playSound("cancel");
+            return;
+        }
+
         this.snapshotAtTick = Game1.ticks;
-        this.runSlotAction(kind, slotIndex, held);
-        Game1.playSound("smallSelect");
+        this.requestPending = this.runSlotAction(kind, slotIndex, held);
+        if (this.requestPending)
+            this.actionRequestAtTick = Game1.ticks;
+        Game1.playSound(this.requestPending ? "smallSelect" : "cancel");
+    }
+
+    private bool RequestRefresh()
+    {
+        if (this.requestPending)
+            return false;
+
+        var tick = Game1.ticks;
+        if (this.snapshotRequestPending
+            && !RemoteSnapshotSessionRules.HasTimedOut(this.snapshotRequestAtTick, tick, SnapshotRequestTimeoutTicks))
+        {
+            return false;
+        }
+
+        this.snapshotAtTick = tick;
+        this.snapshotRequestAtTick = tick;
+        this.snapshotRequestPending = this.requestRefresh();
+        return this.snapshotRequestPending;
     }
 
     private void DrawHoverTooltip(SpriteBatch b, IReadOnlyList<RemoteStorageDriveSlotMessage> views)
@@ -252,17 +360,17 @@ internal sealed class RemoteStorageDriveMenu : IClickableMenu
 
         var column = (x - this.slotArea.X) / SVSAPMenuWidgets.Cell;
         var row = (y - this.slotArea.Y) / SVSAPMenuWidgets.Cell;
-        if (column < 0 || column >= SlotColumns || row < 0 || row >= 2)
+        if (column < 0 || column >= this.slotColumns || row < 0 || row >= this.slotRows)
             return -1;
 
-        var index = row * SlotColumns + column;
+        var index = row * this.slotColumns + column;
         return index < SlotCount ? index : -1;
     }
 
     private Rectangle GetSlotBounds(int index)
     {
-        var column = index % SlotColumns;
-        var row = index / SlotColumns;
+        var column = index % this.slotColumns;
+        var row = index / this.slotColumns;
         return new Rectangle(
             this.slotArea.X + column * SVSAPMenuWidgets.Cell,
             this.slotArea.Y + row * SVSAPMenuWidgets.Cell,
@@ -274,15 +382,15 @@ internal sealed class RemoteStorageDriveMenu : IClickableMenu
     {
         if (!this.inventoryArea.Contains(x, y))
             return -1;
-        var index = (y - this.inventoryArea.Y) / InventoryCell * InventoryColumns + (x - this.inventoryArea.X) / InventoryCell;
-        return index >= 0 && index < Math.Min(36, Game1.player.Items.Count) ? index : -1;
+        var index = (y - this.inventoryArea.Y) / InventoryCell * this.inventoryColumns + (x - this.inventoryArea.X) / InventoryCell;
+        return index >= 0 && index < Game1.player.Items.Count ? index : -1;
     }
 
     private Rectangle GetInventorySlotBounds(int index)
     {
         return new Rectangle(
-            this.inventoryArea.X + index % InventoryColumns * InventoryCell,
-            this.inventoryArea.Y + index / InventoryColumns * InventoryCell,
+            this.inventoryArea.X + index % this.inventoryColumns * InventoryCell,
+            this.inventoryArea.Y + index / this.inventoryColumns * InventoryCell,
             InventoryCell - 4,
             InventoryCell - 4);
     }
@@ -295,6 +403,6 @@ internal sealed class RemoteStorageDriveMenu : IClickableMenu
         b.Draw(Game1.staminaRect, new Rectangle(bounds.Right - 2, bounds.Y, 2, bounds.Height), Color.Gold);
     }
 
-    private static int GetMenuWidth() => Math.Min(760, Math.Max(640, Game1.uiViewport.Width - 48));
-    private static int GetMenuHeight() => Math.Min(640, Math.Max(560, Game1.uiViewport.Height - 48));
+    private static int GetMenuWidth() => Math.Max(1, Math.Min(760, Game1.uiViewport.Width - 48));
+    private static int GetMenuHeight() => Math.Max(1, Math.Min(640, Game1.uiViewport.Height - 48));
 }

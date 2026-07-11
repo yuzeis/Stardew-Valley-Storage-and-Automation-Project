@@ -11,20 +11,26 @@ namespace SVSAP.UI;
 internal sealed class RemoteTransferBusMenu : IClickableMenu
 {
     private const int SnapshotRefreshTicks = 30;
-    private const int Pad = 28;
+    private const int SnapshotRequestTimeoutTicks = 180;
+    private const int ActionRequestTimeoutTicks = 300;
+    private const int Pad = SVSAPMenuWidgets.Pad;
+    private const int FilterCell = 64;
     private const int FilterColumns = 3;
     private const int FilterRows = 3;
-    private const int UpgradeColumns = 4;
-    private const int UpgradeRows = 2;
+    private const int UpgradeColumns = 8;
+    private const int UpgradeRows = 1;
     private const int UpgradeCell = 46;
     private const int ControlButtonWidth = 150;
     private const int ControlButtonHeight = 42;
     private const int ControlButtonGap = 10;
+    private const int ControlRowGap = 12;
+    private const int DirectionButtonMaxWidth = 80;
+    private const int DirectionButtonMinWidth = 48;
     private const int DirectionButtonGap = 6;
 
-    private readonly Action<StructuralActionKind, int, string, int, Item?> sendAction;
-    private readonly Action requestRefresh;
-    private const int BackpackCell = 52;
+    private readonly Func<StructuralActionKind, int, string, int, Item?, bool> sendAction;
+    private readonly Func<bool> requestRefresh;
+    private const int BackpackCell = 48;
     private readonly SVSAPBackpackGrid backpackGrid = new(BackpackCell);
     private readonly List<ClickableComponent> directionButtons = new();
     private ClickableComponent modeButton = null!;
@@ -37,12 +43,18 @@ internal sealed class RemoteTransferBusMenu : IClickableMenu
     private int selectedSlot;
     private int selectedUpgradeSlot = -1;
     private bool requestPending;
+    private bool snapshotRequestPending;
     private int snapshotAtTick;
+    private int snapshotRequestAtTick;
+    private int actionRequestAtTick;
+    private readonly SVSAPItemIconCache itemIconCache = new();
+    private readonly Guid menuSessionId;
+    private long lastAppliedRequestSequence;
 
     public RemoteTransferBusMenu(
         StructuralSnapshotResponseMessage snapshot,
-        Action<StructuralActionKind, int, string, int, Item?> sendAction,
-        Action requestRefresh)
+        Func<StructuralActionKind, int, string, int, Item?, bool> sendAction,
+        Func<bool> requestRefresh)
         : base(
             x: Math.Max(0, (Game1.uiViewport.Width - GetMenuWidth()) / 2),
             y: Math.Max(0, (Game1.uiViewport.Height - GetMenuHeight()) / 2),
@@ -52,6 +64,8 @@ internal sealed class RemoteTransferBusMenu : IClickableMenu
     {
         this.Snapshot = snapshot;
         this.snapshotAtTick = Game1.ticks;
+        this.menuSessionId = snapshot.MenuSessionId;
+        this.lastAppliedRequestSequence = snapshot.RequestSequence;
         this.sendAction = sendAction;
         this.requestRefresh = requestRefresh;
         this.BuildLayout();
@@ -60,9 +74,58 @@ internal sealed class RemoteTransferBusMenu : IClickableMenu
 
     internal StructuralSnapshotResponseMessage Snapshot { get; private set; }
 
+    public bool MatchesSnapshotContext(StructuralSnapshotResponseMessage candidate)
+    {
+        return RemoteSnapshotSessionRules.Matches(this.menuSessionId, candidate.MenuSessionId)
+            && candidate.Kind == StructuralSnapshotKind.TransferBus
+            && string.Equals(candidate.LocationName, this.Snapshot.LocationName, StringComparison.Ordinal)
+            && candidate.TileX == this.Snapshot.TileX
+            && candidate.TileY == this.Snapshot.TileY;
+    }
+
+    public bool TryApplyRefreshSnapshot(StructuralSnapshotResponseMessage snapshot)
+    {
+        if (!this.MatchesSnapshotContext(snapshot))
+            return false;
+
+        if (!RemoteSnapshotSessionRules.IsNewer(this.lastAppliedRequestSequence, snapshot.RequestSequence))
+            return false;
+
+        this.snapshotRequestPending = false;
+        this.snapshotAtTick = Game1.ticks;
+        this.lastAppliedRequestSequence = snapshot.RequestSequence;
+        this.ApplySnapshot(snapshot);
+        return true;
+    }
+
+    public void MarkSnapshotRequestFailed(long requestSequence)
+    {
+        if (!RemoteSnapshotSessionRules.IsNewer(this.lastAppliedRequestSequence, requestSequence))
+            return;
+
+        this.lastAppliedRequestSequence = requestSequence;
+        this.snapshotRequestPending = false;
+        this.snapshotAtTick = Game1.ticks;
+    }
+
+    public bool TryMarkActionComplete(StructuralActionResponseMessage response)
+    {
+        if (!RemoteSnapshotSessionRules.Matches(this.menuSessionId, response.MenuSessionId)
+            || !RemoteSnapshotSessionRules.IsNewer(this.lastAppliedRequestSequence, response.RequestSequence))
+        {
+            return false;
+        }
+
+        this.lastAppliedRequestSequence = response.RequestSequence;
+        this.requestPending = false;
+        this.RequestRefresh();
+        return true;
+    }
+
     public void ApplySnapshot(StructuralSnapshotResponseMessage snapshot)
     {
         this.requestPending = false;
+        this.snapshotRequestPending = false;
         this.snapshotAtTick = Game1.ticks;
         if (snapshot.Kind == StructuralSnapshotKind.TransferBus && snapshot.TransferBus is not null)
             this.Snapshot = snapshot;
@@ -72,38 +135,53 @@ internal sealed class RemoteTransferBusMenu : IClickableMenu
     {
         base.update(time);
         var tick = Game1.ticks;
-        if (this.requestPending || (tick >= this.snapshotAtTick && tick - this.snapshotAtTick < SnapshotRefreshTicks))
+        if (this.requestPending)
+        {
+            if (!RemoteSnapshotSessionRules.HasTimedOut(this.actionRequestAtTick, tick, ActionRequestTimeoutTicks))
+                return;
+
+            this.requestPending = false;
+        }
+
+        if (this.snapshotRequestPending)
+        {
+            if (!RemoteSnapshotSessionRules.HasTimedOut(this.snapshotRequestAtTick, tick, SnapshotRequestTimeoutTicks))
+                return;
+
+            this.snapshotRequestPending = false;
+        }
+
+        if (tick >= this.snapshotAtTick && tick - this.snapshotAtTick < SnapshotRefreshTicks)
             return;
 
-        this.snapshotAtTick = tick;
-        this.requestRefresh();
+        this.RequestRefresh();
     }
 
-    private static int GetMenuWidth() => Math.Min(1040, Game1.uiViewport.Width - 80);
+    private static int GetMenuWidth() => Math.Max(1, Math.Min(1040, Game1.uiViewport.Width - 48));
 
-    private static int GetMenuHeight() => Math.Min(760, Game1.uiViewport.Height - 80);
+    private static int GetMenuHeight() => Math.Max(1, Math.Min(760, Game1.uiViewport.Height - 48));
 
     private void BuildLayout()
     {
         var innerX = this.xPositionOnScreen + Pad;
         var innerW = this.width - Pad * 2;
-        var top = this.yPositionOnScreen + 24;
+        var contentTop = this.yPositionOnScreen + SVSAPMenuWidgets.ContentTopOffset;
 
-        this.filterArea = new Rectangle(innerX, top + 92, FilterColumns * SVSAPMenuWidgets.Cell, FilterRows * SVSAPMenuWidgets.Cell);
-        this.upgradeArea = new Rectangle(innerX, this.filterArea.Bottom + 14, UpgradeColumns * UpgradeCell, UpgradeRows * UpgradeCell);
+        this.filterArea = new Rectangle(innerX, contentTop + 56, FilterColumns * FilterCell, FilterRows * FilterCell);
+        this.upgradeArea = new Rectangle(innerX, contentTop, UpgradeColumns * UpgradeCell, UpgradeRows * UpgradeCell);
         var controlsX = this.filterArea.Right + 34;
         var controlsY = this.filterArea.Y;
         var controlsAvailable = Math.Max(1, this.xPositionOnScreen + this.width - Pad - controlsX);
-        var controlColumns = controlsAvailable >= ControlButtonWidth * 2 + ControlButtonGap ? 2 : 1;
-        var controlWidth = Math.Clamp((controlsAvailable - Math.Max(0, controlColumns - 1) * ControlButtonGap) / controlColumns, 90, ControlButtonWidth);
+        var controlColumns = CalculateControlColumns(controlsAvailable);
+        var controlWidth = CalculateControlButtonWidth(controlsAvailable, controlColumns);
         this.modeButton = new ClickableComponent(GetControlButtonBounds(controlsX, controlsY, 0, controlColumns, controlWidth), "mode", ModText.Get("ui.transferBus.action.toggleFilterMode"));
         this.oreButton = new ClickableComponent(GetControlButtonBounds(controlsX, controlsY, 1, controlColumns, controlWidth), "ore", string.Empty);
         this.qualityButton = new ClickableComponent(GetControlButtonBounds(controlsX, controlsY, 2, controlColumns, controlWidth), "quality", ModText.Get("ui.transferBus.action.toggleQuality"));
         this.clearButton = new ClickableComponent(GetControlButtonBounds(controlsX, controlsY, 3, controlColumns, controlWidth), "clear", ModText.Get("ui.transferBus.action.clearFilter"));
 
         this.directionButtons.Clear();
-        var dirY = controlsY + 2 * (ControlButtonHeight + 12) + 10;
-        var directionButtonWidth = Math.Clamp((controlsAvailable - DirectionButtonGap * 4) / 5, 48, 80);
+        var dirY = controlsY + GetControlRows(4, controlColumns) * (ControlButtonHeight + ControlRowGap) + 10;
+        var directionButtonWidth = CalculateDirectionButtonWidth(controlsAvailable);
         var directions = new[]
         {
             (Value: -1, Label: ModText.Get("ui.transferBus.direction.all")),
@@ -127,15 +205,70 @@ internal sealed class RemoteTransferBusMenu : IClickableMenu
         this.backpackGrid.SetBounds(this.invArea);
     }
 
+    internal static bool LayoutFits(int menuWidth, int menuHeight = 640, int inventorySlotCount = 36)
+    {
+        var controlsX = Pad + FilterColumns * FilterCell + 34;
+        var controlsAvailable = menuWidth - Pad - controlsX;
+        var controlColumns = CalculateControlColumns(controlsAvailable);
+        var controlWidth = CalculateControlButtonWidth(controlsAvailable, controlColumns);
+        var directionWidth = CalculateDirectionButtonWidth(controlsAvailable);
+        var filterRight = Pad + FilterColumns * FilterCell;
+        var upgradeRight = Pad + UpgradeColumns * UpgradeCell;
+        var controlRight = controlsX + Math.Min(controlColumns, 3) * controlWidth + Math.Max(0, Math.Min(controlColumns, 3) - 1) * ControlButtonGap;
+        var directionRight = controlsX + 5 * directionWidth + 4 * DirectionButtonGap;
+        var backpackColumns = SVSAPBackpackGrid.GetColumnCount(menuWidth - Pad * 2, BackpackCell);
+        var backpackRows = Math.Max(1, (int)Math.Ceiling(Math.Max(1, inventorySlotCount) / (double)backpackColumns));
+        var inventoryTop = menuHeight - Pad - backpackRows * BackpackCell;
+        var filterTop = SVSAPMenuWidgets.ContentTopOffset + 56;
+        var filterBottom = filterTop + FilterRows * FilterCell;
+        var upgradeBottom = SVSAPMenuWidgets.ContentTopOffset + UpgradeRows * UpgradeCell;
+        return filterRight <= menuWidth - Pad
+            && upgradeRight <= menuWidth - Pad
+            && controlRight <= menuWidth - Pad
+            && directionRight <= menuWidth - Pad
+            && upgradeBottom + 10 <= filterTop
+            && filterBottom + 12 <= inventoryTop
+            && controlColumns >= 1
+            && directionWidth >= DirectionButtonMinWidth;
+    }
+
+    private static int CalculateControlColumns(int availableWidth)
+    {
+        if (availableWidth >= ControlButtonWidth * 3 + ControlButtonGap * 2)
+            return 3;
+        if (availableWidth >= ControlButtonWidth * 2 + ControlButtonGap)
+            return 2;
+        return 1;
+    }
+
+    private static int CalculateControlButtonWidth(int availableWidth, int columns)
+    {
+        var fitWidth = (availableWidth - Math.Max(0, columns - 1) * ControlButtonGap) / Math.Max(1, columns);
+        return Math.Clamp(fitWidth, 72, ControlButtonWidth);
+    }
+
+    private static int CalculateDirectionButtonWidth(int availableWidth)
+    {
+        var fitWidth = (availableWidth - DirectionButtonGap * 4) / 5;
+        return Math.Clamp(fitWidth, DirectionButtonMinWidth, DirectionButtonMaxWidth);
+    }
+
+    private static int GetControlRows(int count, int columns)
+    {
+        return Math.Max(1, (int)Math.Ceiling(count / (double)Math.Max(1, columns)));
+    }
+
     public override void draw(SpriteBatch b)
     {
         SVSAPMenuWidgets.DrawStardewAE2Frame(b, new Rectangle(this.xPositionOnScreen, this.yPositionOnScreen, this.width, this.height));
-        Utility.drawTextWithShadow(b, this.Snapshot.DisplayName, Game1.dialogueFont, new Vector2(this.xPositionOnScreen + Pad + 12, this.yPositionOnScreen + 26), Game1.textColor);
+        SVSAPMenuWidgets.DrawFittedTitle(
+            b,
+            this.Snapshot.DisplayName,
+            new Rectangle(this.xPositionOnScreen + Pad + 12, this.yPositionOnScreen + 18, this.width - Pad * 2 - 104, 36),
+            Game1.textColor);
 
-        if (this.requestPending)
-        {
-            b.DrawString(Game1.smallFont, ModText.Get("remoteTerminal.pendingInline"), new Vector2(this.xPositionOnScreen + Pad + 320, this.yPositionOnScreen + 34), Color.Firebrick);
-        }
+        if (this.requestPending || this.snapshotRequestPending)
+            SVSAPMenuWidgets.DrawPixelStatusLight(b, this.xPositionOnScreen + this.width - 96, this.yPositionOnScreen + 38, PixelStatus.Processing);
 
         var slots = this.Snapshot.TransferBus?.FilterSlots ?? new List<RemoteTransferFilterSlotMessage>();
         var upgrades = this.Snapshot.TransferBus?.UpgradeSlots ?? new List<RemoteTransferUpgradeSlotMessage>();
@@ -151,6 +284,12 @@ internal sealed class RemoteTransferBusMenu : IClickableMenu
 
     public override void receiveLeftClick(int x, int y, bool playSound = true)
     {
+        if (this.upperRightCloseButton?.containsPoint(x, y) == true)
+        {
+            base.receiveLeftClick(x, y, playSound);
+            return;
+        }
+
         base.receiveLeftClick(x, y, playSound);
 
         if (this.requestPending)
@@ -224,10 +363,7 @@ internal sealed class RemoteTransferBusMenu : IClickableMenu
             return;
         }
 
-        this.requestPending = true;
-        this.snapshotAtTick = Game1.ticks;
-        this.requestRefresh();
-        Game1.playSound("shwip");
+        base.receiveRightClick(x, y, playSound);
     }
 
     private void DrawFilterSlots(SpriteBatch b, IReadOnlyList<RemoteTransferFilterSlotMessage> slots)
@@ -245,21 +381,12 @@ internal sealed class RemoteTransferBusMenu : IClickableMenu
             if (view?.Occupied != true || string.IsNullOrWhiteSpace(view.QualifiedItemId))
                 continue;
 
-            try
+            var item = this.itemIconCache.GetOrCreate(
+                $"filter:{view.QualifiedItemId}",
+                () => SVSAPMenuWidgets.CreateIconItem(view.QualifiedItemId));
+            if (item is not null)
             {
-                ItemRegistry.Create(view.QualifiedItemId).drawInMenu(
-                    b,
-                    new Vector2(cell.X + SVSAPMenuWidgets.IconInset, cell.Y + SVSAPMenuWidgets.IconInset),
-                    1f,
-                    1f,
-                    0.86f,
-                    StackDrawType.Hide,
-                    Color.White * 0.58f,
-                    true);
-            }
-            catch
-            {
-                // The host-authored text still identifies unknown local items.
+                SVSAPMenuWidgets.DrawItemInSlot(b, item, cell, 1, tint: Color.White * 0.58f);
             }
         }
     }
@@ -277,13 +404,12 @@ internal sealed class RemoteTransferBusMenu : IClickableMenu
                 DrawSelection(b, cell);
             if (view?.Occupied == true && !string.IsNullOrWhiteSpace(view.QualifiedItemId))
             {
-                try
+                var item = this.itemIconCache.GetOrCreate(
+                    $"upgrade:{view.QualifiedItemId}",
+                    () => SVSAPMenuWidgets.CreateIconItem(view.QualifiedItemId));
+                if (item is not null)
                 {
-                    ItemRegistry.Create(view.QualifiedItemId).drawInMenu(b, new Vector2(cell.X + 2, cell.Y + 2), 0.58f, 1f, 0.86f, StackDrawType.Hide, Color.White, true);
-                }
-                catch
-                {
-                    // Host text remains available when the client lacks the item definition.
+                    SVSAPMenuWidgets.DrawItemInSlot(b, item, cell, 1, 0.58f);
                 }
             }
             else
@@ -444,8 +570,8 @@ internal sealed class RemoteTransferBusMenu : IClickableMenu
         if (!this.filterArea.Contains(x, y))
             return -1;
 
-        var column = (x - this.filterArea.X) / SVSAPMenuWidgets.Cell;
-        var row = (y - this.filterArea.Y) / SVSAPMenuWidgets.Cell;
+        var column = (x - this.filterArea.X) / FilterCell;
+        var row = (y - this.filterArea.Y) / FilterCell;
         if (column < 0 || column >= FilterColumns || row < 0 || row >= FilterRows)
             return -1;
 
@@ -457,10 +583,10 @@ internal sealed class RemoteTransferBusMenu : IClickableMenu
         var column = index % FilterColumns;
         var row = index / FilterColumns;
         return new Rectangle(
-            this.filterArea.X + column * SVSAPMenuWidgets.Cell,
-            this.filterArea.Y + row * SVSAPMenuWidgets.Cell,
-            SVSAPMenuWidgets.Cell - 4,
-            SVSAPMenuWidgets.Cell - 4);
+            this.filterArea.X + column * FilterCell,
+            this.filterArea.Y + row * FilterCell,
+            FilterCell - 4,
+            FilterCell - 4);
     }
 
     private int HitUpgradeSlot(int x, int y)
@@ -485,10 +611,36 @@ internal sealed class RemoteTransferBusMenu : IClickableMenu
 
     private void RunAction(StructuralActionKind kind, int slotIndex = -1, string itemId = "", int direction = -1, Item? heldItem = null)
     {
-        this.requestPending = true;
+        if (this.snapshotRequestPending)
+        {
+            Game1.addHUDMessage(new HUDMessage(ModText.Get("remoteTerminal.requestPending"), HUDMessage.error_type));
+            Game1.playSound("cancel");
+            return;
+        }
+
         this.snapshotAtTick = Game1.ticks;
-        this.sendAction(kind, slotIndex, itemId, direction, heldItem);
-        Game1.playSound("smallSelect");
+        this.requestPending = this.sendAction(kind, slotIndex, itemId, direction, heldItem);
+        if (this.requestPending)
+            this.actionRequestAtTick = Game1.ticks;
+        Game1.playSound(this.requestPending ? "smallSelect" : "cancel");
+    }
+
+    private bool RequestRefresh()
+    {
+        if (this.requestPending)
+            return false;
+
+        var tick = Game1.ticks;
+        if (this.snapshotRequestPending
+            && !RemoteSnapshotSessionRules.HasTimedOut(this.snapshotRequestAtTick, tick, SnapshotRequestTimeoutTicks))
+        {
+            return false;
+        }
+
+        this.snapshotAtTick = tick;
+        this.snapshotRequestAtTick = tick;
+        this.snapshotRequestPending = this.requestRefresh();
+        return this.snapshotRequestPending;
     }
 
     private static Rectangle GetControlButtonBounds(int x, int y, int index, int columns, int width)
@@ -497,7 +649,7 @@ internal sealed class RemoteTransferBusMenu : IClickableMenu
         var row = index / Math.Max(1, columns);
         return new Rectangle(
             x + column * (width + ControlButtonGap),
-            y + row * (ControlButtonHeight + 12),
+            y + row * (ControlButtonHeight + ControlRowGap),
             width,
             ControlButtonHeight);
     }
